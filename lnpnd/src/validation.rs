@@ -114,7 +114,7 @@ pub(crate) fn validate_stamp_value(
 pub fn reprice_stored_values(
     store: &mut leviculum_std::FilePropagationStore,
 ) -> Result<usize, leviculum_lxmf::storage::StorageError> {
-    use leviculum_lxmf::PropagationStore as _;
+    use leviculum_lxmf::{PropagationBodyStore as _, PropagationStore as _};
 
     if store.stamp_values_true() {
         return Ok(0);

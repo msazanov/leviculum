@@ -412,5 +412,8 @@ lnsd`, which is enough.
   page for each (`man lnsd`, …).
 - [Configuration](guide/configuration.md) for the format reference.
 - [Installation](guide/installation.md) for the source-build path.
+- [Zero-config lnsd](concepts/zero-config.md) for the start without
+  a configuration file this guide still writes by hand: what lnsd does
+  today, and the automatic layer it is getting.
 - The upstream [Reticulum Manual](https://reticulum.network/manual/)
   for the protocol itself.

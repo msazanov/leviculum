@@ -150,6 +150,14 @@ struct MailboxServer {
     acknowledgement_requests: usize,
     purge_rounds: Vec<Vec<TransientId>>,
     response_used_resource: bool,
+    /// Answer `/get` the way the reference node does
+    /// (`reference/LXMF/LXMF/LXMRouter.py:1482-1556`): purge confirmed
+    /// `haves`, serve each wanted message still held once, and accept any
+    /// phase in any order. Off, the server asserts the exact exchange the
+    /// end-to-end drain expects.
+    reference_node: bool,
+    /// Message bodies served across all `/get` answers.
+    served: usize,
 }
 
 struct UploadSink {
@@ -185,6 +193,9 @@ impl UploadSink {
 
 impl MailboxServer {
     fn respond(&mut self, link_id: LinkId, request_id: [u8; 16], data: &[u8]) -> TickOutput {
+        if self.reference_node {
+            return self.respond_as_reference(link_id, request_id, data);
+        }
         let request = MessageGetRequest::decode(data).expect("valid client /get request");
         let (response, expect_resource) = match (
             request.wants.as_deref(),
@@ -249,6 +260,55 @@ impl MailboxServer {
                     expect_resource,
                     "small mailbox response required a Resource"
                 );
+                self.response_used_resource = true;
+                self.node
+                    .send_response_resource(&link_id, &request_id, &response)
+                    .expect("send mailbox response Resource")
+                    .1
+            }
+            Err(error) => panic!("mailbox response failed: {error:?}"),
+        }
+    }
+
+    fn respond_as_reference(
+        &mut self,
+        link_id: LinkId,
+        request_id: [u8; 16],
+        data: &[u8],
+    ) -> TickOutput {
+        let request = MessageGetRequest::decode(data).expect("valid client /get request");
+        let response = if request.wants.is_none() && request.haves.is_none() {
+            self.list_requests += 1;
+            MessageListResponse::TransientIds(self.mailbox.iter().copied().collect())
+                .encode()
+                .expect("list response")
+        } else {
+            if request.wants.is_some() {
+                self.download_requests += 1;
+            } else {
+                self.acknowledgement_requests += 1;
+            }
+            let haves = request.haves.unwrap_or_default();
+            if !haves.is_empty() {
+                self.purge_rounds.push(haves.clone());
+            }
+            for transient_id in &haves {
+                self.mailbox.remove(transient_id);
+            }
+            let mut messages = Vec::new();
+            for transient_id in request.wants.unwrap_or_default() {
+                if transient_id == self.fresh && self.mailbox.contains(&transient_id) {
+                    messages.push(self.fresh_bytes.clone());
+                }
+            }
+            self.served += messages.len();
+            MessageGetResponse::Messages(messages)
+                .encode()
+                .expect("download response")
+        };
+        match self.node.send_response(&link_id, &request_id, &response) {
+            Ok(output) => output,
+            Err(RequestError::PayloadTooLarge) => {
                 self.response_used_resource = true;
                 self.node
                     .send_response_resource(&link_id, &request_id, &response)
@@ -1182,11 +1242,26 @@ struct MailboxPair {
 }
 
 fn mailbox_pair() -> MailboxPair {
+    mailbox_pair_with(PropagationClientConfig::default())
+}
+
+/// The message source every mailbox fixture signs with.
+fn mailbox_source() -> (Identity, DestinationHash) {
+    let source = identity(101);
+    let source_hash = Destination::compute_destination_hash(
+        &Destination::compute_name_hash(APP_NAME, &[DELIVERY_ASPECT]),
+        source.hash(),
+    );
+    (source, source_hash)
+}
+
+/// A mailbox client on the fixture's delivery identity, on a node of its
+/// own. Called twice, it gives two devices sharing one identity.
+fn mailbox_client(config: PropagationClientConfig) -> (ClientHarness, Rc<Cell<u64>>) {
     let client_identity = identity(1);
     let client_identity_hash = *client_identity.hash();
     let client_delivery =
         LxmfNode::delivery_destination(identity_copy(&client_identity)).expect("delivery");
-    let client_delivery_hash = *client_delivery.hash();
     let client_propagation =
         PropagationTransport::destination(identity_copy(&client_identity)).expect("client PN");
 
@@ -1197,15 +1272,27 @@ fn mailbox_pair() -> MailboxPair {
         .expect("register propagation client");
     let mut router = LxmfRouter::new(lxmf, client_identity_hash, RouterConfig::default());
     router
-        .enable_propagation_client(propagation, PropagationClientConfig::default())
+        .enable_propagation_client(propagation, config)
         .expect("matching propagation identity");
 
-    let source = identity(101);
-    let source_hash = Destination::compute_destination_hash(
-        &Destination::compute_name_hash(APP_NAME, &[DELIVERY_ASPECT]),
-        source.hash(),
-    );
+    let (source, source_hash) = mailbox_source();
     client_node.remember_identity(source_hash, public_identity(&source));
+    let client = ClientHarness {
+        node: client_node,
+        router,
+        events: Vec::new(),
+    };
+    (client, client_clock)
+}
+
+fn mailbox_pair_with(config: PropagationClientConfig) -> MailboxPair {
+    let client_identity = identity(1);
+    let client_identity_hash = *client_identity.hash();
+    let client_delivery_hash = *LxmfNode::delivery_destination(identity_copy(&client_identity))
+        .expect("delivery")
+        .hash();
+    let (mut client, client_clock) = mailbox_client(config);
+    let (source, source_hash) = mailbox_source();
 
     let (mut server_node, server_clock) = node_and_clock();
     let server_identity = identity(51);
@@ -1268,11 +1355,8 @@ fn mailbox_pair() -> MailboxPair {
         acknowledgement_requests: 0,
         purge_rounds: Vec::new(),
         response_used_resource: false,
-    };
-    let mut client = ClientHarness {
-        node: client_node,
-        router,
-        events: Vec::new(),
+        reference_node: false,
+        served: 0,
     };
     client
         .router
@@ -1399,10 +1483,127 @@ fn in_memory_mailbox_client_discovers_downloads_delivers_and_purges() {
     assert!(client.router.delivered_ids.contains_key(&message_id));
 }
 
+/// Discover the mailbox server by its announce, select it and drain once.
+fn discover_and_drain(client: &mut ClientHarness, server: &mut MailboxServer) {
+    let announce = server
+        .node
+        .announce_destination(
+            &server.propagation_destination,
+            Some(&propagation_announce()),
+        )
+        .expect("announce propagation node");
+    pump(client, server, Vec::new(), take_packets(announce.actions));
+    let selected = client
+        .router
+        .set_outbound_propagation_node(&mut client.node, Some(server.propagation_destination))
+        .expect("select propagation node");
+    let to_server = client.absorb_router(selected);
+    pump(client, server, to_server, Vec::new());
+    drain(client, server);
+}
+
+fn drain(client: &mut ClientHarness, server: &mut MailboxServer) {
+    let requested = client
+        .router
+        .request_messages_from_propagation_node(&mut client.node, None)
+        .expect("request mailbox");
+    let to_server = client.absorb_router(requested);
+    pump(client, server, to_server, Vec::new());
+}
+
+fn received_ids(client: &ClientHarness) -> Vec<[u8; 32]> {
+    client
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            RouterEvent::MessageReceived(message) => Some(message.message_id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// mvr for 1098 (Refs #232): `retain_synced_on_node` keeps a downloaded
+/// message on the node, so a second device on the same identity receives it
+/// too, and the first device does not fetch it again.
+///
+/// The reference client honours the flag only in its have-list
+/// (`reference/LXMF/LXMF/LXMRouter.py:1581-1583`) and acknowledges every
+/// download unconditionally (`:1623-1638`, "TODO: Add option to keep
+/// messages on node"), which purges it on the node (`:1508-1519`). Red
+/// before the fix: the acknowledgement emptied the mailbox and the second
+/// device found nothing.
+#[test]
+fn retain_synced_on_node_leaves_a_download_for_a_second_device() {
+    let retain = PropagationClientConfig {
+        retain_synced_on_node: true,
+        ..PropagationClientConfig::default()
+    };
+    let MailboxPair {
+        mut client,
+        mut server,
+        message_id,
+        ..
+    } = mailbox_pair_with(retain);
+    server.reference_node = true;
+    let fresh = server.fresh;
+    let already_have = server.already_have;
+
+    discover_and_drain(&mut client, &mut server);
+    assert_eq!(received_ids(&client), vec![message_id]);
+    assert_eq!(server.served, 1);
+    assert_eq!(server.acknowledgement_requests, 0);
+    assert!(server.purge_rounds.is_empty());
+    assert!(server.mailbox.contains(&fresh));
+    assert!(server.mailbox.contains(&already_have));
+
+    // The retained message is in the router's store now, so the have-path
+    // filters it: a second drain of the same device fetches nothing.
+    drain(&mut client, &mut server);
+    assert_eq!(received_ids(&client), vec![message_id]);
+    assert_eq!(server.list_requests, 2);
+    assert_eq!(server.served, 1);
+    assert_eq!(server.acknowledgement_requests, 0);
+    assert!(server.mailbox.contains(&fresh));
+
+    // A second device on the same identity finds the message still there.
+    let (mut second, _clock) = mailbox_client(retain);
+    discover_and_drain(&mut second, &mut server);
+    assert_eq!(received_ids(&second), vec![message_id]);
+    assert_eq!(server.served, 2);
+    assert_eq!(server.acknowledgement_requests, 0);
+}
+
+/// The counterpart of the mvr above: without the flag the download is
+/// acknowledged and the node purges it, so a second device finds nothing.
+#[test]
+fn without_retain_a_download_is_acknowledged_and_purged() {
+    let MailboxPair {
+        mut client,
+        mut server,
+        message_id,
+        ..
+    } = mailbox_pair();
+    server.reference_node = true;
+    let fresh = server.fresh;
+    let already_have = server.already_have;
+
+    discover_and_drain(&mut client, &mut server);
+    assert_eq!(received_ids(&client), vec![message_id]);
+    assert_eq!(server.served, 1);
+    assert_eq!(server.acknowledgement_requests, 1);
+    assert_eq!(server.purge_rounds, vec![vec![already_have], vec![fresh]]);
+    assert!(server.mailbox.is_empty());
+
+    let (mut second, _clock) = mailbox_client(PropagationClientConfig::default());
+    discover_and_drain(&mut second, &mut server);
+    assert!(received_ids(&second).is_empty());
+    assert_eq!(server.served, 1);
+}
+
 /// mvr for leviculum#699: a drain whose first path request is lost still
 /// reaches the node inside the path window.
 ///
-/// `lnmsg fetch` right after its daemon starts sent its one path request in
+/// `loquax fetch` right after its daemon starts sent its one path request in
 /// the same second the daemon's TCP interface reconnected to the node; the
 /// daemon had no interface to send it on, dropped it, and the client waited
 /// out the whole window for an answer to a request nobody received, then
@@ -1485,7 +1686,7 @@ fn a_drain_survives_losing_its_first_path_request() {
 /// leviculum#719: with a budget of its own, a drain keeps asking for the path
 /// until that budget ends, not for a fixed two requests.
 ///
-/// A 60 s `lnmsg fetch` sent its requests at 0 and 7 s and reported `NoPath`
+/// A 60 s `loquax fetch` sent its requests at 0 and 7 s and reported `NoPath`
 /// at 14 s with 46 s unused. Here the first three requests (0, 7, 14 s) are
 /// lost and the fourth, at 21 s, is answered inside a 60 s budget.
 #[test]

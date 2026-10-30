@@ -29,6 +29,8 @@
 //! compile time from the payload, never hardcoded, and the tests assert
 //! the result against independently computed fixtures so a checksum bug
 //! cannot self-confirm.
+//!
+//! The M9's AG3352 runs the AG3335 sequence behind a sleep lock ([`airoha::AirohaInit::ag3352`]).
 
 #![cfg_attr(not(test), no_std)]
 

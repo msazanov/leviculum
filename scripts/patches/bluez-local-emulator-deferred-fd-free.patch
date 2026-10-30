@@ -1,0 +1,124 @@
+Local bluez patch, not upstream. Applied by scripts/install-btvirt.sh to the
+`apt-get source bluez` tree AFTER bluez-4ff7deaf8c-emulator-receiving-side-
+handle.patch, bluez-local-emulator-legacy-adv-every-interval.patch and
+bluez-local-emulator-max-btdev-24.patch, before building emulator/btvirt.
+Those three touch emulator/btdev.c only, so this one fits the stock tree and
+theirs alike.
+
+  tag:      deferred-fd-free (the name the provenance sidecar carries)
+  subject:  emulator: defer freeing a removed fd until the dispatch batch ends
+  cut:      2026-10-24, against bluez 5.82-1.1 (Debian) + 4ff7deaf8c
+            + adv-every-interval + max-btdev-24, 4 hunks
+  files:    src/shared/mainloop.c only (btvirt links src/libshared-mainloop)
+
+WHAT IT CHANGES
+
+`mainloop_run` copies one epoll_wait batch into a local `events[]` and calls
+each entry's `data->callback` without asking whether `data` is still live.
+`mainloop_remove_fd` unlinks the fd, does EPOLL_CTL_DEL, calls `destroy` and
+frees `data` at once, also when a callback earlier in the same batch called
+it. EPOLL_CTL_DEL cannot reach the copy already in `events[]`, so a later
+entry of that batch dereferences released memory, and once a callback has
+also added an fd, the allocator hands that chunk to the new fd and the stale
+entry runs the wrong callback.
+
+With the patch a removal during batch dispatch still unlinks, still
+EPOLL_CTL_DELs and still calls `destroy` straight away, but marks the data
+removed and queues it instead of freeing it. The rest of the batch skips
+removed entries, and the queue is freed when the batch ends. A removal
+outside dispatch frees immediately, as before.
+
+THE MEASUREMENT (order 955, 2026-10-24, scripts/btvirt-churn.sh)
+
+On the three-patch binary (md5 d4a62600d53aa83e102d71d9034c20a7) the churn
+bench recorded 50 unexpected btvirt exits in 3625 iterations, every one a
+SIGSEGV at the same site, and no run reached its window. On the four-patch
+binary (md5 2484faa5cfe1e5defb5f04763a8ac87a, built by install-btvirt.sh)
+`--runs 8 --window 30` drove 12000 iterations, every run lasted its full
+window, 0 unexpected exits and 0 kernel lines naming btvirt. The same bench
+against the three-patch binary the same day: 2 runs, 54 iterations, 2
+SIGSEGV exits, so it still bites.
+
+patch(1) ignores this header.
+
+--- a/src/shared/mainloop.c
++++ b/src/shared/mainloop.c
+@@ -15,6 +15,7 @@
+ 
+ #define _GNU_SOURCE
+ #include <stdio.h>
++#include <stdbool.h>
+ #include <errno.h>
+ #include <unistd.h>
+ #include <stdlib.h>
+@@ -42,12 +43,35 @@
+ 	mainloop_event_func callback;
+ 	mainloop_destroy_func destroy;
+ 	void *user_data;
++	bool removed;
++	struct mainloop_data *next_removed;
+ };
+ 
+ #define MAX_MAINLOOP_ENTRIES 128
+ 
+ static struct mainloop_data *mainloop_list[MAX_MAINLOOP_ENTRIES];
+ 
++/*
++ * While mainloop_run dispatches one epoll_wait batch, its local events[]
++ * still holds the pointer of every fd in that batch. A callback that
++ * removes another fd of the same batch must not free that fd's data, or a
++ * later entry dereferences released memory (and, once the allocator hands
++ * the chunk to a new mainloop_add_fd, the wrong fd's callback). Such data
++ * is marked removed, skipped by the rest of the batch, and freed after it.
++ */
++static bool dispatching;
++static struct mainloop_data *removed_list;
++
++static void free_removed(void)
++{
++	while (removed_list) {
++		struct mainloop_data *data = removed_list;
++
++		removed_list = data->next_removed;
++		free(data);
++	}
++}
++
+ struct timeout_data {
+ 	int fd;
+ 	mainloop_timeout_func callback;
+@@ -100,12 +124,20 @@
+ 		if (nfds < 0)
+ 			continue;
+ 
++		dispatching = true;
++
+ 		for (n = 0; n < nfds; n++) {
+ 			struct mainloop_data *data = events[n].data.ptr;
+ 
++			if (data->removed)
++				continue;
++
+ 			data->callback(data->fd, events[n].events,
+ 							data->user_data);
+ 		}
++
++		dispatching = false;
++		free_removed();
+ 	}
+ 
+ 	for (i = 0; i < MAX_MAINLOOP_ENTRIES; i++) {
+@@ -212,7 +244,12 @@
+ 	if (data->destroy)
+ 		data->destroy(data->user_data);
+ 
+-	free(data);
++	if (dispatching) {
++		data->removed = true;
++		data->next_removed = removed_list;
++		removed_list = data;
++	} else
++		free(data);
+ 
+ 	return err;
+ }

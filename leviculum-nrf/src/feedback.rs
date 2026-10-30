@@ -28,15 +28,12 @@
 //!
 //! A sink a board does not have is never asked, so it writes no line.
 //!
-//! What raises a pattern: [`status`](crate::feedback::status) (a short
-//! press, after the display wake),
-//! [`release_now`](crate::feedback::release_now) (a held button reaching
-//! 2 s), [`notify`](crate::feedback::notify) (the propagation role
-//! storing a message for this board's own `lxmf.delivery` destination) and
-//! [`report_delivered`](crate::feedback::report_delivered) (the proof of
-//! the report a double press sent, order 914).
-//! The mode blink ([`leviculum_feedback::mode`]) has no caller until
-//! Tracker mode exists.
+//! Which event raises which pattern on which sink is
+//! `leviculum_firmware::feedback`'s since #469 973; this module is the
+//! other side of its `Sinks` seam:
+//! [`NrfSinks`](crate::feedback::NrfSinks), registered at boot with
+//! `leviculum_firmware::feedback::set_sinks`, hands a pattern to the
+//! player of its sink.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -47,42 +44,22 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use leviculum_feedback::{Pattern, Phase, Playback};
+pub use leviculum_firmware::feedback::Sink;
+use leviculum_firmware::seams::Sinks;
 
-/// Where a pattern plays.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Sink {
-    /// The board's LED.
-    Led,
-    /// The notification LED (Pocket V2, Solar Node).
-    Notify,
-    /// The buzzer (T1000-E).
-    Buzzer,
+fn signal(sink: Sink) -> &'static Signal<CriticalSectionRawMutex, Pattern> {
+    match sink {
+        Sink::Led => &LED,
+        Sink::Notify => &NOTIFY,
+        Sink::Buzzer => &BUZZER,
+    }
 }
 
-impl Sink {
-    /// The `sink=` token of the `FEEDBACK` line.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Sink::Led => "led",
-            Sink::Notify => "notify",
-            Sink::Buzzer => "buzzer",
-        }
-    }
-
-    fn signal(self) -> &'static Signal<CriticalSectionRawMutex, Pattern> {
-        match self {
-            Sink::Led => &LED,
-            Sink::Notify => &NOTIFY,
-            Sink::Buzzer => &BUZZER,
-        }
-    }
-
-    fn present(self) -> &'static AtomicBool {
-        match self {
-            Sink::Led => &HAS_LED,
-            Sink::Notify => &HAS_NOTIFY,
-            Sink::Buzzer => &HAS_BUZZER,
-        }
+fn present(sink: Sink) -> &'static AtomicBool {
+    match sink {
+        Sink::Led => &HAS_LED,
+        Sink::Notify => &HAS_NOTIFY,
+        Sink::Buzzer => &HAS_BUZZER,
     }
 }
 
@@ -99,72 +76,26 @@ static HAS_LED: AtomicBool = AtomicBool::new(false);
 static HAS_NOTIFY: AtomicBool = AtomicBool::new(false);
 static HAS_BUZZER: AtomicBool = AtomicBool::new(false);
 
-fn raise(sink: Sink, pattern: Pattern) {
-    if sink.present().load(Ordering::Relaxed) {
-        sink.signal().signal(pattern);
+/// The board's [`Sinks`]: a sink is present once its player is spawned,
+/// and a pattern played on it is handed to that player's signal.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NrfSinks;
+
+impl Sinks for NrfSinks {
+    fn present(&self, sink: Sink) -> bool {
+        present(sink).load(Ordering::Relaxed)
     }
-}
 
-/// A short press: the battery in quarters on the LED and the buzzer. A
-/// board without a percentage (no `battery` feature, or a pack outside the
-/// band its cell count implies, `crate::battery`) plays nothing: a rig
-/// board on USB without a pack is not in error. It writes one
-/// `FEEDBACK pattern=none reason=no-percentage sink=led` line instead, so
-/// the rig tells "quiet by rule" from "the hook did not fire".
-pub fn status() {
-    #[cfg(feature = "battery")]
-    let pct = crate::baseboard::BATTERY_STATE
-        .try_get()
-        .and_then(|state| state.percent);
-    #[cfg(not(feature = "battery"))]
-    let pct: Option<u8> = None;
-    match leviculum_feedback::status(pct) {
-        Some(pattern) => {
-            raise(Sink::Led, pattern);
-            raise(Sink::Buzzer, pattern);
-        }
-        None => crate::log::log_fmt(
-            "",
-            format_args!("FEEDBACK pattern=none reason=no-percentage sink=led"),
-        ),
+    fn play(&self, sink: Sink, pattern: Pattern) {
+        signal(sink).signal(pattern);
     }
-}
-
-/// A held button has reached the long press: one blip on the LED and the
-/// buzzer.
-pub fn release_now() {
-    let pattern = leviculum_feedback::release_now();
-    raise(Sink::Led, pattern);
-    raise(Sink::Buzzer, pattern);
-}
-
-/// A message for the user arrived: one short on the notification LED where
-/// the board has one, else on the LED, and one short buzz where there is a
-/// buzzer.
-pub fn notify() {
-    let pattern = leviculum_feedback::notify();
-    if HAS_NOTIFY.load(Ordering::Relaxed) {
-        raise(Sink::Notify, pattern);
-    } else {
-        raise(Sink::Led, pattern);
-    }
-    raise(Sink::Buzzer, pattern);
-}
-
-/// The report a double press sent was proven delivered (order 914): two
-/// short on the LED and the buzzer, the sinks the press's own status answer
-/// uses. A report whose proof never comes plays nothing.
-pub fn report_delivered() {
-    let pattern = leviculum_feedback::report_delivered();
-    raise(Sink::Led, pattern);
-    raise(Sink::Buzzer, pattern);
 }
 
 /// Play `pattern` on `sink` through `drive` (`true` = on) until it ends,
 /// starting over with any pattern raised on the same sink meanwhile. One
 /// `FEEDBACK` line per pattern started. Returns with the sink off.
 async fn play(mut pattern: Pattern, sink: Sink, mut drive: impl FnMut(bool)) {
-    let signal = sink.signal();
+    let signal = signal(sink);
     loop {
         crate::log::log_fmt(
             "",
@@ -205,16 +136,27 @@ async fn play(mut pattern: Pattern, sink: Sink, mut drive: impl FnMut(bool)) {
 const ACTIVITY_ON_MS: u64 = 80;
 const ACTIVITY_OFF_MS: u64 = 30;
 
+/// How long the boot blink holds the LED lit. The length the spin it
+/// replaced had on the T114 (12 M `nop`s, 2093 ms between `post-init` and
+/// `blink_done` on d5981450, order 1055), now on a timer, so the executor
+/// runs the USB task meanwhile instead of waiting for it.
+pub const BOOT_BLINK_MS: u64 = 2_100;
+
 /// An LED player. `activity`, where given, is the Pocket V2's LoRa TX or
 /// RX pulse signal: the LED pulses on it while no pattern plays, and the
 /// pulses raised during a pattern are dropped, so a pattern is never cut
 /// into by traffic and never followed by a stale flash.
+///
+/// `boot_blink` lights the LED for [`BOOT_BLINK_MS`] before the player
+/// starts, then stamps `[BOOT_TRACE] stage=blink_done`. A pattern raised
+/// meanwhile waits in its signal and plays once the blink is over.
 #[embassy_executor::task(pool_size = 2)]
 pub async fn led_task(
     mut led: Output<'static>,
     active_high: bool,
     sink: Sink,
     activity: Option<&'static Signal<CriticalSectionRawMutex, ()>>,
+    boot_blink: bool,
 ) {
     let mut set = move |on: bool| {
         if on == active_high {
@@ -223,8 +165,14 @@ pub async fn led_task(
             led.set_low();
         }
     };
+    if boot_blink {
+        set(true);
+        Timer::after(Duration::from_millis(BOOT_BLINK_MS)).await;
+        set(false);
+        leviculum_firmware::boot_trace::log_stage("blink_done");
+    }
     set(false);
-    let signal = sink.signal();
+    let signal = signal(sink);
     loop {
         let pattern = match activity {
             Some(pulse) => match select(signal.wait(), pulse.wait()).await {
@@ -255,8 +203,21 @@ pub fn spawn_led(
     sink: Sink,
     activity: Option<&'static Signal<CriticalSectionRawMutex, ()>>,
 ) {
-    spawner.must_spawn(led_task(led, active_high, sink, activity));
-    sink.present().store(true, Ordering::Relaxed);
+    spawner.must_spawn(led_task(led, active_high, sink, activity, false));
+    present(sink).store(true, Ordering::Relaxed);
+}
+
+/// [`spawn_led`] for the board's main LED, opening with the boot blink
+/// (see [`led_task`]). The blink runs on the executor, so `main` goes on
+/// to the main loop and USB enumerates while the LED is still lit.
+pub fn spawn_led_with_boot_blink(
+    spawner: &Spawner,
+    led: Output<'static>,
+    active_high: bool,
+    sink: Sink,
+) {
+    spawner.must_spawn(led_task(led, active_high, sink, None, true));
+    present(sink).store(true, Ordering::Relaxed);
 }
 
 /// The T1000-E buzzer's tone: B3, 247 Hz, the note Meshtastic's own beep

@@ -123,20 +123,22 @@ mod tests {
 
     #[test]
     fn test_python_packet_hashlist_compat() {
-        // Read the actual Python rnsd packet_hashlist file if present
-        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-        let Some(home) = home else { return };
-        let path = home.join(".reticulum/storage/packet_hashlist");
-        if !path.exists() {
-            return;
-        }
-
-        let bytes = std::fs::read(&path).unwrap();
-        let entries = decode_packet_hashlist(&bytes).unwrap();
-        assert!(
-            !entries.is_empty(),
-            "Python packet_hashlist should have entries"
+        // Written by the reference rnsd, not read from the host's
+        // ~/.reticulum: see tests/fixtures/python-storage/README.md.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/python-storage/packet_hashlist"
         );
+        let bytes = std::fs::read(path).unwrap();
+        let entries = decode_packet_hashlist(&bytes)
+            .unwrap_or_else(|e| panic!("{path} does not decode: {e:?}"));
+        assert!(!entries.is_empty(), "{path} decodes to no entries");
+        // Every element of the reference's list is a 32-byte hash, so the
+        // decoder skipped none of them.
+        let listed = rmpv::decode::read_value(&mut &bytes[..])
+            .ok()
+            .and_then(|v| v.as_array().map(Vec::len));
+        assert_eq!(listed, Some(entries.len()), "{path}: entries skipped");
 
         // Verify all entries are 32-byte hashes
         for hash in &entries {

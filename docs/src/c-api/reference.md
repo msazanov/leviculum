@@ -532,6 +532,7 @@ int  lev_event_total_segments(const struct lev_event_t *ev, uint32_t *out);
 | `LEV_CLOSE_STALE` | 4 | inactive past the keepalive deadline |
 | `LEV_CLOSE_CHANNEL_EXHAUSTED` | 5 | a channel message ran out of retries |
 | `LEV_CLOSE_BLACKHOLED` | 6 | peer is blackholed; **do not retry** |
+| `LEV_CLOSE_INTERFACE_REMOVED` | 7 | its interface was removed for good; reconnect |
 | `LEV_CLOSE_OTHER` | 255 | a reason this ABI version does not name |
 
 | Constant | Value | Delivery failure |

@@ -9,6 +9,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_time::Duration;
 
 use embassy_executor::Spawner;
@@ -263,7 +264,27 @@ impl Handler for BaudTouchHandler {
         // appropriate.
         None
     }
+
+    // The two moments a reset's `back_ms` ends on, stamped once per boot
+    // (#469, order 1053). `usb_enabled` is when `usb_task` first ran and
+    // pulled D+ up: the executor reaches it only at main's first real
+    // await, so it measures how long the synchronous boot held the bus
+    // dark. `usb_up` is when the host finished enumerating us.
+    fn enabled(&mut self, enabled: bool) {
+        if enabled && !USB_ENABLED_STAMPED.swap(true, Ordering::Relaxed) {
+            leviculum_firmware::boot_trace::log_stage("usb_enabled");
+        }
+    }
+
+    fn configured(&mut self, configured: bool) {
+        if configured && !USB_UP_STAMPED.swap(true, Ordering::Relaxed) {
+            leviculum_firmware::boot_trace::log_stage("usb_up");
+        }
+    }
 }
+
+static USB_ENABLED_STAMPED: AtomicBool = AtomicBool::new(false);
+static USB_UP_STAMPED: AtomicBool = AtomicBool::new(false);
 
 #[embassy_executor::task]
 async fn usb_task(mut usb: UsbDevice<'static, UsbDriver>) {
@@ -409,7 +430,9 @@ async fn commanded_reset(
     let commanded = embassy_time::Instant::now();
     let facts = ResetFacts {
         softdevice_enabled: softdevice_enabled(),
-        ble_links: crate::ble::HVN_DRAIN.claimed().min(u8::MAX as usize) as u8,
+        ble_links: leviculum_firmware::ble_link::HVN_DRAIN
+            .claimed()
+            .min(u8::MAX as usize) as u8,
         host_present: tx.dtr(),
         since_command_ms: commanded.elapsed().as_millis(),
     };
@@ -767,8 +790,8 @@ async fn retic_serial_task(
                             match envelope::classify_control_frame(data, ACCEPTED_CONTROL_TYPES) {
                                 ControlAction::NotControl => {
                                     log_u32("SER: frame complete", data.len() as u32);
-                                    crate::iface_bytes::note_rx(
-                                        crate::iface_bytes::SERIAL,
+                                    leviculum_firmware::iface_bytes::note_rx(
+                                        leviculum_firmware::iface_bytes::SERIAL,
                                         data.len(),
                                     );
                                     incoming_tx.send(data.clone()).await;
@@ -1062,7 +1085,7 @@ async fn retic_serial_task(
                                     // hashes: REFUSE_BUSY, the host
                                     // retries — the node-name query's
                                     // readiness clause.
-                                    let report = crate::identity::report();
+                                    let report = leviculum_firmware::identity::report();
                                     let answer = envelope::identity_query_answer(report.as_ref());
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
                                         .await
@@ -1103,7 +1126,7 @@ async fn retic_serial_task(
                                     // of it. One atomic store, already
                                     // bounded by the classifier — nothing
                                     // here can fail.
-                                    crate::ble::set_tx_gap_ms(gap_ms);
+                                    leviculum_firmware::ble_link::set_tx_gap_ms(gap_ms);
                                     let answer = envelope::encode_ack(envelope::TYPE_BLE_TX_GAP);
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
                                         .await
@@ -1453,8 +1476,8 @@ async fn retic_serial_task(
                     }
                     // Counted once it reached the host, not when the queue
                     // took it (`leviculum_usb_policy::tx_counted`).
-                    crate::iface_bytes::note_tx(
-                        crate::iface_bytes::SERIAL,
+                    leviculum_firmware::iface_bytes::note_tx(
+                        leviculum_firmware::iface_bytes::SERIAL,
                         leviculum_usb_policy::tx_counted(write_ok, data.len()),
                     );
                 }

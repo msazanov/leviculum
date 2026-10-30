@@ -106,9 +106,8 @@ pub(super) fn build_server(
         .map_err(|e| Error::Config(format!("TCPServerInterface device \"{}\": {}", device, e)))?
     } else {
         let listen_ip = config.listen_ip.as_deref().unwrap_or("0.0.0.0");
-        format!("{}:{}", listen_ip, listen_port)
-            .parse()
-            .map_err(|e| Error::Config(format!("invalid listen address: {}", e)))?
+        super::bind_address(listen_ip, listen_port, config.prefer_ipv6.unwrap_or(false))
+            .map_err(|e| Error::Config(format!("invalid listen address \"{listen_ip}\": {e}")))?
     };
 
     let buffer_size = config.buffer_size.unwrap_or(TCP_DEFAULT_BUFFER_SIZE);

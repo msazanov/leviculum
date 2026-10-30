@@ -100,9 +100,13 @@ pub(super) fn build(
     let handle = match listen_port {
         Some(port) => {
             let listen_addr: SocketAddr =
-                format!("{}:{}", listen_ip, port).parse().map_err(|e| {
-                    Error::Config(format!("UDPInterface invalid listen address: {}", e))
-                })?;
+                super::bind_address(listen_ip, port, config.prefer_ipv6.unwrap_or(false)).map_err(
+                    |e| {
+                        Error::Config(format!(
+                            "UDPInterface invalid listen address \"{listen_ip}\": {e}"
+                        ))
+                    },
+                )?;
             let handle = spawn_udp_interface(id, iface_name, listen_addr, forward_targets)?;
             if forward_desc.is_empty() {
                 tracing::info!("UDP interface listening on {}, not forwarding", listen_addr);

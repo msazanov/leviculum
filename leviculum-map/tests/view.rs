@@ -1,0 +1,536 @@
+//! What slice (c) asked of the core (leviculum 1065): the line widths per
+//! zoom band, the world outline where no region is, the region a view
+//! draws when several are installed, the zooms a frontend offers, and the
+//! order `Tab` steps the pins in.
+
+use embedded_graphics::pixelcolor::Rgb565;
+use embedded_graphics::prelude::*;
+use leviculum_map::choice::{choose, drawn, fit_ceiling, useful_zooms, view_zooms};
+use leviculum_map::draw::{draw, Ink};
+use leviculum_map::mercator::{project, unproject, LatLon, World};
+use leviculum_map::outline::{self, OutlineStats, BORDERS_50M, WORLD_50M};
+use leviculum_map::pins::{order, Pin};
+use leviculum_map::region::{Bounds, Header, Region};
+use leviculum_map::viewport::Viewport;
+use leviculum_mapfill::fill::{Edge, Scratch};
+use leviculum_mapfill::frame::Frame;
+use leviculum_mapfill::render::{NoClock, RenderStats, Work};
+use leviculum_mapfill::style::{MapTheme, Profile, BACKGROUND, BORDER};
+
+const FLORENCE: &[u8] = include_bytes!("../fixtures/firenze.lmr");
+
+const CENTRE: LatLon = LatLon {
+    lat_e7: 437_750_000,
+    lon_e7: 112_610_000,
+};
+
+fn region_view(zoom: u8, ink: Ink, fb: &mut [u16]) -> RenderStats {
+    let r = Region::from_bytes(FLORENCE).expect("open");
+    let view = Viewport::new(project(CENTRE), zoom, 240, 320);
+    let tiles = r.view(&view).expect("tiles");
+    let mut edges = vec![Edge::default(); 4096];
+    let mut active = vec![0u16; 4096];
+    let mut heads = vec![0u16; 320];
+    let mut points = vec![Point::zero(); 4096];
+    let mut ring_ends = vec![0u16; 1024];
+    let mut frame = Frame::new(fb, 240, 320).expect("frame");
+    let mut scratch = Scratch {
+        edges: &mut edges,
+        heads: &mut heads,
+        active: &mut active,
+    };
+    let mut work = Work {
+        points: &mut points,
+        ring_ends: &mut ring_ends,
+    };
+    let Ok(st) = draw(
+        &tiles,
+        Profile::Full,
+        ink,
+        &mut frame,
+        &mut scratch,
+        &mut work,
+        &mut NoClock,
+    );
+    st
+}
+
+fn count(fb: &mut [u16], w: u32, h: u32, colour: Rgb565) -> u32 {
+    let frame = Frame::new(fb, w, h).expect("frame");
+    let mut n = 0;
+    for y in 0..h {
+        for x in 0..w {
+            if frame.pixel(x, y) == Some(colour) {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// The region zooms draw thinner lines and no paths or minor roads where
+/// the fixtures' widths drew a white mesh. Before 1065 the z12 view drew
+/// 543 features and 35,640 stroke pixels, the z11 view 325 and 21,777;
+/// before the secondary roads went a step thinner (1099), 12,885 and 9,574.
+#[test]
+fn region_zooms_draw_thinner_lines() {
+    let mut fb = vec![0u16; 240 * 320];
+    let mut rows = Vec::new();
+    for zoom in [12, 11] {
+        let st = region_view(zoom, Ink::Colour, &mut fb);
+        assert_eq!(st.overflows, 0);
+        rows.push((zoom, st.features, st.stroke.pixels));
+    }
+    assert_eq!(rows, [(12, 537, 11_415), (11, 325, 7_380)]);
+}
+
+/// Lines alone: no area filled, every inked pixel the one colour. Before
+/// the secondary roads went a step thinner (1099): 33,138 stroked, 17,994
+/// inked.
+#[test]
+fn the_lines_ink_fills_nothing() {
+    let ink = Rgb565::new(0, 0, 0);
+    let mut fb = vec![0u16; 240 * 320];
+    let st = region_view(13, Ink::Lines(ink), &mut fb);
+    assert_eq!(st.fill.pixels, 0);
+    let (inked, bg) = (
+        count(&mut fb, 240, 320, ink),
+        count(&mut fb, 240, 320, BACKGROUND),
+    );
+    assert_eq!(inked + bg, 240 * 320, "only the ink and the background");
+    assert_eq!(
+        (st.features, st.stroke.pixels, inked),
+        (283, 31_840, 17_631)
+    );
+}
+
+#[test]
+fn the_outline_table_is_natural_earth_50m() {
+    let rings: Vec<_> = outline::rings(WORLD_50M).collect();
+    assert_eq!(outline::bits(WORLD_50M), Some(18));
+    assert_eq!(rings.len(), 1422);
+    assert_eq!(rings.iter().map(|r| r.len()).sum::<usize>(), 59_239);
+    assert_eq!(rings.iter().filter(|r| r.hole).count(), 1);
+    assert!(WORLD_50M.len() <= 160 * 1024, "{}", WORLD_50M.len());
+    // Every point decodes inside its ring's box, and on the world.
+    for r in &rings {
+        let [w, n, e, s] = r.bbox;
+        assert!(e < 1 << 18 && s < 1 << 18, "{:?}", r.bbox);
+        assert_eq!(r.points().count(), r.len());
+        assert!(r
+            .points()
+            .all(|(x, y)| (w..=e).contains(&x) && (n..=s).contains(&y)));
+    }
+    // Cut short anywhere, it yields fewer rings and never panics.
+    for cut in [0, 4, 5, 6, 15, 1000, WORLD_50M.len() - 1] {
+        assert!(outline::rings(&WORLD_50M[..cut]).count() < 1422);
+    }
+}
+
+/// The 1:50m land boundary lines: every line decodes inside its box, the
+/// ring reader sees none of them, and a table cut short anywhere yields
+/// fewer lines and never panics.
+#[test]
+fn the_border_table_is_natural_earth_50m() {
+    let lines: Vec<_> = outline::lines(BORDERS_50M).collect();
+    assert_eq!(outline::bits(BORDERS_50M), Some(18));
+    assert_eq!(lines.len(), 393);
+    assert_eq!(lines.iter().map(|l| l.len()).sum::<usize>(), 19_760);
+    assert!(lines.iter().all(|l| !l.hole && l.len() >= 2));
+    assert_eq!(BORDERS_50M.len(), 49_512);
+    assert!(BORDERS_50M.len() <= 100 * 1024);
+    for l in &lines {
+        let [w, n, e, s] = l.bbox;
+        assert!(e < 1 << 18 && s < 1 << 18, "{:?}", l.bbox);
+        assert_eq!(l.points().count(), l.len());
+        assert!(l
+            .points()
+            .all(|(x, y)| (w..=e).contains(&x) && (n..=s).contains(&y)));
+    }
+    assert_eq!(outline::rings(BORDERS_50M).count(), 0);
+    assert_eq!(outline::lines(WORLD_50M).count(), 0);
+    for cut in [0, 4, 5, 6, 15, 1000, BORDERS_50M.len() - 1] {
+        assert!(outline::lines(&BORDERS_50M[..cut]).count() < 393);
+    }
+}
+
+fn outline_view(view: &Viewport, ink: Ink, fb: &mut [u16]) -> OutlineStats {
+    let (w, h) = view.size();
+    let mut frame = Frame::new(fb, w, h).expect("frame");
+    let Ok(st) = outline::draw(
+        WORLD_50M,
+        BORDERS_50M,
+        view,
+        ink,
+        MapTheme::Light,
+        &mut frame,
+    );
+    st
+}
+
+fn land_view(view: &Viewport, ink: Ink, fb: &mut [u16]) -> OutlineStats {
+    let (w, h) = view.size();
+    let mut frame = Frame::new(fb, w, h).expect("frame");
+    let Ok(st) = outline::draw(WORLD_50M, &[], view, ink, MapTheme::Light, &mut frame);
+    st
+}
+
+/// The world at z2 with no region: land in the earth colour over water,
+/// and the same view as coasts alone; then both again with the borders.
+#[test]
+fn the_outline_draws_the_world_at_z2() {
+    let view = Viewport::new(project(LatLon::from_degrees(20.0, 10.0)), 2, 240, 160);
+    let mut fb = vec![0u16; 240 * 160];
+    let st = land_view(&view, Ink::Colour, &mut fb);
+    assert_eq!(st.overflows, 0);
+    let land = count(&mut fb, 240, 160, BACKGROUND);
+    let water = count(&mut fb, 240, 160, outline::water(MapTheme::Light));
+    assert_eq!(land + water, 240 * 160);
+    assert_eq!(
+        (st.rings, st.culled, st.vertices, st.fill.pixels, land),
+        (122, 1_300, 4_695, 22_074, 22_074)
+    );
+    assert_eq!((st.borders, st.border.pixels), (0, 0));
+    let st = outline_view(&view, Ink::Colour, &mut fb);
+    let land = count(&mut fb, 240, 160, BACKGROUND);
+    let water = count(&mut fb, 240, 160, outline::water(MapTheme::Light));
+    let border = count(&mut fb, 240, 160, BORDER);
+    assert_eq!(land + water + border, 240 * 160);
+    assert_eq!(
+        (
+            st.rings,
+            st.fill.pixels,
+            st.borders,
+            st.border.pixels,
+            land,
+            border
+        ),
+        (122, 22_074, 166, 2_521, 19_819, 2_292)
+    );
+    let ink = Rgb565::new(0, 0, 0);
+    let st = land_view(&view, Ink::Lines(ink), &mut fb);
+    assert_eq!(st.fill.pixels, 0);
+    let coast = count(&mut fb, 240, 160, ink);
+    assert_eq!((st.rings, st.stroke.pixels, coast), (122, 1_931, 1_812));
+    let st = outline_view(&view, Ink::Lines(ink), &mut fb);
+    let inked = count(&mut fb, 240, 160, ink);
+    assert_eq!(
+        (st.stroke.pixels, st.borders, st.border.pixels, inked),
+        (1_931, 166, 2_521, 3_997)
+    );
+}
+
+/// Central Europe at z5 with no region, where the borders are dense: they
+/// lie over the land in the border colour, and as dots of the ink when the
+/// coasts are lines alone.
+#[test]
+fn the_outline_draws_borders_at_z5() {
+    let view = Viewport::new(project(LatLon::from_degrees(48.0, 12.0)), 5, 240, 160);
+    let mut fb = vec![0u16; 240 * 160];
+    let st = land_view(&view, Ink::Colour, &mut fb);
+    let bare = count(&mut fb, 240, 160, BACKGROUND);
+    assert_eq!((st.rings, st.fill.pixels, bare), (1, 38_325, 38_325));
+    let st = outline_view(&view, Ink::Colour, &mut fb);
+    assert_eq!(st.overflows, 0);
+    let land = count(&mut fb, 240, 160, BACKGROUND);
+    let water = count(&mut fb, 240, 160, outline::water(MapTheme::Light));
+    let border = count(&mut fb, 240, 160, BORDER);
+    assert_eq!(land + water + border, 240 * 160);
+    assert_eq!(bare, land + border, "the borders lie on the land");
+    assert_eq!(
+        (
+            st.rings,
+            st.fill.pixels,
+            st.borders,
+            st.border.pixels,
+            land,
+            border
+        ),
+        (1, 38_325, 23, 1_181, 37_167, 1_158)
+    );
+    let ink = Rgb565::new(0, 0, 0);
+    let st = land_view(&view, Ink::Lines(ink), &mut fb);
+    let coast = count(&mut fb, 240, 160, ink);
+    let st2 = outline_view(&view, Ink::Lines(ink), &mut fb);
+    let inked = count(&mut fb, 240, 160, ink);
+    assert_eq!(
+        (st.stroke.pixels, coast, st2.border.pixels, inked),
+        (27, 27, 1_181, 1_185)
+    );
+}
+
+/// The borders stop at the outline's deepest zoom: the Alps where Austria,
+/// Switzerland and Liechtenstein meet have borders at z10 and none at z11.
+#[test]
+fn the_borders_stop_below_max_zoom() {
+    let at = project(LatLon::from_degrees(47.1, 9.55));
+    let mut fb = vec![0u16; 100 * 100];
+    let st = outline_view(
+        &Viewport::new(at, outline::MAX_ZOOM, 100, 100),
+        Ink::Colour,
+        &mut fb,
+    );
+    assert!(st.borders > 0 && st.border.pixels > 0, "{st:?}");
+    assert!(count(&mut fb, 100, 100, BORDER) > 0);
+    let st = outline_view(
+        &Viewport::new(at, outline::MAX_ZOOM + 1, 100, 100),
+        Ink::Colour,
+        &mut fb,
+    );
+    assert_eq!((st.borders, st.border.pixels), (0, 0));
+    assert_eq!(count(&mut fb, 100, 100, BORDER), 0);
+}
+
+/// Italy at z6, the zoom a reader passes on the way from the world to a
+/// region: the coast and its islands, filled and stroked, and the Vatican's
+/// border, the one line in view.
+#[test]
+fn the_outline_draws_italy_at_z6() {
+    let view = Viewport::new(project(LatLon::from_degrees(42.0, 12.5)), 6, 240, 160);
+    let mut fb = vec![0u16; 240 * 160];
+    let st = land_view(&view, Ink::Colour, &mut fb);
+    assert_eq!(st.overflows, 0);
+    let land = count(&mut fb, 240, 160, BACKGROUND);
+    assert_eq!(
+        (st.rings, st.culled, st.vertices, st.fill.pixels, land),
+        (4, 1_418, 87, 18_549, 18_549)
+    );
+    let st = outline_view(&view, Ink::Colour, &mut fb);
+    let land = count(&mut fb, 240, 160, BACKGROUND);
+    let border = count(&mut fb, 240, 160, BORDER);
+    assert_eq!(
+        (st.borders, st.border.pixels, land, border),
+        (1, 4, 18_545, 4)
+    );
+    let ink = Rgb565::new(0, 0, 0);
+    let st = land_view(&view, Ink::Lines(ink), &mut fb);
+    let coast = count(&mut fb, 240, 160, ink);
+    assert_eq!((st.rings, st.stroke.pixels, coast), (4, 409, 409));
+}
+
+/// Across the antimeridian the world repeats: a view centred on 180 E draws
+/// the land of both sides, and at z0 a view wider than the world (256
+/// pixels) draws two copies of it. Every point stays inside the filler's limit at the deepest zoom.
+#[test]
+fn the_outline_wraps_and_holds_at_every_zoom() {
+    let mut fb = vec![0u16; 400 * 100];
+    let wide = Viewport::new(World { x: 0, y: 1 << 31 }, 0, 400, 100);
+    let st = outline_view(&wide, Ink::Colour, &mut fb);
+    assert_eq!(st.rings + st.culled, 2 * 1422, "two copies of the world");
+    assert!(st.borders > 393, "borders of both copies: {}", st.borders);
+    let land = count(&mut fb, 400, 100, BACKGROUND);
+    assert!(land > 0);
+    for zoom in [8, 14, 20] {
+        let view = Viewport::new(project(CENTRE), zoom, 100, 100);
+        let mut fb = vec![0u16; 100 * 100];
+        let st = outline_view(&view, Ink::Colour, &mut fb);
+        assert_eq!(st.overflows, 0, "z{zoom}");
+        // Florence is on land at every zoom.
+        assert_eq!(count(&mut fb, 100, 100, BACKGROUND), 100 * 100, "z{zoom}");
+    }
+}
+
+fn header(min: u8, max: u8, bounds: Bounds) -> Header {
+    let mut h = *Region::from_bytes(FLORENCE).expect("open").header();
+    h.min_zoom = min;
+    h.max_zoom = max;
+    h.bounds = bounds;
+    h
+}
+
+/// Two overlapping regions: the deeper wins where both cover the centre,
+/// a tie goes to the first file name, and outside both, or above both
+/// zoom ranges, the view draws the outline.
+#[test]
+fn the_region_with_the_deepest_zoom_at_the_centre_is_drawn() {
+    let florence = *Region::from_bytes(FLORENCE).expect("open").header();
+    let tuscany = header(
+        7,
+        13,
+        Bounds {
+            west: 96_000_000,
+            south: 424_000_000,
+            east: 124_000_000,
+            north: 442_000_000,
+        },
+    );
+    let at = project(CENTRE);
+    let siena = project(LatLon::from_degrees(43.318, 11.331));
+    let both = [("tuscany.lmr", &tuscany), ("firenze.lmr", &florence)];
+    assert_eq!(choose(both, at, 13), Some(1));
+    assert_eq!(choose(both, siena, 13), Some(0), "only Tuscany holds Siena");
+    // Florence starts at z11; Tuscany draws z9.
+    assert_eq!(choose(both, at, 9), Some(0));
+    assert_eq!(choose(both, at, 6), None, "above both: the outline");
+    assert_eq!(
+        choose(both, project(LatLon::from_degrees(0.0, 0.0)), 12),
+        None
+    );
+    // Equal max zoom: the first name.
+    let twin = header(11, 15, florence.bounds);
+    assert_eq!(
+        choose([("b.lmr", &florence), ("a.lmr", &twin)], at, 13),
+        Some(1)
+    );
+    assert_eq!(
+        choose([("a.lmr", &florence), ("b.lmr", &twin)], at, 13),
+        Some(0)
+    );
+}
+
+/// A fit goes no deeper than the deepest region whose box holds its
+/// centre has data for, its max zoom without the overzoom; the outline's
+/// deepest where no box does (1074).
+#[test]
+fn a_fit_goes_no_deeper_than_the_region_under_it_has_data() {
+    let florence = *Region::from_bytes(FLORENCE).expect("open").header();
+    let tuscany = header(
+        7,
+        13,
+        Bounds {
+            west: 96_000_000,
+            south: 424_000_000,
+            east: 124_000_000,
+            north: 442_000_000,
+        },
+    );
+    let at = project(CENTRE);
+    let siena = project(LatLon::from_degrees(43.318, 11.331));
+    let both = [&tuscany, &florence];
+    assert_eq!(fit_ceiling(both, at), florence.max_zoom);
+    assert_eq!(fit_ceiling(both, siena), tuscany.max_zoom);
+    let nowhere = project(LatLon::from_degrees(0.0, 0.0));
+    assert_eq!(fit_ceiling(both, nowhere), outline::MAX_ZOOM);
+    assert_eq!(fit_ceiling([], at), outline::MAX_ZOOM);
+}
+
+/// A box across the antimeridian holds both sides of it.
+#[test]
+fn a_box_across_the_antimeridian_holds_both_sides() {
+    let fiji = Bounds {
+        west: 1_770_000_000,
+        south: -190_000_000,
+        east: -1_790_000_000,
+        north: -160_000_000,
+    };
+    assert!(fiji.contains(LatLon::from_degrees(-17.0, 178.0)));
+    assert!(fiji.contains(LatLon::from_degrees(-17.0, -179.5)));
+    assert!(!fiji.contains(LatLon::from_degrees(-17.0, 0.0)));
+}
+
+#[test]
+fn the_zoom_range_reaches_from_the_world_to_the_deepest_overzoom() {
+    let florence = *Region::from_bytes(FLORENCE).expect("open").header();
+    assert_eq!(useful_zooms(&florence), 11..=20);
+    let shallow = header(0, 6, florence.bounds);
+    assert_eq!(useful_zooms(&shallow), 0..=14);
+    assert_eq!(view_zooms([]), 0..=outline::MAX_ZOOM);
+    assert_eq!(view_zooms([&shallow]), 0..=14);
+    assert_eq!(view_zooms([&shallow, &florence]), 0..=20);
+}
+
+/// `Tab` goes by name, case folded, and equal names by hash.
+#[test]
+fn pins_are_stepped_by_name_then_hash() {
+    let at = World { x: 0, y: 0 };
+    let pin = |label| Pin {
+        at,
+        label,
+        stale: false,
+    };
+    let pins = [pin("carol"), pin("Bob"), pin("alice"), pin("bob")];
+    let hashes = [[3u8; 16], [9; 16], [1; 16], [2; 16]];
+    assert_eq!(order(&pins, |i| hashes[i]), [2, 3, 1, 0]);
+}
+
+/// The wheel zooms about the pointer: the world point at the pixel under
+/// it stays at that pixel, in and out, in the middle and at a corner.
+#[test]
+fn a_zoom_about_a_pixel_keeps_the_point_under_it() {
+    for (x, y) in [(10, 20), (239, 0), (120, 80), (0, 159)] {
+        for (from, to) in [(6, 7), (7, 6), (12, 14), (14, 3)] {
+            let mut view = Viewport::new(project(CENTRE), from, 240, 160);
+            let held = view.to_world(x, y);
+            view.zoom_about(to, x, y);
+            assert_eq!(view.zoom(), to);
+            assert_eq!(view.to_world(x, y), held, "z{from} to z{to} at ({x}, {y})");
+        }
+    }
+}
+
+/// A box around a place (loquax's autoload, 1089): as many metres each
+/// way north and south as east and west, held by a box around it and not
+/// by a smaller one, wrapped at the antimeridian.
+#[test]
+fn a_box_around_a_place_and_one_box_in_another() {
+    let frankfurt = LatLon::from_degrees(50.1109, 8.6821);
+    let b = Bounds::around(frankfurt, 6_000);
+    assert!(b.contains(frankfurt));
+    // 12 km is 0.1078 degrees of latitude, and at 50.11 N 0.1681 of longitude.
+    assert!((b.north - b.south - 1_078_000).abs() < 1_000, "{b:?}");
+    assert!((b.east - b.west - 1_681_000).abs() < 2_000, "{b:?}");
+    let inner = Bounds::around(frankfurt, 3_000);
+    assert!(b.holds(&inner) && !inner.holds(&b) && b.holds(&b));
+    let fiji = Bounds::around(LatLon::from_degrees(-17.0, 179.99), 6_000);
+    assert!(fiji.west > fiji.east, "across the antimeridian: {fiji:?}");
+    assert!(fiji.holds(&fiji) && !fiji.holds(&inner));
+}
+
+/// A view's box is its corners, and the whole world's longitudes once the
+/// view is wider than the world.
+#[test]
+fn a_views_box_is_its_corners() {
+    let view = Viewport::new(project(LatLon::from_degrees(50.1109, 8.6821)), 13, 400, 200);
+    let b = view.bounds();
+    let nw = unproject(view.to_world(0, 0));
+    let se = unproject(view.to_world(400, 200));
+    assert_eq!(
+        (b.west, b.north, b.east, b.south),
+        (nw.lon_e7, nw.lat_e7, se.lon_e7, se.lat_e7)
+    );
+    assert!(b.contains(LatLon::from_degrees(50.1109, 8.6821)));
+    let world = Viewport::new(project(LatLon::from_degrees(0.0, 0.0)), 0, 512, 256).bounds();
+    assert_eq!((world.west, world.east), (-1_800_000_000, 1_800_000_000));
+}
+
+/// Every region that reaches into a view is drawn, the deepest last; one
+/// outside the view or past its zooms is not.
+#[test]
+fn every_region_in_a_view_is_drawn_the_deepest_last() {
+    let header = |west: i32, east: i32, max_zoom: u8| Header {
+        bounds: Bounds {
+            west,
+            south: 500_000_000,
+            east,
+            north: 502_000_000,
+        },
+        min_zoom: 10,
+        max_zoom,
+        profile: 1,
+        attribution: (0, 0),
+        notice: (0, 0),
+        tiles: 0,
+        index: 0,
+        len: 0,
+        labels: None,
+    };
+    let regions = [
+        ("a.lmr", header(86_000_000, 86_800_000, 15)),
+        ("b.lmr", header(86_800_000, 87_600_000, 14)),
+        ("far.lmr", header(100_000_000, 101_000_000, 15)),
+        (
+            "deep.lmr",
+            Header {
+                min_zoom: 14,
+                ..header(86_000_000, 87_600_000, 15)
+            },
+        ),
+    ];
+    let view = Viewport::new(project(LatLon::from_degrees(50.1, 8.68)), 12, 400, 200);
+    let order = drawn(regions.iter().map(|(n, h)| (*n, h)), &view);
+    assert_eq!(
+        order,
+        [1, 0],
+        "b (z14) under a (z15); far, and deep from z14 on, left out"
+    );
+}

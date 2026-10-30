@@ -21,7 +21,7 @@ use lnflash::usb::{Sysfs, SYSFS_USB_DEVICES};
 #[derive(Parser, Debug)]
 #[command(
     name = "lnflash",
-    version,
+    version = env!("LEVICULUM_VERSION"),
     about = "Flash an LNode board from the bundle beside this binary",
     long_about = "Finds attached boards, brings each into its bootloader, confirms what it is \
                   from the bootloader itself, checks the SoftDevice precondition, and writes \
@@ -968,11 +968,14 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     }
 
     let dir = manifest::locate(cli.bundle.as_deref())?;
+    if let Some(note) = manifest::passed_over(cli.bundle.as_deref(), &dir) {
+        eprintln!("lnflash: {note}");
+    }
     let manifest = manifest::load(&dir, &catalogue)?;
 
     ui.say(&format!(
         "lnflash {} — bundle {}{} from {}, built with {}, carrying {}",
-        env!("CARGO_PKG_VERSION"),
+        env!("LEVICULUM_VERSION"),
         manifest.bundle.version,
         // A rig A/B arm (#438) has to say which arm it is in the same line
         // that names the build, or two bundles of one commit read the same.

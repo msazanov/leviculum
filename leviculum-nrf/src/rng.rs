@@ -1,4 +1,5 @@
-//! Hardware RNG access for NodeCore.
+//! Hardware RNG access for NodeCore, and the Entropy seam's implementer on
+//! the nRF52840 (`leviculum_firmware::seams::Entropy`).
 //!
 //! The Nordic S140 SoftDevice owns the RNG peripheral exclusively at
 //! runtime (PREGION-protected); any direct register access at 0x4000_D000
@@ -192,3 +193,22 @@ impl RngCore for RawHwRng {
 
 // The SoftDevice's CSPRNG is seeded from the hardware TRNG with bias correction.
 impl CryptoRng for RawHwRng {}
+
+/// [`RawHwRng`]'s fill, as the function each binary registers with
+/// `leviculum_firmware::entropy::set_source` at boot (959): the
+/// orchestration draws through `leviculum_firmware::entropy::Entropy`, which
+/// ends here, on the same two paths, the register read before
+/// `Softdevice::enable` and the syscall after.
+pub fn fill_entropy(dest: &mut [u8]) {
+    RawHwRng::fill(dest)
+}
+
+// The Entropy seam's implementer on this chip (#469 step 1). Nothing of
+// this module moves: every line of it is the SoftDevice's RNG syscalls or
+// the register fallback, and the policy between them is already
+// `leviculum_sd_policy`. The orchestration draws through the seam, which is
+// `rand_core::RngCore`; this states that the type is one.
+const _: () = {
+    const fn is_entropy<T: leviculum_firmware::seams::Entropy>() {}
+    is_entropy::<RawHwRng>();
+};

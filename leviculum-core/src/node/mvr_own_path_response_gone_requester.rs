@@ -110,11 +110,11 @@ fn ask_on_gone(host: &mut Node, dest_hash: &DestinationHash) -> TickOutput {
     host.handle_packet(InterfaceId(GONE), &all[0])
 }
 
-/// `GONE` goes; returns the teardown's debug line.
+/// `GONE` goes; returns the teardown's `IFACE_DOWN` line.
 fn teardown_gone(host: &mut Node) -> String {
     let (_, logs) = with_captured_logs(|| host.handle_interface_down(InterfaceId(GONE)));
     logs.lines()
-        .find(|l| l.contains("went down"))
+        .find(|l| l.contains("IFACE_DOWN"))
         .unwrap_or_else(|| panic!("no teardown line\n--- logs ---\n{logs}"))
         .into()
 }
@@ -188,7 +188,7 @@ fn an_own_path_response_whose_requester_went_is_culled_with_it() {
         "the held answer went with {GONE}"
     );
     assert!(
-        line.contains("1 targeted announces"),
+        line.contains("targeted=1"),
         "the teardown counts the culled answer: {line}"
     );
 }

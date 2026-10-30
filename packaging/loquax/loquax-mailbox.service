@@ -1,0 +1,59 @@
+[Unit]
+Description=Loquax Mailbox (keeps your LXMF mail while your devices are off)
+Documentation=https://codeberg.org/Lew_Palm/leviculum
+After=network.target lnsd.service rnsd.service
+Wants=network.target
+
+# After= without Requires=, as lnpnd.service has it: the mailbox needs *a*
+# shared instance, and the Python rnsd serves as well as lnsd. An After=
+# naming a unit that is not installed is not applied.
+#
+# Ten failed starts in fifteen minutes and the unit is `failed`, not
+# flapping; see lnpnd.service for the arithmetic. `loquax mailbox run`
+# exits at once when no daemon answers, so Restart= below is the loop that
+# waits for lnsd on a boot where both start together.
+StartLimitIntervalSec=900
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=loquax
+Group=loquax
+# The system lnsd's shared instance. The socket is abstract, so it has no
+# file permissions to grant; /etc/reticulum and its config are readable to
+# every account (the leviculum package makes the directory 2775, the config
+# 0644), which gives the instance name. The RPC key is not: lnsd keeps
+# storage/transport_identity at 0600 (leviculum-std/src/file_identity_store.rs,
+# since 1119), and no group grants it, so the mailbox cannot read the path
+# table and adopts no propagation node by itself. Set `propagation_node` in
+# /var/lib/loquax-mailbox/config, or `--pn` in a drop-in.
+Environment=LNMSG_HOME=/var/lib/loquax-mailbox
+ExecStart=/usr/bin/loquax mailbox run --config /etc/reticulum
+Restart=on-failure
+RestartSec=10
+
+# State: the identity, the archive, the admitted devices. 0700, the
+# identity is the user's address. StateDirectory makes it, owned by the
+# service user, before every start; postinst makes it too, so the admin
+# commands (`sudo -u loquax LNMSG_HOME=/var/lib/loquax-mailbox loquax
+# mailbox admit`) work before the first start.
+StateDirectory=loquax-mailbox
+StateDirectoryMode=0700
+UMask=0077
+
+# Hardening, as lnpnd.service has it.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

@@ -147,12 +147,35 @@ https://codeberg.org/${CI_REPO}/releases/download/nightly/lblogd-nightly-arm64.t
 
 \`sudo apt install ./lblogd-nightly-amd64.deb\` installs and starts \`lblogd\` as a systemd service. As shipped it serves on \`http://127.0.0.1:8180/\`; \`/etc/lblogd/config.toml\` explains how to put it on a public domain with automatic HTTPS.
 
-\`lnomad\` and \`lblogd\` carry their own version numbers, independent of the \`leviculum\` packages above.
+**lnpnd — LXMF propagation node** (separate package; a store-and-forward mailbox, drop-in for Python's \`lxmd\`):
+
+\`\`\`
+https://codeberg.org/${CI_REPO}/releases/download/nightly/lnpnd-nightly-amd64.deb
+https://codeberg.org/${CI_REPO}/releases/download/nightly/lnpnd-nightly-arm64.deb
+https://codeberg.org/${CI_REPO}/releases/download/nightly/lnpnd-nightly-amd64.tar.gz
+https://codeberg.org/${CI_REPO}/releases/download/nightly/lnpnd-nightly-arm64.tar.gz
+\`\`\`
+
+\`sudo apt install ./lnpnd-nightly-amd64.deb\` installs \`lnpnd\` as a systemd service that is enabled but not started: put the node's identity at \`/etc/lnpnd/identity\` first, or accept a fresh one, then \`sudo systemctl start lnpnd\`.
+
+**loquax — LXMF messenger** (separate package, no service; \`loquax send\` for scripts, \`loquax tui\` for people):
+
+\`\`\`
+https://codeberg.org/${CI_REPO}/releases/download/nightly/loquax-nightly-amd64.deb
+https://codeberg.org/${CI_REPO}/releases/download/nightly/loquax-nightly-arm64.deb
+https://codeberg.org/${CI_REPO}/releases/download/nightly/loquax-nightly-amd64.tar.gz
+https://codeberg.org/${CI_REPO}/releases/download/nightly/loquax-nightly-arm64.tar.gz
+\`\`\`
+
+\`sudo apt install ./loquax-nightly-amd64.deb\`, like \`lnomad\`, needs a running RNS instance.
+
+\`lnomad\`, \`lblogd\`, \`lnpnd\` and \`loquax\` carry their own version numbers, independent of the \`leviculum\` packages above.
 
 **lnflash — firmware flasher for LNode boards** (self-contained bundle: the flasher, one prebuilt firmware image per supported board, and Nordic's S140 SoftDevice with its licence for the board that can need it):
 
 \`\`\`
 https://codeberg.org/${CI_REPO}/releases/download/nightly/lnflash-nightly-amd64.tar.gz
+https://codeberg.org/${CI_REPO}/releases/download/nightly/lnflash-nightly-amd64.deb
 \`\`\`
 
 This is the prebuilt embedded firmware — no checkout, no Rust toolchain, no build. One image per board:
@@ -164,6 +187,8 @@ This is the prebuilt embedded firmware — no checkout, no Rust toolchain, no bu
 | \`t1000e\` | SenseCAP T1000-E (level \`expected\`: not yet run on our rig) |
 
 \`tar xzf lnflash-nightly-amd64.tar.gz && cd lnflash-* && sudo ./lnflash\` — nothing is downloaded and nothing is installed; everything it writes to the board is in the directory. \`--dry-run\` says what is attached and changes nothing. The flasher binary is amd64; the firmware images and the SoftDevice inside are not architecture-specific.
+
+The \`.deb\` is the same bundle installed: \`sudo apt install ./lnflash-nightly-amd64.deb\` puts \`lnflash\` in \`/usr/bin\` and the images under \`/usr/share/lnflash\`, where it finds them, so \`sudo lnflash\` works from any directory.
 
 Flash with this rather than by dragging a bare \`.uf2\` onto the bootloader drive: our images sit above an S140 7.x SoftDevice and a factory T114 ships 6.1.1, on which the image boots into nothing and the board goes dark until RESET is double-tapped. \`lnflash\` reads the installed version off the board before writing — it repairs a T114 and refuses a board it carries no remedy for.
 

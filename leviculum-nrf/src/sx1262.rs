@@ -515,8 +515,14 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
     /// Full initialization sequence (SX1262 + TCXO + LDO regulator).
     /// Order follows the datasheet init summary (§9.2.1, §13).
     /// Call after reset().
+    ///
+    /// Each step names itself in the boot record before it is taken
+    /// (`LoraPhase`, #469), so a boot that hangs here says in which.
     pub async fn init_radio(&mut self, freq_hz: u32) -> Result<ChipStatus, Error> {
+        use leviculum_firmware::boot_trace::{lora_phase, LoraPhase};
+        lora_phase(LoraPhase::Standby);
         self.set_standby_rc().await?;
+        lora_phase(LoraPhase::Setup);
         self.write_command(opcode::SET_REGULATOR_MODE, &[0x00])
             .await?; // LDO: RNode firmware sx126x.cpp begin() never calls
                      // OP_REGULATOR_MODE, leaving the SX1262 at its LDO default.
@@ -527,8 +533,11 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         // Timeout 0x0000FF (~4 ms) is the value RNode firmware uses.
         self.set_dio3_as_tcxo_ctrl(self.tcxo_voltage_reg, 0x0000FF)
             .await?;
+        lora_phase(LoraPhase::Calib);
         self.calibrate(0x7F).await?;
+        lora_phase(LoraPhase::CalibImage);
         self.calibrate_image(freq_hz).await?;
+        lora_phase(LoraPhase::Init);
         // LoRa packet type.
         self.write_command(opcode::SET_PACKET_TYPE, &[0x01]).await?;
         // Boosted receive gain, and the read-back that makes it observable.
@@ -1056,11 +1065,22 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         self.write_command(opcode::CLEAR_IRQ_STATUS, &[0xFF, 0xFF])
             .await?;
 
-        // Convert timeout_ms to RTC steps (15.625µs per step = 64 steps/ms)
-        let hw_timeout = if timeout_ms == 0 {
+        // The chip's timer runs the settle past the ask on the two
+        // transmit-gating sites, so a preamble beginning inside the window's
+        // last detector horizon latches and stops it (929, #466); see
+        // `rx_arm_bound_ms` for the measured losses. The ask itself stays in
+        // the window for adoption.
+        let bound_ms = leviculum_core::sx126x::rx_arm_bound_ms(
+            timeout_ms,
+            site,
+            self.rx_ext_bw_hz,
+            self.rx_ext_sf,
+        );
+        // Convert bound_ms to RTC steps (15.625µs per step = 64 steps/ms)
+        let hw_timeout = if bound_ms == 0 {
             0x000000 // single mode
         } else {
-            (timeout_ms as u64 * 64).min(0xFFFFFF) as u32
+            (bound_ms as u64 * 64).min(0xFFFFFF) as u32
         };
         // Recorded before the command goes out, not after: the idle branch
         // runs this inside a `select` and drops it the instant the daemon has
@@ -1096,7 +1116,7 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         // measurement the batch exists to move.
         let arm = self
             .rx_arm
-            .arm(site, timeout_ms, embassy_time::Instant::now().as_millis());
+            .arm(site, bound_ms, embassy_time::Instant::now().as_millis());
         crate::log::log_fmt("[SX_RX_ARM] ", format_args!("{arm}"));
         Ok(())
     }
@@ -1115,7 +1135,12 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
     /// [`leviculum_rx_arming::await_window`] is what keeps that case away from
     /// here, by asking `take_latched_frame` first.
     pub async fn await_rx(&mut self, buf: &mut [u8]) -> Result<(u8, RxStatus), Error> {
-        let Some(&ArmedWindow { timeout_ms, .. }) = self.rx_state.window() else {
+        let Some(&ArmedWindow {
+            timeout_ms,
+            hw_timeout,
+            ..
+        }) = self.rx_state.window()
+        else {
             return Err(Error::NotArmed);
         };
 
@@ -1125,11 +1150,13 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         // RSSI describe the air. A sample is two reads and no command, so
         // the chip stays in RX throughout; one dropped with the window (the
         // idle select drops this future) costs nothing, the bus releases
-        // chip select on drop.
+        // chip select on drop. The margin sits on the programmed bound (the
+        // steps, which carry the transmit-gating sites' settle pad), not on
+        // the ask.
         let sw_timeout_ms = if timeout_ms == 0 {
             60_000u64
         } else {
-            timeout_ms as u64 + 500
+            hw_timeout as u64 / 64 + 500
         };
         let started = embassy_time::Instant::now();
         loop {

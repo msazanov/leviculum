@@ -14,9 +14,6 @@ use super::*;
 /// keepalive, path responses) — for those the trailing bytes are payload and
 /// must not be mistaken for a tag.
 pub fn packet_token_tag(raw: &[u8]) -> Option<[u8; 32]> {
-    use crate::constants::{AES_BLOCK_SIZE, HMAC_SIZE};
-    // Smallest possible token: IV + one AES block + tag.
-    const MIN_TOKEN_SIZE: usize = AES_BLOCK_SIZE + AES_BLOCK_SIZE + HMAC_SIZE;
     if raw.len() < HEADER_MINSIZE {
         return None;
     }
@@ -31,8 +28,19 @@ pub fn packet_token_tag(raw: &[u8]) -> Option<[u8; 32]> {
     if raw.len() < header_end {
         return None;
     }
+    token_tag(
+        PacketContext::from_byte(raw[data_start + TRUNCATED_HASHBYTES]),
+        &raw[header_end..],
+    )
+}
+
+/// [`packet_token_tag`] for a packet already split into context and data.
+pub fn token_tag(context: PacketContext, data: &[u8]) -> Option<[u8; 32]> {
+    use crate::constants::{AES_BLOCK_SIZE, HMAC_SIZE};
+    // Smallest possible token: IV + one AES block + tag.
+    const MIN_TOKEN_SIZE: usize = AES_BLOCK_SIZE + AES_BLOCK_SIZE + HMAC_SIZE;
     // Only provable contexts are token-encrypted; see the link builder.
-    match PacketContext::from_byte(raw[data_start + TRUNCATED_HASHBYTES]) {
+    match context {
         PacketContext::Resource
         | PacketContext::ResourceAdv
         | PacketContext::ResourceHmu
@@ -40,7 +48,6 @@ pub fn packet_token_tag(raw: &[u8]) -> Option<[u8; 32]> {
         | PacketContext::Channel => {}
         _ => return None,
     }
-    let data = &raw[header_end..];
     if data.len() < MIN_TOKEN_SIZE {
         return None;
     }

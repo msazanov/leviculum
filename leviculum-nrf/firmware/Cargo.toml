@@ -1,0 +1,96 @@
+[package]
+name = "leviculum-firmware"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lew Palm"]
+license = "AGPL-3.0-or-later"
+description = "The board firmware's orchestration stratum: the node loop and the seams every chip family implements. No HAL, no chip"
+
+# Stratum 2 of docs/src/concepts/firmware-layers.md (Codeberg #469). Step 0
+# is the skeleton: the seams as empty declarations and one host fake each;
+# no module has moved yet. What this crate may depend on is the point of it,
+# and two guards hold it: `just firmware-no-hal` (no HAL or chip crate in its
+# `cargo tree`) and `just firmware-no-chip-cfg` (no BSP `cfg` and no chip name
+# in `src/`). The embassy crates are at the workspace pins,
+# docs/src/firmware/embassy-pins.md.
+[dependencies]
+embassy-executor = "0.9"
+embassy-time = "0.5"
+embassy-sync = "0.7"
+embassy-futures = "0.1"
+leviculum-core = { path = "../../leviculum-core", default-features = false }
+# The two ecosystem traits two seams ARE, rather than declare: Flash is the
+# async multiwrite NOR trait (the same 0.4 leviculum-nrf and nrf-softdevice
+# pull), Entropy is rand_core's RngCore (the 0.6 leviculum-core draws from).
+embedded-storage-async = "0.4"
+rand_core = { version = "0.6", default-features = false }
+# Policy the moved modules call (stratum 1): the log line's shape, the
+# retained-RAM tail and post-mortem decisions, the boot record's page layout,
+# the calendar checkpoint ring.
+leviculum-log-line = { path = "../log-line" }
+leviculum-boot-trace = { path = "../boot-trace" }
+leviculum-boot-count = { path = "../boot-count" }
+leviculum-time-floor = { path = "../time-floor" }
+# The message store's policy half: the record log, and the propagation
+# store's tag map and operator-list operations it writes.
+leviculum-record-log = { path = "../record-log" }
+leviculum-pn-store = { path = "../pn-store" }
+# The board's interface table and its ingress-control flags, which the
+# byte counters' interface count is asserted against.
+leviculum-heap-budget = { path = "../heap-budget" }
+# The BLE link's policy (998, `ble_link`): the carrier verdicts, the pacing
+# default, the drain/link table and the held-bytes mirrors the node side
+# owns and the backend publishes into.
+leviculum-ble-tx = { path = "../ble-tx" }
+# The carrier-off drop run both carrier interfaces count (999, `media`
+# and the BLE `Interface` in `ble_link`): when a down carrier's swallowed
+# packets earn a line, host-tested there.
+leviculum-media-state = { path = "../media-state" }
+# The global allocator (961, `heap`): `alloc` is this stratum's, and the
+# heap facts are what the census and the propagation node read. An
+# allocator crate, not a HAL; the bind crate hands it its pool.
+embedded-alloc = "0.7"
+# The serial interface's queue depth and its drop and count decisions
+# (958: `interface` moved here, the USB writer that drains it did not).
+leviculum-usb-policy = { path = "../usb-policy" }
+# The one-button feedback grammar's patterns and air watch, which the
+# feedback policy (973, `feedback`) raises on the Sinks seam.
+leviculum-feedback = { path = "../feedback" }
+# The button's gesture grammar (`ButtonGate`), which the press handling
+# (976, `button`) feeds with the edges of the ButtonInput seam.
+leviculum-announce-policy = { path = "../announce-policy" }
+# The board state the sensor tasks feed and the orchestration reads (959,
+# `board_state`): the GNSS fix and presence types it re-exports.
+leviculum-gnss-time = { path = "../gnss-time", optional = true }
+leviculum-gnss-presence = { path = "../gnss-presence", optional = true }
+# The status page the display task composes (980, `display`): the painter,
+# the frame key and the wake policy (`leviculum-screen`, stratum 1), and the
+# draw-target trait the Panel seam hands over (`embedded-graphics`, no HAL).
+leviculum-screen = { path = "../screen", optional = true }
+embedded-graphics = { version = "0.8", optional = true }
+heapless = { version = "0.9", default-features = false, optional = true }
+# The battery monitor's numbers (991, `battery`): the cell classification,
+# the filter, the window, the band guard and the two lines' bytes.
+leviculum-battery-scale = { path = "../battery-scale", optional = true }
+
+# Capabilities, not chips: whether the board carries a GNSS receiver, a
+# battery gauge, a display. `leviculum-nrf`'s features of the same names
+# forward here, so every BSP selects the same set it selects there.
+[features]
+gnss = ["dep:leviculum-gnss-time", "dep:leviculum-gnss-presence"]
+battery = ["dep:leviculum-battery-scale"]
+display = ["dep:leviculum-screen", "dep:embedded-graphics", "dep:heapless"]
+
+# The executor is declared for what moves in later (the node loop spawns
+# tasks); nothing that has moved names it yet.
+[package.metadata.cargo-machete]
+ignored = ["embassy-executor"]
+
+# Host tests run the moved modules whole, log lines included: a log line
+# reads `embassy_time::Instant::now()` and signals the drain through a
+# critical-section mutex, so the test build supplies the mock time driver
+# and the std critical section. Dev edges only, so no firmware image sees
+# either (the mock driver's 1 MHz tick would not agree with a board's).
+[dev-dependencies]
+embassy-time = { version = "0.5", features = ["mock-driver"] }
+critical-section = { version = "1", features = ["std"] }

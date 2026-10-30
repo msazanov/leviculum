@@ -33,8 +33,10 @@
 //! [`crate::vext::wait_ready`]; the VTFT rail and the backlight, which
 //! are the panel's alone, stay on for as long as the task runs.
 //!
-//! Rendering: the shared painter (`leviculum-screen`) draws the same
-//! status frame the Pocket V2 shows into a 120×67 mono framebuffer; this
+//! Rendering: `leviculum_firmware::display` (#469 980) composes the same
+//! status page the Pocket V2 shows and the shared painter
+//! (`leviculum-screen`) draws it into a 120×67 mono framebuffer this file
+//! lends through the `Panel` seam; this
 //! backend diffs it against the last-pushed frame (double buffer) and
 //! sends only the changed region over SPI, scaled 2× with white mapped to
 //! muted yellow (Meshtastic's T114 text colour, COLOR565(255,255,128)) —
@@ -56,16 +58,14 @@
 //! image by one row into an area we clear to black at init — cosmetic at
 //! worst.
 
-use embassy_nrf::gpio::{Level, Output, OutputDrive};
+use embassy_nrf::gpio::{AnyPin, Level, Output, OutputDrive};
 use embassy_nrf::peripherals;
 use embassy_nrf::spim::{self, Spim};
 use embassy_nrf::{bind_interrupts, Peri};
 use embassy_time::{Duration, Timer};
 use static_cell::StaticCell;
 
-use leviculum_screen::{
-    ident_short, BatteryStatus, DirtyRect, FrameKey, GnssStatus, StatusModel, T114Fb,
-};
+use leviculum_screen::{DirtyRect, T114Fb};
 
 bind_interrupts!(pub struct TftIrqs {
     SPIM3 => spim::InterruptHandler<peripherals::SPI3>;
@@ -246,17 +246,18 @@ impl St7789 {
 }
 
 /// Full TFT wiring, bundled so the task signature stays within reason.
-/// Field types are the board aliases — the bin file can only hand over
-/// the correct physical pins.
+/// The pins are plain (`AnyPin`), as an embassy task cannot be generic; the
+/// board file builds the value from its aliases (`boards::t114::tft_wiring`),
+/// so the bin file can still only hand over the correct physical pins.
 pub struct TftWiring {
     pub spi: Peri<'static, peripherals::SPI3>,
-    pub sck: Peri<'static, crate::boards::t114::TftSck>,
-    pub mosi: Peri<'static, crate::boards::t114::TftMosi>,
-    pub cs: Peri<'static, crate::boards::t114::TftCs>,
-    pub dc: Peri<'static, crate::boards::t114::TftDc>,
-    pub rst: Peri<'static, crate::boards::t114::TftReset>,
-    pub vtft: Peri<'static, crate::boards::t114::TftPowerEn>,
-    pub leda: Peri<'static, crate::boards::t114::TftBacklight>,
+    pub sck: Peri<'static, AnyPin>,
+    pub mosi: Peri<'static, AnyPin>,
+    pub cs: Peri<'static, AnyPin>,
+    pub dc: Peri<'static, AnyPin>,
+    pub rst: Peri<'static, AnyPin>,
+    pub vtft: Peri<'static, AnyPin>,
+    pub leda: Peri<'static, AnyPin>,
 }
 
 #[embassy_executor::task]
@@ -329,104 +330,75 @@ pub async fn display_task(wiring: TftWiring, identity_hash: [u8; 16]) {
     let work = WORK.init(T114Fb::new());
     let shown = SHOWN.init(T114Fb::new());
 
-    let id_short = ident_short(&identity_hash);
-    let mut last_key: Option<FrameKey> = None;
-    let mut first_frame = true;
-    let mut tick: u32 = 0;
+    leviculum_firmware::display::run(
+        St7789Panel {
+            panel,
+            work,
+            shown,
+            rowbuf,
+            first_frame: true,
+        },
+        leviculum_firmware::clock::EmbassyClock,
+        "leviculum T114",
+        &identity_hash,
+        crate::panel_facts::status_facts,
+    )
+    .await
+}
 
-    loop {
-        tick = tick.wrapping_add(1);
-        let heartbeat = (tick / 5) & 1 != 0; // toggles every 5 seconds
+/// The T114's panel behind `leviculum_firmware::seams::Panel`: the page is
+/// painted into `work`, a push sends the rectangle that differs from
+/// `shown`. No power control; the panel stays lit.
+struct St7789Panel {
+    panel: St7789,
+    work: &'static mut T114Fb,
+    shown: &'static mut T114Fb,
+    rowbuf: &'static mut [u8; ROWBUF_LEN],
+    first_frame: bool,
+}
 
-        // The presence tri-state (#240) drives the GPS line exactly as it
-        // does on the V2 (`display.rs`): NoHardware renders "check
-        // wiring", and the fix/search label follows the hysteresis-held
-        // policy state rather than the raw per-sentence receiver flag, so
-        // the panel agrees with what every other consumer of
-        // GNSS_PRESENCE acts on. Read straight off the watches rather
-        // than through receivers — this task only ever wants the latest
-        // value and must not compete for a receiver slot. `bsp-t114`
-        // implies the `gnss` feature (Cargo.toml), so there is no
-        // feature-off arm here.
-        let gnss = match crate::baseboard::GNSS_PRESENCE.try_get() {
-            Some(p) if p.state == crate::baseboard::GnssPresence::NoHardware => {
-                GnssStatus::NoHardware
+impl leviculum_firmware::seams::Panel for St7789Panel {
+    type Target = T114Fb;
+    type Error = core::convert::Infallible;
+    const WIDTH: u32 = FB_W as u32;
+
+    fn frame(&mut self) -> &mut T114Fb {
+        self.work
+    }
+
+    async fn flush(&mut self) -> Result<(), core::convert::Infallible> {
+        if let Some(dirty) = self.work.diff(self.shown) {
+            if self.first_frame {
+                // The FONT_6X10 render into `work` just before this push
+                // is the deepest frame on this task's stack, and the whole
+                // task runs on the single thread-mode stack. Bracketing
+                // the first push isolates what the display path costs
+                // from what the rest of the firmware costs.
+                crate::log_stack("disp-pre-first-frame");
             }
-            Some(p) => {
-                let f = crate::baseboard::GNSS_FIX
-                    .try_get()
-                    .unwrap_or(crate::baseboard::GnssFix::empty());
-                GnssStatus::Data {
-                    sats: f.sat_in_use,
-                    valid: p.state == crate::baseboard::GnssPresence::Fix,
-                    coords: f.latitude.zip(f.longitude),
-                }
+            self.panel.push_rect(self.work, dirty, self.rowbuf).await;
+            self.shown.copy_from(self.work);
+            if self.first_frame {
+                crate::log_stack("disp-post-first-frame");
+                crate::log::log_fmt(
+                    "[DISP] ",
+                    format_args!(
+                        "first frame pushed (rect {},{}..{},{})",
+                        dirty.x0, dirty.y0, dirty.x1, dirty.y1
+                    ),
+                );
+                self.first_frame = false;
             }
-            None => GnssStatus::NoData,
-        };
-
-        let model = StatusModel {
-            title: "leviculum T114",
-            id_short: id_short.as_str(),
-            rx: crate::lora::LORA_RX_COUNT.load(core::sync::atomic::Ordering::Relaxed),
-            tx: crate::lora::LORA_TX_COUNT.load(core::sync::atomic::Ordering::Relaxed),
-            // Same mapping the V2 makes (`display.rs`), off the same
-            // watch: since #380 the ADC divider on this board has a task
-            // reading it. Read through `try_get` like the GNSS watches
-            // above rather than a receiver, so the panel costs no watch
-            // capacity. `bsp-t114` implies `battery`, so there is no
-            // cfg here for the same reason `ble_peers` has none.
-            battery: match crate::baseboard::BATTERY_STATE.try_get() {
-                Some(b) if b.voltage_mv > 0 => BatteryStatus::Data {
-                    percent: b.percent,
-                    voltage_mv: b.voltage_mv,
-                },
-                _ => BatteryStatus::NoData,
-            },
-            gnss,
-            // Same source as the `links=` field of the `BLE_COUNTERS`
-            // log line, so the panel and the capture can never
-            // disagree. Not behind a cfg, for the reason spelled out at
-            // the V2's model (`display.rs`): `bsp-t114` implies
-            // `softdevice`, so this build always has BLE. `MAX_LINKS`
-            // is 4, so the saturation never bites.
-            ble_peers: Some(crate::ble::HVN_DRAIN.claimed().min(u8::MAX as usize) as u8),
-            pn_fill: crate::pn::fill_indicator(),
-            heartbeat,
-        };
-
-        let key = model.key();
-        if last_key.as_ref() != Some(&key) {
-            // MonoFb painting is infallible.
-            let _ = model.paint(work, FB_W as u32);
-            if let Some(dirty) = work.diff(shown) {
-                if first_frame {
-                    // The FONT_6X10 render into `work` above is
-                    // the deepest frame on this task's stack, and the
-                    // whole task runs on the single thread-mode stack.
-                    // Bracketing the first push isolates what the
-                    // display path costs from what the rest of the
-                    // firmware costs.
-                    crate::log_stack("disp-pre-first-frame");
-                }
-                panel.push_rect(work, dirty, rowbuf).await;
-                shown.copy_from(work);
-                if first_frame {
-                    crate::log_stack("disp-post-first-frame");
-                    crate::log::log_fmt(
-                        "[DISP] ",
-                        format_args!(
-                            "first frame pushed (rect {},{}..{},{})",
-                            dirty.x0, dirty.y0, dirty.x1, dirty.y1
-                        ),
-                    );
-                    first_frame = false;
-                }
-            }
-            last_key = Some(key);
         }
+        Ok(())
+    }
 
-        Timer::after(Duration::from_secs(1)).await;
+    fn has_power_control(&self) -> bool {
+        false
+    }
+
+    fn set_power(&mut self, _on: bool) -> Result<(), core::convert::Infallible> {
+        Ok(())
     }
 }
 

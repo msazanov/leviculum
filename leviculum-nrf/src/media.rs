@@ -32,7 +32,7 @@
 //! Switching a carrier off always takes effect at once — and for BLE,
 //! off means off: every live link is disconnected (a phone sees the
 //! board go, the way it would if the board left range), advertising and
-//! scanning stop, and each dropped link's `PeerEvent::Lost` runs the
+//! scanning stop, and each dropped link's `BleLinkEvent::PeerLost` runs the
 //! same path cull that range loss runs (see §Teardown semantics below).
 //! Switching one back on takes effect at once too **as long as it came
 //! up at boot** — its tasks are still there, gated, and resume
@@ -62,13 +62,14 @@
 //! frame is answered.
 //!
 //! For **BLE** the runtime off also takes the carrier off the air:
-//! [`apply`] wakes the BLE protocol tasks (`crate::ble`), which
+//! [`apply`] wakes the BLE protocol tasks (through the carrier gate in
+//! `leviculum_firmware::ble_link`), which
 //! disconnect every live link — central and peripheral role — and drop
 //! their advertise and scan futures. Each disconnect unwinds through
 //! the same per-link teardown a peer walking out of range takes, so the
-//! main loop receives one `PeerEvent::Lost` per peer and culls its
+//! main loop receives one `BleLinkEvent::PeerLost` per peer and culls its
 //! paths identically; on off→on the tasks resume advertising and
-//! scanning, and the reconnect produces the ordinary `PeerEvent::Up`
+//! scanning, and the reconnect produces the ordinary `BleLinkEvent::PeerUp`
 //! and path pull. This is what makes the #365 BLE-loss fallback desk-
 //! testable: before it, a runtime off was a mute — packets to a still-
 //! connected phone died silently in the interface and nothing
@@ -153,7 +154,17 @@ pub fn load_at_boot(page: u32) -> (MediaProfileWire, Source) {
     // next reset". Observed on the rig, run 4 of the BLE acceptance
     // (#255). `note_boot_state` narrows the seed to what really started.
     STATE.declare(carriers(profile));
+    push_ble_carrier();
     (profile, source)
+}
+
+/// Push the BLE verdict to the carrier gate the BLE tasks hold
+/// (`leviculum_firmware::ble_link`, 998). Called after every mutation of
+/// [`STATE`], so the gate's value is always what [`ble_active`] reads;
+/// the push also wakes the tasks, and a wake against an unchanged state
+/// is the documented no-op.
+fn push_ble_carrier() {
+    leviculum_firmware::ble_link::set_active(STATE.ble_active());
 }
 
 /// Record what this boot actually brought up. Call once, after both
@@ -166,6 +177,7 @@ pub fn note_boot_state(lora_started: bool, ble_started: bool) {
         lora: lora_started,
         ble: ble_started,
     });
+    push_ble_carrier();
 }
 
 /// Whether [`load_at_boot`] was called — the capability the serial task's
@@ -221,14 +233,14 @@ pub fn configured() -> MediaProfileWire {
 /// it was a claim about a reboot that the reboot disproved.
 pub fn apply(profile: MediaProfileWire) -> crate::telemetry::PendingSave {
     STATE.set_configured(carriers(profile));
-    // After the stores, never before: the woken BLE tasks re-read
-    // `ble_active`, and waking them against the old state would let a
+    // After the stores, never before: the woken BLE tasks re-read the
+    // pushed carrier, and waking them against the old state would let a
     // just-switched-off carrier advertise on. On an on→off edge the
     // tasks disconnect every live link and stop advertising and
-    // scanning; each dropped link reports `PeerEvent::Lost` through the
+    // scanning; each dropped link reports `BleLinkEvent::PeerLost` through the
     // same teardown as range loss, so the core's cull is identical (see
-    // the module docs and `crate::ble`).
-    crate::ble::note_media_changed();
+    // the module docs and the BLE backend).
+    push_ble_carrier();
     crate::telemetry::request_save_media_profile(profile)
 }
 
@@ -269,52 +281,8 @@ const fn on_off(enabled: bool) -> &'static str {
     }
 }
 
-/// Report a run of packets a down carrier threw away.
-///
-/// Called by the interfaces on the first drop of a run and at every
-/// decade after it, never per packet: the reasoning, and the host tests,
-/// are in [`leviculum_media_state::DropRun`]. `packets=` is the run's
-/// count at the moment of the line, so the last such line is a lower
-/// bound on the run within a factor of ten, and
-/// [`log_tx_resumed`] states the exact total when the carrier comes back.
-///
-/// ```text
-/// [MEDIA] MEDIA_TX_DROP iface=ble packets=10 bytes=450 reason=carrier-off
-/// ```
-pub fn log_tx_drop(iface: &str, run: leviculum_media_state::Swallowed) {
-    crate::log::log_fmt(
-        "[MEDIA] ",
-        format_args!(
-            "MEDIA_TX_DROP iface={} packets={} bytes={} reason=carrier-off",
-            iface, run.packets, run.bytes
-        ),
-    );
-}
-
-/// Close a drop run: the carrier took a packet again, and this is the
-/// only line carrying the run's untruncated totals.
-///
-/// ```text
-/// [MEDIA] MEDIA_TX_RESUMED iface=ble packets=37 bytes=1665
-/// ```
-pub fn log_tx_resumed(iface: &str, run: leviculum_media_state::Swallowed) {
-    crate::log::log_fmt(
-        "[MEDIA] ",
-        format_args!(
-            "MEDIA_TX_RESUMED iface={} packets={} bytes={}",
-            iface, run.packets, run.bytes
-        ),
-    );
-}
-
-/// Say that a carrier was held down at boot because the profile said so.
-///
-/// Emitted next to the carrier's own init log so a reader who greps for
-/// `[LORA]` or `[BLE ]` and finds nothing has the reason on the line
-/// where the bring-up would have been, not only in the `[MEDIA]` banner.
-pub fn log_carrier_held_down(carrier: &str) {
-    crate::log::log_fmt_critical(
-        "[MEDIA] ",
-        format_args!("carrier={} state=down reason=profile", carrier),
-    );
-}
+// The `[MEDIA]` lines the interfaces write — the drop-run pair
+// (`MEDIA_TX_DROP`/`MEDIA_TX_RESUMED`) and the boot-time held-down line —
+// are `leviculum_firmware::media`'s since 999: both carrier interfaces
+// live above the seam or log the same run shape, so the lines live once,
+// in the stratum both can name.

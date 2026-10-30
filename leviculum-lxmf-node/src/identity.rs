@@ -17,7 +17,7 @@
 //!
 //! Python's helper persists no identity at all, so there is no file name of
 //! its to match; the name here follows the two leviculum daemons that do keep
-//! one (`lnpnd/src/identity.rs`, `lnmsg/src/identity.rs`) and the reference
+//! one (`lnpnd/src/identity.rs`, `loquax/src/identity.rs`) and the reference
 //! `lxmd` (`reference/LXMF/LXMF/Utilities/lxmd.py:337`, `<configdir>/identity`).
 //! It is spelled [`IDENTITY_FILE`] rather than plain `identity` because this
 //! directory is a *storage* directory, not a config directory: it already
@@ -28,7 +28,7 @@
 //!
 //! # Why an unreadable file is fatal
 //!
-//! Same inversion `lnmsg` and `lnpnd` argue for, for the same reason: a
+//! Same inversion `loquax` and `lnpnd` argue for, for the same reason: a
 //! re-mint on a corrupt file would silently publish a new address and strand
 //! everyone holding the old one. A missing file is a first run and mints; an
 //! unreadable one stops the helper and names the file to rescue.
@@ -96,6 +96,7 @@ pub fn load_or_create(path: &Path) -> Result<(Identity, Provenance), IdentityErr
         Ok(bytes) => {
             let identity = Identity::from_private_key_bytes(&bytes)
                 .map_err(|_| IdentityError::Corrupt(path.to_path_buf()))?;
+            leviculum_std::narrow_secret_mode(path).map_err(io_err)?;
             Ok((identity, Provenance::Loaded))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => mint(path),

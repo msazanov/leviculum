@@ -1,10 +1,10 @@
 //! A CLI's diagnostics go to stderr, its data to stdout.
 //!
 //! `event_log::install_global_subscriber` used `tracing_subscriber`'s
-//! default writer, which is stdout — the channel `lnmsg` prints message
+//! default writer, which is stdout — the channel `loquax` prints message
 //! bodies on, `lncp` its progress, `lnprobe` its reply lines. The moment
 //! anything warned, the log line was spliced into that payload. It
-//! showed up as `lnmsg/tests/python_interop.rs` going red under load:
+//! showed up as `loquax/tests/python_interop.rs` going red under load:
 //! `CORE_PROCESSOR_OVER_BUDGET` (`driver::processor::report_budget`)
 //! landed between a caller's pipe and an assertion that a successful
 //! send says nothing on stdout.

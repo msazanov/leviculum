@@ -17,7 +17,7 @@ use clap::{Parser, ValueEnum};
 use leviculum_std::config::Config;
 use lnomad::browser::{self, BrowserOptions};
 use lnomad::cli::{resolve_args, Mode};
-use lnomad::color::{resolve_depth, ColorFlag};
+use lnomad::color::{resolve_tier_from_env, ColorFlag, Tier};
 use lnomad::fetch::Session;
 use lnomad::theme::ThemeFlag;
 use lnomad::tui::run_tui;
@@ -46,7 +46,8 @@ struct Args {
     #[arg(long)]
     config: Option<PathBuf>,
 
-    /// Disable ANSI colour in the rendered output.
+    /// Disable ANSI colour in the rendered output. `NO_COLOR` set and not
+    /// empty does the same.
     #[arg(long)]
     no_color: bool,
 
@@ -55,9 +56,11 @@ struct Args {
     #[arg(long, value_enum, default_value_t = ThemeArg::Auto)]
     theme: ThemeArg,
 
-    /// Terminal colour depth: `auto` picks true colour when `COLORTERM` is
-    /// `truecolor`/`24bit` and otherwise downgrades to the xterm-256 palette;
-    /// `truecolor`/`256` force the depth. `--no-color` still overrides this.
+    /// Terminal colour tier: `auto` picks true colour when `COLORTERM` is
+    /// `truecolor`/`24bit`, the xterm-256 palette when `TERM` contains
+    /// `256color`, none when `TERM` is `dumb` or unset, and the sixteen ANSI
+    /// colours otherwise; `truecolor`/`256`/`16` force the tier. `--no-color`
+    /// and `NO_COLOR` still override this.
     #[arg(long, value_enum, default_value_t = ColorArg::Auto)]
     color: ColorArg,
 
@@ -130,13 +133,16 @@ impl From<ThemeArg> for ThemeFlag {
 /// The `--color` choice, a clap-facing mirror of [`ColorFlag`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum ColorArg {
-    /// Detect the depth from `COLORTERM`.
+    /// Climb the ladder: `COLORTERM`, then `TERM`.
     Auto,
     /// Force 24-bit true colour.
     Truecolor,
     /// Force the xterm-256 palette.
     #[value(name = "256")]
     Ansi256,
+    /// Force the sixteen ANSI colours.
+    #[value(name = "16")]
+    Ansi16,
 }
 
 impl From<ColorArg> for ColorFlag {
@@ -145,6 +151,7 @@ impl From<ColorArg> for ColorFlag {
             ColorArg::Auto => ColorFlag::Auto,
             ColorArg::Truecolor => ColorFlag::Truecolor,
             ColorArg::Ansi256 => ColorFlag::Ansi256,
+            ColorArg::Ansi16 => ColorFlag::Ansi16,
         }
     }
 }
@@ -189,16 +196,16 @@ async fn main() -> ExitCode {
         },
     };
 
-    // Resolve the colour depth once: the `--color` flag over the `COLORTERM`
-    // heuristic. Threaded into both the print sink and the interactive TUI.
-    let depth = resolve_depth(
-        args.color.into(),
-        std::env::var("COLORTERM").ok().as_deref(),
-    );
+    // Resolve the colour tier once, by the ladder of loquax-keys-and-layout.md
+    // section 5, "Colour": `--no-color` and `NO_COLOR`, then `--color`, then
+    // `COLORTERM` and `TERM`. Threaded into both the print sink and the
+    // interactive TUI.
+    let tier = resolve_tier_from_env(args.no_color, args.color.into());
+    let depth = tier.depth().unwrap_or_default();
 
     let opts = BrowserOptions {
         width: args.width.unwrap_or_else(detect_width).max(1),
-        no_color: args.no_color || !std::io::stdout().is_terminal(),
+        no_color: tier == Tier::Mono || !std::io::stdout().is_terminal(),
         depth,
         timeout: Duration::from_secs(args.timeout),
         no_images: args.images == ImagesArg::Off,

@@ -58,7 +58,7 @@ use leviculum_lxmf::{MemoryPeerStore, MemoryPropagationStore, PropagationNodeCon
 use leviculum_std::config::Config;
 use leviculum_std::driver::ReticulumNodeBuilder;
 use lnpnd::client::{ClientAction, ClientOptions, DEFAULT_STATUS_TIMEOUT};
-use lnpnd::engine::{Engine, EngineConfig, EngineEvent};
+use lnpnd::engine::{Engine, EngineConfig, EngineEvent, START_ANNOUNCE_GAP_SECS};
 
 type EngineEvents = std::sync::mpsc::Receiver<EngineEvent>;
 
@@ -158,7 +158,7 @@ async fn status_at_the_shipped_budget_on_a_loaded_instance() {
 
     // lnpnd, attached exactly as `main.rs` attaches it.
     let node_identity = leviculum_std::generate_identity();
-    let (engine, _events) = production_engine(node_identity.clone());
+    let (engine, events) = production_engine(node_identity.clone());
     let daemon_storage = tempfile::tempdir().expect("tempdir daemon");
     let mut daemon = ReticulumNodeBuilder::new()
         .enable_transport(false)
@@ -189,6 +189,36 @@ async fn status_at_the_shipped_budget_on_a_loaded_instance() {
         announced.is_ok(),
         "the daemon never announced its control destination — the test \
          would then measure a different absence than #427's"
+    );
+
+    // Both start announces are out before the fill begins. The stock
+    // `announce_at_start` sends the deferred one `START_ANNOUNCE_GAP_SECS`
+    // after the first (a9a0d271), and the control entry rides along with
+    // it. Landing mid-fill, it refreshes the instance's control entry, the
+    // capped table then evicts fill entries older than it, and the control
+    // path the fill exists to evict stays: under CPUQuota=25% the fill
+    // outlasts the gap and the wait below timed out at 60 s with the
+    // entry still there (PATH_FILL elapsed_ms=67202, 2026-10-26; 11.5 s
+    // with the second announce off, 1012).
+    let start_announces =
+        tokio::time::timeout(Duration::from_secs(START_ANNOUNCE_GAP_SECS + 30), async {
+            let mut seen = 0;
+            while seen < 2 {
+                match events.try_recv() {
+                    Ok(EngineEvent::Announced) => seen += 1,
+                    Ok(_) => {}
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return false,
+                }
+            }
+            true
+        })
+        .await;
+    assert!(
+        matches!(start_announces, Ok(true)),
+        "the daemon did not send both start announces before the fill"
     );
 
     // The feeder: a third local client that fills the instance's path

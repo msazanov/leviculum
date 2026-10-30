@@ -21,6 +21,7 @@
 # Usage:
 #   scripts/build-deb.sh amd64
 #   scripts/build-deb.sh arm64
+#   scripts/build-deb.sh armhf
 #   LEVICULUM_ALLOC=system scripts/build-deb.sh amd64
 #
 # lnsd runs on mimalloc, leviculum-cli's default feature (#437, 766).
@@ -33,7 +34,7 @@
 # from one build carries identical version strings even when the two
 # builds straddle midnight UTC.
 #
-# Requires cargo-deb; arm64 additionally needs cargo-zigbuild and a
+# Requires cargo-deb; arm64 and armhf additionally need cargo-zigbuild and a
 # ziglang on PATH (`just _deb-prereqs` installs both), and python3 for
 # the manual pages. Produces target/debian/*_<arch>.deb, which cargo-deb
 # also hardlinks under target/<triple>/debian/: one per crate, plus
@@ -59,17 +60,25 @@ ARCH="${1:-}"
 case "$ARCH" in
 amd64) TRIPLE=x86_64-unknown-linux-musl ;;
 arm64) TRIPLE=aarch64-unknown-linux-musl ;;
+# armv7 with hard float: Raspberry Pi 2, 3 and Zero 2 under a 32-bit OS
+# (1153). Zig links it as it links arm64; built and run under qemu-arm on
+# 2026-10-30, lnsd on mimalloc included.
+armhf) TRIPLE=armv7-unknown-linux-musleabihf ;;
 *)
-    echo "usage: $0 <amd64|arm64>" >&2
+    echo "usage: $0 <amd64|arm64|armhf>" >&2
     exit 2
     ;;
 esac
 
-# Every crate that ships a Debian package, and every binary the three of
-# them install between them. Kept in the same order as deb-stamp.sh's
-# CRATES, which writes the version files read below.
-CRATES=(leviculum-cli lnomad lblogd lnpnd)
-BINS=(lnsd lnstest lncp lnstatus lnprobe lnpath lnomad lblogd lnpnd)
+# Every crate this script packages, and every binary they install between
+# them. Kept in the same order as deb-stamp.sh's CRATES, which writes the
+# version files read below; its last entry, lnflash, is packaged from the
+# firmware bundle by scripts/build-lnflash-deb.sh instead.
+CRATES=(leviculum-cli lnomad lblogd lnpnd loquax)
+BINS=(lnsd lnstest lncp lnstatus lnprobe lnpath lnomad lblogd lnpnd loquax)
+# loquax's terminal frontend is off by default (loquax/Cargo.toml); the package
+# is what a person installs, so plain `loquax` opens the messenger.
+FEATURES=(--features loquax/tui)
 
 # The .deb is not always named after its crate: leviculum-cli ships as
 # "leviculum". Same mapping as deb-stamp.sh's pkg_name; it is spelled
@@ -136,12 +145,12 @@ cargo clean "${clean_args[@]}"
 # reach aarch64-musl from an amd64 host without docker-in-docker or a
 # dedicated arm64 runner.
 build_cmd=(cargo build)
-[ "$ARCH" = arm64 ] && build_cmd=(cargo zigbuild)
+[ "$ARCH" != amd64 ] && build_cmd=(cargo zigbuild)
 bin_args=()
 for bin in "${BINS[@]}"; do
     bin_args+=(--bin "$bin")
 done
-"${build_cmd[@]}" --release --target "$TRIPLE" "${bin_args[@]}"
+"${build_cmd[@]}" --release --target "$TRIPLE" "${bin_args[@]}" "${FEATURES[@]}"
 
 # The allocator is read off the bytes, like the heap-accounting marker below:
 # an arm64 binary cannot be run here. lnsd logs `Allocator: mimalloc` at
@@ -220,15 +229,15 @@ trap restore_plain_bins EXIT
 # The instrumented lnsd has to keep its symbol table: the census's call-site
 # sampler (LEVICULUM_HEAP_SAMPLE, 508) names frames from it at run time, and
 # without it every stack prints as bare addresses. rust-lld keeps .symtab
-# under the profile's `strip = "debuginfo"`, but zig, which links arm64,
-# strips everything for it, so on arm64 the instrumented builds link
+# under the profile's `strip = "debuginfo"`, but zig, which links arm64 (and
+# armhf), strips everything for it, so there the instrumented builds link
 # unstripped: 23.5 MB with the standard library's DWARF instead of 9.7 MB
 # (measured 2026-10-07). Stripping only the DWARF afterwards needs an objcopy
 # this build does not otherwise require: the pinned toolchain's rust-objcopy
 # cannot load its libLLVM, and zig's objcopy has no ELF strip. The DWARF is
 # in no loaded segment, so it costs disk and not resident memory.
 instrumented_env=()
-if [ "$ARCH" = arm64 ]; then
+if [ "$ARCH" != amd64 ]; then
     instrumented_env=(CARGO_PROFILE_RELEASE_STRIP=none)
 fi
 require_symtab() {

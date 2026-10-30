@@ -28,7 +28,7 @@ way: a magic value in `GPREGRET`, the retained register that survives a
 soft reset, read by the bootloader on the next boot.
 
 We already drive one of them. The 1200-baud touch writes
-`DFU_MAGIC_UF2_RESET` (`leviculum-nrf/src/usb.rs:234`) and resets, and
+`DFU_MAGIC_UF2_RESET` (`leviculum-nrf/src/usb.rs:235`) and resets, and
 the bootloader comes up as a mass-storage volume. The OTA mode is a
 different constant written to the same register at the same point by the
 same code path.
@@ -68,8 +68,8 @@ node's control destination: the request runs over a Link, the remote's
 identity hash is taken from that link, and it is checked against an
 allow list before any verb is answered — with a typed refusal, not
 silence, when it is absent or unlisted (`answer_control`,
-`lnpnd/src/engine.rs:1146`; the check itself at
-`lnpnd/src/engine.rs:1159`). The list is operator configuration
+`lnpnd/src/engine.rs:1217`; the check itself at
+`lnpnd/src/engine.rs:1230`). The list is operator configuration
 (`control_allowed`, `lnpnd/src/config.rs:543`) and the node's own
 identity is always on it. Codeberg #384 part 4 built that because the
 reference has it; stage 1 needs exactly the same shape for a different
@@ -117,7 +117,7 @@ pays and that a mesh path pays in full: between the `GPREGRET` write and
 `sys_reset()` there must be no await, no allocation and no logging, and
 under a live SoftDevice the write must go through the SoC syscalls
 rather than the register, or it records a bogus MWU panic per attempt
-(`leviculum-nrf/src/usb.rs:234-256`, Codeberg #249). A mesh-borne
+(`leviculum-nrf/src/usb.rs:235-257`, Codeberg #249). A mesh-borne
 command always arrives with the SoftDevice enabled, so only the syscall
 branch of that code is ever exercised — the branch the cable case takes
 least often.
@@ -126,7 +126,7 @@ least often.
 
 While the bootloader is in OTA mode, our firmware is not running. Our
 BLE identity is gone, the Columba service is gone
-(`leviculum-nrf/src/ble/columba.rs:126`), the LoRa interface is gone,
+(`leviculum-nrf/src/ble/columba.rs:135`), the LoRa interface is gone,
 the board is off the mesh. To a phone it is a different device with a
 different name, and to the mesh it has vanished. That is not a
 side-effect to be engineered away; it is what DFU *is*, and it is the
@@ -159,7 +159,7 @@ stage 1 is:
 board into OTA mode, connect nothing, and watch the debug port. If the
 application comes back, `BOOT_TRACE` and `BOOT_COUNT` say so on the next
 boot and the elapsed time is the timeout
-(`leviculum-nrf/src/boot_count.rs:122`, Codeberg #380). Hold it for at
+(`record_at_boot`, `leviculum-nrf/src/boot_count.rs:76`, Codeberg #380). Hold it for at
 least an hour before concluding there is no timeout; a short watch that
 sees nothing has measured nothing. The bootloader's own source for the
 build on the board is the second reading, and the two together are the

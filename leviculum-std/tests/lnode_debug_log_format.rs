@@ -285,10 +285,42 @@ fn the_firmware_still_emits_the_register_readback() {
 }
 
 fn nrf_source(rel: &str) -> String {
+    tree_source("leviculum-nrf/src", rel)
+}
+
+/// Does this board binary run the shared node loop (#469 step 7, order
+/// 1085)? The boards move onto it one order at a time; until one has, its
+/// binary holds every line of its boot itself.
+fn on_node_loop(bin_src: &str) -> bool {
+    bin_src.contains("node_loop::run(")
+}
+
+/// A board binary's boot path as text: the binary and, for a binary on the
+/// shared node loop, the loop's source behind it with `crate::` spelt
+/// `leviculum_nrf::`, the path the same code had while it lived in the
+/// binary. The invariants below are about what a board runs, not about
+/// which file of the crate a line sits in.
+fn board_boot_path(bin: &str) -> String {
+    let src = nrf_source(bin);
+    if on_node_loop(&src) {
+        let skeleton = nrf_source("node_loop.rs").replace("crate::", "leviculum_nrf::");
+        format!("{src}\n{skeleton}")
+    } else {
+        src
+    }
+}
+
+/// A source of the orchestration stratum, `leviculum-nrf/firmware/src`, where
+/// the chip-free modules move out of the bind crate (#469).
+fn firmware_source(rel: &str) -> String {
+    tree_source("leviculum-nrf/firmware/src", rel)
+}
+
+fn tree_source(tree: &str, rel: &str) -> String {
     let path: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace root")
-        .join("leviculum-nrf/src")
+        .join(tree)
         .join(rel);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
@@ -300,13 +332,14 @@ fn nrf_source(rel: &str) -> String {
 #[test]
 fn the_firmware_still_emits_the_shapes_these_parsers_expect() {
     let lib = nrf_source("lib.rs");
+    let heap = firmware_source("heap.rs");
     assert!(
-        lib.contains(r#""[HEAP] ""#),
-        "leviculum-nrf/src/lib.rs no longer emits the `[HEAP] ` tag"
+        heap.contains(r#""[HEAP] ""#),
+        "leviculum-nrf/firmware/src/heap.rs no longer emits the `[HEAP] ` tag"
     );
     assert!(
-        lib.contains("used={used} free={free} watermark={watermark} size={HEAP_SIZE}"),
-        "the [HEAP] field order or spelling changed in leviculum-nrf/src/lib.rs"
+        heap.contains("used={used} free={free} watermark={watermark} size={HEAP_SIZE}"),
+        "the [HEAP] field order or spelling changed in leviculum-nrf/firmware/src/heap.rs"
     );
     // The banner format string lives in the shared helper (48f34f6 moved it
     // out of the BSP bins), and so does the whole boot-diagnostics block and
@@ -314,8 +347,8 @@ fn the_firmware_still_emits_the_shapes_these_parsers_expect() {
     // RAK4631 bin once logged no reset reason and spawned no `[STACK]`
     // watermark (review finding L-0031), so all three bins are checked.
     assert!(
-        lib.contains("[PANIC_COUNT] total="),
-        "leviculum-nrf/src/lib.rs no longer emits the [PANIC_COUNT] banner"
+        firmware_source("postmortem.rs").contains("[PANIC_COUNT] total="),
+        "leviculum-nrf/firmware/src/postmortem.rs no longer emits the [PANIC_COUNT] banner"
     );
     let boot_diag = fn_body(&lib, "pub fn log_boot_diagnostics(");
     for call in [
@@ -334,13 +367,13 @@ fn the_firmware_still_emits_the_shapes_these_parsers_expect() {
         "spawn_diagnostics_tasks no longer spawns both watermark tasks"
     );
     for bin in ["bin/t114.rs", "bin/rak4631.rs", "bin/solarnode.rs"] {
-        let src = nrf_source(bin);
+        let src = board_boot_path(bin);
         assert!(
             src.contains("leviculum_nrf::log_boot_diagnostics("),
             "leviculum-nrf/src/{bin} no longer logs the shared boot diagnostics"
         );
         assert!(
-            src.contains("leviculum_nrf::spawn_diagnostics_tasks(&spawner)"),
+            src.contains("leviculum_nrf::spawn_diagnostics_tasks("),
             "leviculum-nrf/src/{bin} no longer spawns the shared diagnostics tasks"
         );
     }
@@ -410,10 +443,10 @@ fn stamp_does_not_disturb_the_existing_parsers() {
 /// source, so both are pinned here.
 #[test]
 fn the_firmware_stamps_every_line_with_board_uptime() {
-    let log = nrf_source("log.rs");
+    let log = firmware_source("log.rs");
     assert!(
         log.contains("embassy_time::Instant::now().as_millis()"),
-        "leviculum-nrf/src/log.rs no longer reads board uptime for the t= stamp"
+        "leviculum-nrf/firmware/src/log.rs no longer reads board uptime for the t= stamp"
     );
     // Uniform: the one formatting path, `log_fmt*`, closes through the
     // shared shaper. A stamp on some lines and not others is a trap for
@@ -428,20 +461,42 @@ fn the_firmware_stamps_every_line_with_board_uptime() {
     // already running when the first line is written. Both entry points start
     // it — `embassy_nrf::init` — before they log anything. If that order ever
     // flips, the boot lines silently become t=0.
-    for bin in ["bin/t114.rs", "bin/rak4631.rs"] {
-        let src = nrf_source(bin);
-        let init = src
-            .find("embassy_nrf::init(")
-            .unwrap_or_else(|| panic!("leviculum-nrf/src/{bin} no longer calls embassy_nrf::init"));
-        let first_log = ["log_critical!", "info!(", "warn!(", "log_fmt"]
+    // A binary on the shared node loop starts the clock through
+    // `node_loop::enter`, its first call (#469 step 7, order 1085): there
+    // the call has to precede the binary's first line, and in the loop's
+    // source `embassy_nrf::init` has to precede every line.
+    let first_log = |src: &str, file: &str| {
+        ["log_critical!", "info!(", "warn!(", "log_fmt"]
             .iter()
             .filter_map(|pat| src.find(pat))
             .min()
-            .unwrap_or_else(|| panic!("leviculum-nrf/src/{bin} logs nothing at all"));
+            .unwrap_or_else(|| panic!("leviculum-nrf/src/{file} logs nothing at all"))
+    };
+    let starts_clock_before_logging = |file: &str, src: &str, start: &str| {
+        let init = src
+            .find(start)
+            .unwrap_or_else(|| panic!("leviculum-nrf/src/{file} no longer calls {start}"));
         assert!(
-            init < first_log,
-            "leviculum-nrf/src/{bin} logs before embassy_nrf::init starts the clock, \
+            init < first_log(src, file),
+            "leviculum-nrf/src/{file} logs before {start} starts the clock, \
              so the first lines would carry t=0 rather than a real uptime"
+        );
+    };
+    let mut on_loop = 0;
+    for bin in ["bin/t114.rs", "bin/rak4631.rs"] {
+        let src = nrf_source(bin);
+        if on_node_loop(&src) {
+            on_loop += 1;
+            starts_clock_before_logging(bin, &src, "node_loop::enter(");
+        } else {
+            starts_clock_before_logging(bin, &src, "embassy_nrf::init(");
+        }
+    }
+    if on_loop > 0 {
+        starts_clock_before_logging(
+            "node_loop.rs",
+            &nrf_source("node_loop.rs"),
+            "embassy_nrf::init(",
         );
     }
 }
@@ -481,16 +536,53 @@ fn body_after<'a>(src: &'a str, file: &str, marker: &str, what: &str) -> &'a str
 #[test]
 fn the_fault_paths_still_capture_rather_than_log() {
     let lib = nrf_source("lib.rs");
-    for (marker, what) in [
-        ("#[panic_handler]", "the panic handler"),
-        ("unsafe fn HardFault(", "the HardFault handler"),
+    // The handlers stay in the bind crate; the captures they call moved to
+    // the orchestration crate's post-mortem store (#469), and run in the same
+    // dead-executor context, so they are held to the same rule.
+    let store = firmware_source("postmortem.rs");
+    for (src, file, marker, what) in [
+        (&lib, "lib.rs", "#[panic_handler]", "the panic handler"),
+        (
+            &lib,
+            "lib.rs",
+            "unsafe fn HardFault(",
+            "the HardFault handler",
+        ),
+        (
+            &store,
+            "../firmware/src/postmortem.rs",
+            "pub fn record_panic(",
+            "the panic capture",
+        ),
+        (
+            &store,
+            "../firmware/src/postmortem.rs",
+            "pub fn record_hardfault(",
+            "the HardFault capture",
+        ),
+        (
+            &store,
+            "../firmware/src/postmortem.rs",
+            "pub fn bump_panic_count(",
+            "the panic counter",
+        ),
     ] {
-        let body = body_after(&lib, "lib.rs", marker, what);
+        let body = body_after(src, file, marker, what);
         assert!(
             !body.contains("log_fmt") && !body.contains("log_critical!"),
             "{what} now logs; it runs with the executor dead, and whether its line \
              can carry a real t= stamp is a decision that has to be made explicitly \
              rather than inherited"
+        );
+    }
+    for capture in [
+        "record_panic(info)",
+        "record_hardfault(",
+        "bump_panic_count()",
+    ] {
+        assert!(
+            lib.contains(capture),
+            "the fault handlers in leviculum-nrf/src/lib.rs no longer call {capture}"
         );
     }
 }
@@ -624,8 +716,12 @@ fn the_firmware_still_emits_the_receiver_arming_line() {
     // Matched on `.arm(` rather than the whole receiver expression: rustfmt
     // splits `self.rx_arm.arm(..)` across lines once the argument list grows,
     // and a pin that a reformat can break is a pin nobody keeps.
+    // `bound_ms`, not `timeout_ms`: the line carries the bound the chip's
+    // timer actually runs — the ask plus the transmit-gating sites' settle
+    // pad (929, #466) — so a capture's `timeout_ms=` stays matchable against
+    // the expiry that follows it.
     let arm = sx
-        .find(".arm(site, timeout_ms,")
+        .find(".arm(site, bound_ms,")
         .expect("leviculum-nrf/src/sx1262.rs no longer reports the arming");
     let wait = sx[set_rx..]
         .find("self.dio1.wait_for_high()")
@@ -1230,7 +1326,7 @@ fn the_transmit_deferral_is_spent_once_per_externally_paced_event() {
 /// (Codeberg #234).
 ///
 /// `log_fmt` returns before it touches either the ring or the persistent tail
-/// while `RUNTIME_DRAIN_OPEN` is unset (`leviculum-nrf/src/log.rs`), and the
+/// while `RUNTIME_DRAIN_OPEN` is unset (`leviculum-nrf/firmware/src/log.rs`), and the
 /// gate opens on the first DTR-assert or after 30 s — both far later than the
 /// boot sequence that registers the destinations. A one-shot `[IDENTITY]`
 /// line written there is not late, it is gone: it never reaches the buffer
@@ -1246,7 +1342,7 @@ fn the_transmit_deferral_is_spent_once_per_externally_paced_event() {
 #[test]
 fn the_identity_lines_are_not_dropped_by_the_runtime_gate() {
     for bin in ["bin/t114.rs", "bin/rak4631.rs", "bin/solarnode.rs"] {
-        let src = nrf_source(bin);
+        let src = board_boot_path(bin);
         assert!(
             !src.contains(r#"log_fmt("[IDENTITY] ""#),
             "leviculum-nrf/src/{bin} writes an [IDENTITY] line through the \
@@ -1288,14 +1384,14 @@ fn the_identity_lines_are_not_dropped_by_the_runtime_gate() {
         );
     }
     assert!(
-        nrf_source("banner.rs").contains("crate::identity::log_banner()"),
+        nrf_source("banner.rs").contains("leviculum_firmware::identity::log_banner()"),
         "leviculum-nrf/src/banner.rs no longer repeats the [IDENTITY] banner, so a \
          late reader has only the boot window to catch it in"
     );
-    let identity = nrf_source("identity.rs");
+    let identity = firmware_source("identity.rs");
     assert!(
         identity.contains("crate::log_critical!"),
-        "leviculum-nrf/src/identity.rs no longer emits its banner on the \
+        "leviculum-nrf/firmware/src/identity.rs no longer emits its banner on the \
          boot-critical path"
     );
     // Every hash the banner publishes is on that one line, which is what
@@ -1408,7 +1504,7 @@ fn the_display_and_button_bring_up_is_not_dropped_by_the_runtime_gate() {
         (
             "display.rs",
             "pub async fn display_task(",
-            "let id_short",
+            "leviculum_firmware::display::run(",
             &[
                 "OLED probe: {:?} at 0x{:02X}",
                 "init failed: {:?}",
@@ -1420,13 +1516,13 @@ fn the_display_and_button_bring_up_is_not_dropped_by_the_runtime_gate() {
         (
             "st7789.rs",
             "pub async fn display_task(",
-            "let id_short",
+            "leviculum_firmware::display::run(",
             &["ST7789 blind init start", "ST7789 init complete"][..],
         ),
         (
             "button.rs",
             "pub async fn button_task(",
-            "loop {",
+            "leviculum_firmware::button::run(",
             &["init pin=P{}.{:02} pull={} active={} debounce={}ms"][..],
         ),
     ] {
@@ -1538,7 +1634,7 @@ fn the_display_and_button_bring_up_is_not_dropped_by_the_runtime_gate() {
 #[test]
 fn the_time_source_banner_mirrors_the_node_rather_than_the_seeding_sites() {
     for bin in ["bin/t114.rs", "bin/rak4631.rs", "bin/solarnode.rs"] {
-        let src = nrf_source(bin);
+        let src = board_boot_path(bin);
         assert!(
             src.contains("set_time_source(node.time_source())"),
             "leviculum-nrf/src/{bin} never mirrors node.time_source() into the \
@@ -1549,14 +1645,15 @@ fn the_time_source_banner_mirrors_the_node_rather_than_the_seeding_sites() {
     // The mirror is only a mirror if the store reports whether anything
     // moved; without that the bin has to choose between a [TIME_SOURCE] line
     // on every loop pass and none at all on the healed transition.
-    let lib = nrf_source("lib.rs");
+    // The store moved to the orchestration stratum's clock (#469, 958).
+    let clock = firmware_source("clock.rs");
     assert!(
-        lib.contains(
+        clock.contains(
             "pub fn set_time_source(source: leviculum_core::transport::TimeSource) -> bool"
         ),
-        "leviculum-nrf/src/lib.rs::set_time_source no longer reports whether the \
-         recorded source changed, which is what lets the main-loop mirror log the \
-         transition once (Codeberg #398)"
+        "leviculum-nrf/firmware/src/clock.rs::set_time_source no longer reports \
+         whether the recorded source changed, which is what lets the main-loop \
+         mirror log the transition once (Codeberg #398)"
     );
 }
 
@@ -1854,15 +1951,22 @@ fn the_stamp_detector_tells_a_body_stamp_from_its_neighbours() {
 /// apart (890: `GNSS_POWER ... t=603034 t=603034`).
 #[test]
 fn no_firmware_log_body_carries_its_own_stamp() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+    // Both strata log: the bind crate's `src/`, and the orchestration crate's
+    // `firmware/src/`, whose files are named `firmware/<rel>` here.
+    let nrf = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace root")
-        .join("leviculum-nrf/src");
+        .join("leviculum-nrf");
     let mut files = Vec::new();
-    nrf_sources(&root, "", &mut files);
+    nrf_sources(&nrf.join("src"), "", &mut files);
+    nrf_sources(&nrf.join("firmware/src"), "firmware", &mut files);
     assert!(
-        files.iter().any(|(rel, _)| rel == "log.rs"),
-        "the walk of leviculum-nrf/src found no log.rs; it is reading the wrong tree"
+        files.iter().any(|(rel, _)| rel == "firmware/log.rs"),
+        "the walk of leviculum-nrf/firmware/src found no log.rs; it is reading the wrong tree"
+    );
+    assert!(
+        files.iter().any(|(rel, _)| rel == "lora.rs"),
+        "the walk of leviculum-nrf/src found no lora.rs; it is reading the wrong tree"
     );
     let offending: Vec<String> = files
         .iter()
@@ -1872,7 +1976,7 @@ fn no_firmware_log_body_carries_its_own_stamp() {
     assert!(
         offending.is_empty(),
         "these log bodies append their own t=, which the renderer already \
-         stamps (leviculum-nrf/src/log.rs::fmt_into): {offending:?}"
+         stamps (leviculum-nrf/firmware/src/log.rs::fmt_into): {offending:?}"
     );
     for (allowed, reason) in BODY_STAMP_ALLOWED {
         let (_, src) = files

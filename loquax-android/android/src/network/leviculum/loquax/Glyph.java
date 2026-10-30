@@ -1,0 +1,164 @@
+package network.leviculum.loquax;
+
+import android.graphics.Canvas;
+import android.graphics.ColorFilter;
+import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.PixelFormat;
+import android.graphics.Rect;
+import android.graphics.drawable.Drawable;
+
+/**
+ * The few icons the chat and the list draw, as paths on a 24 by 24 grid
+ * scaled to the bounds: no icon font, no AndroidX, no image assets (1129,
+ * the list's search, close and pencil 1130).
+ */
+final class Glyph extends Drawable {
+    enum Kind { BACK, MENU, EMOJI, SEND, SENT, DELIVERED, QUEUED, FAILED, SEARCH, CLOSE, PENCIL }
+
+    private final Kind kind;
+    private final int color;
+    /** The ground the delivered mark's ticks are cut into: the bubble's colour. */
+    private final int ground;
+    /** The failed mark's circle and its exclamation mark. */
+    private final int failedGround;
+    private final int failedMark;
+    private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private int alpha = 255;
+
+    /** The mark of one of ours, by the facade's delivery word. */
+    static Kind mark(String state) {
+        switch (state) {
+            case "sent": return Kind.SENT;
+            case "delivered": return Kind.DELIVERED;
+            case "failed": return Kind.FAILED;
+            default: return Kind.QUEUED;
+        }
+    }
+
+    Glyph(Kind kind, int color) {
+        this(kind, color, 0, 0, 0);
+    }
+
+    Glyph(Kind kind, int color, int ground, int failedGround, int failedMark) {
+        this.kind = kind;
+        this.color = color;
+        this.ground = ground;
+        this.failedGround = failedGround;
+        this.failedMark = failedMark;
+        stroke.setStyle(Paint.Style.STROKE);
+        stroke.setStrokeCap(Paint.Cap.ROUND);
+        stroke.setStrokeJoin(Paint.Join.ROUND);
+        fill.setStyle(Paint.Style.FILL);
+    }
+
+    @Override
+    public void draw(Canvas canvas) {
+        Rect b = getBounds();
+        float side = Math.min(b.width(), b.height());
+        canvas.saveLayerAlpha(b.left, b.top, b.right, b.bottom, alpha);
+        canvas.translate(b.centerX() - side / 2, b.centerY() - side / 2);
+        canvas.scale(side / 24f, side / 24f);
+        stroke.setColor(color);
+        fill.setColor(color);
+        stroke.setStrokeWidth(2f);
+        switch (kind) {
+            case BACK:
+                canvas.drawLine(4, 12, 20, 12, stroke);
+                canvas.drawPath(path(11, 5, 4, 12, 11, 19), stroke);
+                break;
+            case MENU:
+                canvas.drawCircle(12, 5, 2, fill);
+                canvas.drawCircle(12, 12, 2, fill);
+                canvas.drawCircle(12, 19, 2, fill);
+                break;
+            case EMOJI:
+                canvas.drawCircle(12, 12, 9, stroke);
+                canvas.drawCircle(9, 10, 1.3f, fill);
+                canvas.drawCircle(15, 10, 1.3f, fill);
+                Path smile = new Path();
+                smile.moveTo(8, 14);
+                smile.quadTo(12, 18, 16, 14);
+                canvas.drawPath(smile, stroke);
+                break;
+            case SEND:
+                Path arrow = path(4, 20, 21, 12, 4, 4);
+                arrow.lineTo(6.5f, 12);
+                arrow.close();
+                canvas.drawPath(arrow, fill);
+                break;
+            case SENT:
+                stroke.setStrokeWidth(1.8f);
+                canvas.drawCircle(12, 12, 9, stroke);
+                canvas.drawPath(path(8, 12.5f, 11, 15.5f, 16.5f, 9), stroke);
+                break;
+            case DELIVERED:
+                canvas.drawCircle(12, 12, 10, fill);
+                stroke.setColor(ground);
+                stroke.setStrokeWidth(1.8f);
+                canvas.drawPath(path(5, 12.5f, 8, 15.5f, 13, 9), stroke);
+                canvas.drawPath(path(10.5f, 15.5f, 12, 15.5f, 17.5f, 9), stroke);
+                break;
+            case QUEUED:
+                stroke.setStrokeWidth(1.8f);
+                canvas.drawCircle(12, 12, 9, stroke);
+                canvas.drawPath(path(12, 7, 12, 12, 15.5f, 14), stroke);
+                break;
+            case FAILED:
+                fill.setColor(failedGround);
+                canvas.drawCircle(12, 12, 10, fill);
+                stroke.setColor(failedMark);
+                stroke.setStrokeWidth(2.4f);
+                canvas.drawLine(12, 6.5f, 12, 13, stroke);
+                fill.setColor(failedMark);
+                canvas.drawCircle(12, 17, 1.4f, fill);
+                break;
+            case SEARCH:
+                canvas.drawCircle(10.5f, 10.5f, 6, stroke);
+                canvas.drawLine(15, 15, 20, 20, stroke);
+                break;
+            case CLOSE:
+                canvas.drawLine(6, 6, 18, 18, stroke);
+                canvas.drawLine(18, 6, 6, 18, stroke);
+                break;
+            case PENCIL:
+                Path pencil = path(4, 20, 5, 15.5f, 15.5f, 5, 19, 8.5f, 8.5f, 19);
+                pencil.close();
+                canvas.drawPath(pencil, stroke);
+                canvas.drawLine(13, 7.5f, 16.5f, 11, stroke);
+                break;
+            default:
+                break;
+        }
+        canvas.restore();
+    }
+
+    private static Path path(float... xy) {
+        Path p = new Path();
+        p.moveTo(xy[0], xy[1]);
+        for (int i = 2; i + 1 < xy.length; i += 2) {
+            p.lineTo(xy[i], xy[i + 1]);
+        }
+        return p;
+    }
+
+    @Override
+    public void setAlpha(int alpha) {
+        this.alpha = alpha;
+        invalidateSelf();
+    }
+
+    @Override
+    public void setColorFilter(ColorFilter filter) {
+        stroke.setColorFilter(filter);
+        fill.setColorFilter(filter);
+    }
+
+    /** Abstract in Drawable though deprecated, so it has to be here. */
+    @Override
+    @SuppressWarnings("deprecation")
+    public int getOpacity() {
+        return PixelFormat.TRANSLUCENT;
+    }
+}

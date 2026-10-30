@@ -26,20 +26,20 @@ runs an event-driven main loop that dispatches packets between them:
 | Interface | ID | Medium | HW MTU |
 |-----------|----|--------|--------|
 | `serial_usb` | 0 | USB CDC-ACM, HDLC framing to host | 564 |
-| `lora_sx1262` | 1 | SX1262 LoRa radio | 255 |
+| `lora_sx1262` on the T114, RAK4631 and solar node, `lora_lr1110` on the T1000-E | 1 | the board's LoRa radio, named in its board file (`IFACE_NAMES`) | 508 (#390: two frames of at most 254 B, `leviculum-nrf/src/node_loop.rs:458`) |
 | `ble` | 2 | BLE peripheral, Columba v2.2 | 564 |
 
 (Interface registration and MTUs:
-`set_interface_name` (`leviculum-nrf/src/bin/t114.rs:270-287`) and
-`leviculum-nrf/src/bin/rak4631.rs:299-340`. The main loop selecting over
+`set_interface_name` (`leviculum-nrf/src/node_loop.rs:439-456`) and
+`leviculum-nrf/src/bin/rak4631.rs:297-338`. The main loop selecting over
 the three RX sources plus a timer deadline begins at
-`leviculum-nrf/src/bin/t114.rs:602`.)
+`leviculum-nrf/src/node_loop.rs:848`.)
 
 Transport routing is enabled in the node builder, so an LNode forwards
 packets and serves paths for other peers, exactly like a
 transport-enabled `lnsd`.
-(`enable_transport` (`leviculum-nrf/src/bin/t114.rs:169`),
-`leviculum-nrf/src/bin/rak4631.rs:197`)
+(`enable_transport` (`leviculum-nrf/src/node_loop.rs:337`),
+`leviculum-nrf/src/bin/rak4631.rs:199`)
 
 A board does not accept compressed resources. The firmware builds
 `leviculum-core` without its `compression` feature
@@ -47,7 +47,7 @@ A board does not accept compressed resources. The firmware builds
 megabytes of working memory against a 96 KiB heap. A board therefore
 refuses a compressed advertisement at once with a receiver cancel, before
 it requests a single part, and the sender fails that transfer immediately
-(`handle_resource_adv`, `leviculum-core/src/node/link_management.rs:2786`;
+(`handle_resource_adv`, `leviculum-core/src/node/link_management.rs:2827`;
 the refusal logs `RESOURCE_ADV_REFUSED reason=compressed` where tracing is
 compiled in). A Python sender compresses by default whenever bz2 shrinks
 the data (`auto_compress=True`, `reference/Reticulum/RNS/Resource.py:248`);
@@ -58,6 +58,20 @@ Every board runs as a full mesh node; a battery board will also have a
 Tracker mode ([Operating modes](../concepts/operating-modes.md)). The
 button, the LEDs, the buzzer and the display mean the same on every
 board ([One button](../concepts/one-button.md)).
+
+### Hard off
+
+The 8 s press puts a board to sleep, it does not cut power (Lew,
+2026-10-25, [One button](../concepts/one-button.md)). Whether a board
+can be switched off hard is a board fact:
+
+| Board | Hard off |
+|---|---|
+| RAK WisMesh Pocket V2 | an ON/OFF switch that disconnects the battery (RAK's WisMesh Pocket quick start: "battery disconnect switch"; this page cites no RAK19026 schematic for it, and whether it slides is not checked) |
+| ThinkNode M9 | a slide switch ([The ThinkNode M9](../concepts/thinknode-m9.md), "Power") |
+| Heltec T114 | none; power is the USB or battery lead |
+| SenseCAP T1000-E | none; power is the USB or battery lead |
+| SenseCAP Solar Node P1-Pro | none; power is the USB or battery lead |
 
 ## Hardware coverage
 
@@ -350,7 +364,7 @@ before its first fix or ten minutes after boot, as a gate in front of the
 (`P1.02`) is not used: the one reference that configures it maps the
 wrong bit, so the driver polls. Since #459 a double press of the button
 (`P0.06`, active high) announces, as on every board
-(`leviculum-nrf/src/button.rs`); the long press is also the product's
+(`leviculum-nrf/firmware/src/button.rs`); the long press is also the product's
 power button. The buzzer (`P0.25` on `PWM0`, enable `P1.05`) plays the
 feedback grammar of [One button](../concepts/one-button.md) at 247 Hz
 since 892; its enable is raised only while a pattern plays. The product
@@ -458,7 +472,7 @@ discriminator before anything may be written.
 
 Our RAK build sets the SX1262 TCXO to 3.3 V, following the RNode
 firmware, which selects `MODE_TCXO_3_3V_6X` for this board
-(`leviculum-nrf/src/boards/rak4631.rs:39-43`). Meshtastic and MeshCore
+(`leviculum-nrf/src/boards/rak4631.rs:190`). Meshtastic and MeshCore
 both run the same module at 1.8 V. The value lives in the module, so it
 applies to every carrier in family A equally. Our Pocket V2 works with
 3.3 V, but the divergence against two references is unresolved and should
@@ -490,7 +504,7 @@ Each binary names the radio driver it links in `required-features`
 (`radio-sx1262` for the first three, `bsp-t1000e` for the last), so a
 feature set compiles the binaries on its own radio and no others.
 
-(`leviculum-nrf/Cargo.toml:462-474`)
+(`leviculum-nrf/Cargo.toml:483-495`)
 
 The board-support-package (BSP) features select the runtime for a given
 board. Exactly one BSP feature must be enabled per build; a
@@ -499,27 +513,27 @@ board. Exactly one BSP feature must be enabled per build; a
 
 | Feature | Effect | Cite |
 |---------|--------|------|
-| `bsp-t114` | T114 BSP (+ SoftDevice BLE + status display + GNSS + battery) | `leviculum-nrf/Cargo.toml:379` |
-| `bsp-rak4631` | RAK4631 BSP (+ SoftDevice BLE) | `leviculum-nrf/Cargo.toml:363` |
-| `bsp-solarnode` | SenseCAP Solar Node P1-Pro BSP (+ SoftDevice BLE + battery + GNSS). No display | `leviculum-nrf/Cargo.toml:400` |
-| `bsp-t1000e` | SenseCAP T1000-E BSP (+ SoftDevice BLE, GNSS, battery, motion), on the LR11xx driver. No display | `leviculum-nrf/Cargo.toml:410` |
-| `display` | SSD1306 OLED, probed at run time | `leviculum-nrf/Cargo.toml:423` |
-| `gnss` | NMEA0183 GNSS (ZOE-M8Q on the V2 baseboard, L76K on the T114 and the Solar Node, AG3335 on the T1000-E) | `leviculum-nrf/Cargo.toml:424` |
-| `battery` | pack-voltage monitor: the `BATTERY` log line, the panel's voltage and, on the V2, the T114 and the T1000-E, the telemetry field. Unconditional under `bsp-t114` (the divider is on every T114), under `bsp-solarnode` (it is on the XIAO module) and under `bsp-t1000e` (part of the product), opt-in on the V2 via `rak-baseboard` | `leviculum-nrf/Cargo.toml:430` |
-| `motion` | the QMA6100P accelerometer as a `MOTION` moving or still line (#457); T1000-E only, unconditional under `bsp-t1000e` | `leviculum-nrf/Cargo.toml:431` |
-| `rak-baseboard` | aggregate of `display` + `gnss` + `battery` | `leviculum-nrf/Cargo.toml:432` |
+| `bsp-t114` | T114 BSP (+ SoftDevice BLE + status display + GNSS + battery); forwards `leviculum-firmware/display` for the page its ST7789 shows | `leviculum-nrf/Cargo.toml:399` |
+| `bsp-rak4631` | RAK4631 BSP (+ SoftDevice BLE) | `leviculum-nrf/Cargo.toml:380` |
+| `bsp-solarnode` | SenseCAP Solar Node P1-Pro BSP (+ SoftDevice BLE + battery + GNSS). No display | `leviculum-nrf/Cargo.toml:420` |
+| `bsp-t1000e` | SenseCAP T1000-E BSP (+ SoftDevice BLE, GNSS, battery, motion), on the LR11xx driver. No display | `leviculum-nrf/Cargo.toml:430` |
+| `display` | SSD1306 OLED, probed at run time; forwards to `leviculum-firmware/display`, which compiles the display's signals in `leviculum_firmware::board_state` and the status page with its power policy (`leviculum_firmware::display`) | `leviculum-nrf/Cargo.toml:443` |
+| `gnss` | NMEA0183 GNSS (ZOE-M8Q on the V2 baseboard, L76K on the T114 and the Solar Node, AG3335 on the T1000-E); forwards to `leviculum-firmware/gnss` for the fix, presence and motion watches | `leviculum-nrf/Cargo.toml:444` |
+| `battery` | pack-voltage monitor: the `BATTERY` log line, the panel's voltage and, on the V2, the T114 and the T1000-E, the telemetry field. Unconditional under `bsp-t114` (the divider is on every T114), under `bsp-solarnode` (it is on the XIAO module) and under `bsp-t1000e` (part of the product), opt-in on the V2 via `rak-baseboard`; forwards to `leviculum-firmware/battery` for the battery snapshot | `leviculum-nrf/Cargo.toml:451` |
+| `motion` | the QMA6100P accelerometer as a `MOTION` moving or still line (#457); T1000-E only, unconditional under `bsp-t1000e` | `leviculum-nrf/Cargo.toml:452` |
+| `rak-baseboard` | aggregate of `display` + `gnss` + `battery` | `leviculum-nrf/Cargo.toml:453` |
 
 > **Note on BLE:** Both firmware entry points register a BLE interface
 > and call `leviculum_nrf::ble::init`
-> (`leviculum-nrf/src/bin/t114.rs:361`,
-> `leviculum-nrf/src/bin/rak4631.rs:413`). The Cargo `softdevice`
+> (`leviculum-nrf/src/bin/t114.rs:89`,
+> `leviculum-nrf/src/bin/rak4631.rs:410`). The Cargo `softdevice`
 > feature, and therefore the BLE stack, is pulled in by *both* BSP
-> features (`leviculum-nrf/Cargo.toml:363`,
-> `leviculum-nrf/Cargo.toml:205`).
+> features (`leviculum-nrf/Cargo.toml:380`,
+> `leviculum-nrf/Cargo.toml:208`).
 
 The baseboard peripherals are each gated behind their own Cargo feature
-(`leviculum-nrf/Cargo.toml:423-432`) and spawned only when that feature
-is on (`leviculum-nrf/src/bin/rak4631.rs:339-374`). Because each of them
+(`leviculum-nrf/Cargo.toml:443-453`) and spawned only when that feature
+is on (`leviculum-nrf/src/bin/rak4631.rs:337-372`). Because each of them
 either probes for its hardware or degrades to nothing when it is absent,
 the aggregate build is what we ship for the whole family rather than a
 Pocket-V2-only image.
@@ -534,8 +548,8 @@ The mapping from board to binary and features used by the flash recipes:
 | SenseCAP T1000-E | `t1000e` | `bsp-t1000e` |
 
 (Feature sets as invoked in the `just flash`, `just flash-rak4631`, and
-`just flash-rak4631-pocket` recipes: `Justfile:2025`, `Justfile:2053`,
-`Justfile:2067`.)
+`just flash-rak4631-pocket` recipes: `Justfile:2092`, `Justfile:2120`,
+`Justfile:2134`.)
 
 ### What the `lnflash` bundle carries
 
@@ -602,9 +616,9 @@ RNode configuration on the same LoRa network.
 | TX power | 22 dBm |
 
 (`leviculum-nrf/README.md:8`. The profile the firmware loads at boot,
-`eu_medium` (`leviculum-nrf/src/lora.rs:562-601`), applied at
-`leviculum-nrf/src/bin/t114.rs:305` and
-`leviculum-nrf/src/bin/rak4631.rs:405`.)
+`eu_medium` (`leviculum-nrf/src/lora.rs:595-634`), applied at
+`leviculum-nrf/src/node_loop.rs:474` and
+`leviculum-nrf/src/bin/rak4631.rs:402`.)
 
 See [Flashing](flashing.md) for how to build and write these binaries to
 a board, and [Recovery](recovery.md) for the bootloader-entry details.

@@ -664,6 +664,17 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "BLE_LINK_SELF",
         required_keys: &["addr", "action"],
     },
+    // A 16-byte first write from a central that never subscribed to the
+    // TX characteristic (996): not a Columba identity exchange — every
+    // reference central subscribes before it handshakes
+    // (BLE_PROTOCOL_v2.2 §Handshake Flow) — so the bytes are discovery
+    // debris or probing, not an identity. Refused before the link
+    // table sees them: no link, no `BLE_PEER_UP`, no announces, the
+    // central disconnected.
+    EventSchema {
+        name: "BLE_LINK_REFUSED",
+        required_keys: &["iface", "addr", "reason"],
+    },
     EventSchema {
         name: "BLE_TX_FANOUT_DROP",
         required_keys: &["iface", "peer", "len", "depth"],
@@ -731,7 +742,10 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "AUTO_PEER_REFUSED",
         required_keys: &["reason", "src", "port", "nic", "peers", "suppressed"],
     },
-    // `lnmsg`, the LXMF messenger. Its emitting sites are in `lnmsg/src/events.rs`
+    // `loquax`, the LXMF messenger. The program was called lnmsg until #232
+    // renamed it; its events keep the `LNMSG_` prefix until a later order
+    // renames them here, in the emitters and in periculum's cells together.
+    // Its emitting sites are in `loquax/src/events.rs`
     // rather than in this workspace member: the catalogue is one global list by
     // design (the layer looks a name up here whatever crate raised it), and a
     // second per-crate catalogue would mean two places to keep a name's required
@@ -776,6 +790,10 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     EventSchema {
         name: "LNMSG_SYNC_DONE",
         required_keys: &["received", "duplicates", "new"],
+    },
+    EventSchema {
+        name: "LNMSG_STORE_FAILED",
+        required_keys: &["detail"],
     },
     // lnpnd propagation-node events (Codeberg #384 part 1), one line per
     // accepted upload, per `/get`, per eviction. `tid` is the first 16 hex
@@ -957,6 +975,45 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "PR_RETRY_WITHHELD",
         required_keys: &["dst", "iface_req"],
     },
+    // An interface went down (`node/mod.rs::handle_interface_teardown`).
+    // `idx` is the index a later `PKT_DROP reason=no-such-interface` names
+    // as `iface_out`; `teardown` is `final` or `transient` (931, the driver
+    // classifies each site), and `links_closed` the own links a `final`
+    // teardown closed with `InterfaceRemoved`. The rest count what the
+    // transport culled with it.
+    EventSchema {
+        name: "IFACE_DOWN",
+        required_keys: &[
+            "iface",
+            "idx",
+            "teardown",
+            "links_closed",
+            "paths",
+            "discovery_windows",
+            "handed_on",
+            "batched",
+            "targeted",
+        ],
+    },
+    // An interface-up notification named an index the core tore down and
+    // nothing registered again (`node/mod.rs::handle_interface_up`, 981): it
+    // was sent before the teardown and crossed it in a driver channel, so
+    // the re-announce it asked for is refused — before the refusal, each
+    // local destination's fresh announce died at dispatch as a
+    // `PKT_DROP reason=no-such-interface` naming `idx` as `iface_out`.
+    EventSchema {
+        name: "IFACE_UP_STALE",
+        required_keys: &["idx"],
+    },
+    // A reconnect notification (`kind=reconnect`) or a per-peer transition
+    // (`kind=peer`) named an index the core tore down and nothing registered
+    // again (`driver/mod.rs::retired_interface_event`, 989): it crossed the
+    // teardown in a driver channel and is dropped before the driver re-applies
+    // IFAC config or a peer count for the gone index.
+    EventSchema {
+        name: "IFACE_EVENT_STALE",
+        required_keys: &["idx", "kind"],
+    },
     // The management destination's own announce (`node/mod.rs`); `iface` is
     // the literal `all`, since it goes out on every interface at once.
     EventSchema {
@@ -1094,6 +1151,26 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     EventSchema {
         name: "CONFIG_DEFAULT",
         required_keys: &["key", "value", "rnsd"],
+    },
+    // Which configuration lnsd runs (`lnsd.rs`, #471): the file at `path`,
+    // or the built-in default because there is none. Once at startup.
+    EventSchema {
+        name: "CONFIG",
+        required_keys: &["source", "path"],
+    },
+    // One per configured interface section, before any is built
+    // (`driver/mod.rs`, `initialize_interfaces`, #471): `origin=configured`
+    // for a file's section, `default` for the built-in default's.
+    EventSchema {
+        name: "IFACE_CONFIG",
+        required_keys: &["name", "type", "enabled", "origin"],
+    },
+    // The automatic layer's decision (`lnsd.rs`, `auto_layer::AutoLayer::log`,
+    // #471 step 2): `on` or `off`, why (`config`, `marker`, `env`,
+    // `default`), and each `[auto]` medium as `yes`/`no`. Once at startup.
+    EventSchema {
+        name: "AUTO_LAYER",
+        required_keys: &["state", "reason", "lan", "servers", "bluetooth", "serial"],
     },
     EventSchema {
         name: "LOCK_DEPTH_OVERFLOW",
@@ -1556,7 +1633,7 @@ enum SinkMode {
 /// hundred lines apart in `handle_announce`, and nothing between them
 /// can take seconds.  What can is the emission itself: the driver's
 /// event loop calls `tracing::debug!` while it holds the core mutex
-/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:4758`), the layer
+/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:4841`), the layer
 /// wrote the line with a blocking `write(2)` on that very thread, and a
 /// `write(2)` to a USB disk under writeback throttling blocks for
 /// seconds.  Every other task then queued behind the core mutex, so the
@@ -1769,7 +1846,7 @@ extern "C" fn flush_event_log_at_exit() {
 /// or until `timeout` expires.
 ///
 /// Public because a process that writes an event log and then asserts on
-/// the file (the multi-process event-log tests, `lnmsg`'s CLI tests)
+/// the file (the multi-process event-log tests, `loquax`'s CLI tests)
 /// needs a point where "written" is a fact rather than a race.  A no-op
 /// when no event log is configured or when the blocking mode is in
 /// force, because in both cases the write already happened on the
@@ -1857,11 +1934,11 @@ fn parse_t(line: &str) -> Option<u128> {
 /// # The fmt layer writes to stderr, not stdout
 ///
 /// `tracing_subscriber`'s default writer is stdout, and stdout is the
-/// data channel of every binary that installs this: `lnmsg` prints
+/// data channel of every binary that installs this: `loquax` prints
 /// message bodies there, `lncp` its progress, `lnprobe` its reply
 /// lines.  A WARN on stdout splices a log line into that payload the
 /// moment something goes wrong — which is exactly when a caller is
-/// least able to cope with it.  `lnmsg`'s interop suite asserts a
+/// least able to cope with it.  `loquax`'s interop suite asserts a
 /// byte-empty stdout for a successful send and went red under load for
 /// precisely this reason (`CORE_PROCESSOR_OVER_BUDGET` from
 /// `driver::processor::report_budget`).
@@ -2206,19 +2283,11 @@ fn field_value_problem(value: &str) -> Option<&'static str> {
 /// space would still be several tokens to all of them.  The mapping is the
 /// same one `sanitize_scalar` applies as the sink's last-resort rescue,
 /// so a value reads identically whichever produced it.
-pub struct Scalar<'a>(pub &'a str);
-
-impl std::fmt::Display for Scalar<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Character by character into the formatter rather than through
-        // `sanitize_scalar`'s `String`: the formatter is the event layer's
-        // reused buffer, so this costs nothing per event.
-        for c in self.0.chars() {
-            f.write_char(sanitized_char(c))?;
-        }
-        Ok(())
-    }
-}
+///
+/// The type itself lives in `leviculum-core` (`event_scalar`), so that a
+/// `no_std` emission site (the core, the `loquax` core) renders through the
+/// same definition; this is a re-export, not a second copy.
+pub use leviculum_core::event_scalar::Scalar;
 
 /// Coerce a field value into a whitespace-free scalar so the canonical
 /// line is ALWAYS tokenizable by the documented whitespace `key=val`

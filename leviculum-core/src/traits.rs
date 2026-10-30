@@ -684,6 +684,9 @@ pub trait Storage {
     /// Return owned copies of all link table entries (for RPC export).
     fn link_entries(&self) -> Vec<([u8; TRUNCATED_HASHBYTES], LinkEntry)>;
 
+    /// Count relay entries without allocating an export table.
+    fn link_entry_count(&self) -> usize;
+
     // Announce Table
     /// Look up an announce entry
     fn get_announce(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> Option<&AnnounceEntry>;
@@ -1133,6 +1136,9 @@ impl Storage for NoStorage {
     fn set_link_entry(&mut self, _link_id: [u8; TRUNCATED_HASHBYTES], _entry: LinkEntry) {}
     fn link_entries(&self) -> Vec<([u8; TRUNCATED_HASHBYTES], LinkEntry)> {
         Vec::new()
+    }
+    fn link_entry_count(&self) -> usize {
+        0
     }
 
     fn get_announce(&self, _dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> Option<&AnnounceEntry> {

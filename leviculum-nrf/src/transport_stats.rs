@@ -49,7 +49,7 @@
 //! than six more fields on the totals line: the totals line is already at the
 //! width a serial capture wraps, and a per-interface line is what
 //! `grep 'iface=lora_sx1262'` turns into a single carrier's time series.
-//! They come from [`crate::iface_bytes`], which is also what the `/status`
+//! They come from [`leviculum_firmware::iface_bytes`], which is also what the `/status`
 //! bundle answers `rnstatus -R` with, so the instrument and the remote answer
 //! agree by construction rather than by review.
 
@@ -60,8 +60,9 @@ use rand_core::CryptoRngCore;
 
 /// How often the `[TRANSPORT]` line is emitted.
 ///
-/// 30 s, the same cadence as the `[HEAP]` line (`lib.rs:254`), so the two
-/// periodic counter lines interleave predictably in a capture. The events
+/// 30 s, the same cadence as the `[HEAP]` line
+/// ([`leviculum_firmware::heap::watermark_loop`]), so the two periodic
+/// counter lines interleave predictably in a capture. The events
 /// being diagnosed are minutes apart (a 15-minute management-announce
 /// heartbeat, a report every few minutes), so 30 s puts ~30 samples inside
 /// one heartbeat interval — enough to place a counter step within 30 s of the
@@ -119,7 +120,7 @@ impl Ticker {
         self.next = now + PERIOD;
         // One sampler, one cadence: the speed window a `/status` answer
         // reports is the window whose bytes were just printed.
-        crate::iface_bytes::sample_all(now.as_millis());
+        leviculum_firmware::iface_bytes::sample(now.as_millis());
         log(node);
     }
 }
@@ -158,14 +159,11 @@ where
             crate::lora::LORA_STALE_DROP_COUNT.load(core::sync::atomic::Ordering::Relaxed),
         ),
     );
-    for (id, name) in crate::iface_bytes::NAMES.iter().enumerate() {
-        let Some(counters) = crate::iface_bytes::counters(id) else {
-            continue;
-        };
-        let (rxb, txb) = counters.totals();
+    for (id, name) in leviculum_firmware::iface_bytes::names().iter().enumerate() {
+        let traffic = leviculum_firmware::iface_bytes::snapshot(id);
         crate::log::log_fmt(
             "[TRANSPORT] ",
-            format_args!("iface={name} rxb={rxb} txb={txb}"),
+            format_args!("iface={name} rxb={} txb={}", traffic.rxb, traffic.txb),
         );
     }
 }

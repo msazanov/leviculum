@@ -50,18 +50,18 @@ optimisation; it is the property that makes the operation survivable.**
 not read off a header — three units answered nothing to `05h`, `9Fh`,
 `90h` or the datasheet reset while every pin followed our drive, and both
 board files state `qspi_part: None`
-(`leviculum-nrf/src/boards/t114.rs:184`,
-`leviculum-nrf/src/boards/rak4631.rs:199`). The `EXTERNAL_FLASH_DEVICES`
+(`leviculum-nrf/src/boards/t114.rs:198`,
+`leviculum-nrf/src/boards/rak4631.rs:192`). The `EXTERNAL_FLASH_DEVICES`
 lines in the vendor variant headers that once suggested otherwise sit
 under comments denying the part — RAK's own reads "No onboard flash"
-(`leviculum-nrf/src/boards/rak4631.rs:152-153`) — and
+(`leviculum-nrf/src/boards/rak4631.rs:148-149`) — and
 `leviculum-nrf/src/qspi.rs` carries the whole account. For these two
 boards stage 1 is the entire answer, and that is why the two stages are
 separate documents rather than two halves of one.
 
 **SolarNode: conditional, and the condition is a boot line.** The XIAO
 nRF52840 module's `CONFIG.qspi_part` is `Some(&crate::qspi::P25Q16H)`
-(`leviculum-nrf/src/boards/solarnode.rs:402`), 2 MB
+(`leviculum-nrf/src/boards/solarnode.rs:394`), 2 MB
 (`P25Q16H`, `leviculum-nrf/src/qspi.rs:435`). But that part number comes
 from Seeed's variant headers and the wiring from Seeed's schematic, and
 the schematic for the plain XIAO v1.1 draws the same footprint marked
@@ -276,7 +276,7 @@ power at every word boundary (`leviculum-nrf/src/boot_count.rs`).
 
 The golden image is the last one that came back healthy, kept on the same
 part. The trigger for restoring it is the boot counter that landed on
-2026-09-24 (`record_at_boot`, `leviculum-nrf/src/boot_count.rs:122`,
+2026-09-24 (`boot_count::record_at_boot`, `leviculum-nrf/src/boot_count.rs:76`,
 Codeberg #380): one 16-byte record per boot with the raw `RESETREAS` and
 whether retained RAM survived, appended to the `BOOT` page, one erase per
 256 boots. It exists because a Pocket V2 restarted twice on a field walk

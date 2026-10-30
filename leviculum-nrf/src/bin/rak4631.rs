@@ -5,8 +5,8 @@
 //! - Interface 1: SX1262 LoRa radio (module-internal SPI on P1.10–P1.15+P1.06)
 //! - Interface 2: BLE peripheral (Columba v2.2 protocol)
 //!
-//! Baseboard peripherals (display, GNSS, battery telemetry) land in Phase 3.
-//! Tracked under Codeberg #42.
+//! Baseboard peripherals (RAK19026 VC: display and button, GNSS, battery) are
+//! all wired, each behind its own cargo feature; the bare-module build has none.
 
 #![no_std]
 #![no_main]
@@ -17,7 +17,6 @@ use alloc::collections::BTreeMap;
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, select3, select4, Either, Either3, Either4};
 use embassy_nrf::gpio::{Level, Output, OutputDrive};
-use embassy_nrf::spim;
 use embassy_time::{Duration, Instant, Timer};
 
 use leviculum_core::embedded_storage::EmbeddedStorage;
@@ -27,10 +26,11 @@ use leviculum_core::traits::Interface;
 use leviculum_core::transport::{dispatch_actions, Action};
 use leviculum_core::InterfaceId;
 
-use leviculum_nrf::ble::{BleInterface, PeerEvent as BlePeerEvent};
+use leviculum_firmware::ble_link::BleInterface;
+use leviculum_firmware::clock::{set_time_source, time_source_str, EmbassyClock};
+use leviculum_firmware::seams::BleLinkEvent;
+use leviculum_firmware::{entropy::Entropy, interface::EmbeddedInterface};
 use leviculum_nrf::boards::rak4631;
-use leviculum_nrf::clock::EmbassyClock;
-use leviculum_nrf::interface::EmbeddedInterface;
 use leviculum_nrf::lora::LoRaInterface;
 use leviculum_nrf::{info, init_heap, log_critical};
 
@@ -81,6 +81,9 @@ async fn main(spawner: Spawner) {
     // P0/P1/P4; everything else goes to P5 (RNG, USBD, TWISPI0, SAADC,
     // SPI2, UARTE0). GPIOTE + RTC1 stay P2 per embassy_nrf::config.
     leviculum_nrf::set_irq_priorities();
+    leviculum_firmware::iface_bytes::set_names(&rak4631::IFACE_NAMES);
+    leviculum_firmware::entropy::set_source(leviculum_nrf::rng::fill_entropy);
+    leviculum_firmware::feedback::set_sinks::<leviculum_nrf::feedback::NrfSinks>();
 
     // This binary wires a telemetry Reporter into its main loop; declared
     // before USB comes up so the serial task can never answer a telemetry
@@ -124,21 +127,24 @@ async fn main(spawner: Spawner) {
         embassy_nrf::nvmc::Nvmc::new(p.NVMC.reborrow()),
         &boot,
     );
-    leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::PersistRead);
+    leviculum_firmware::boot_trace::phase(leviculum_firmware::boot_trace::Phase::PersistRead);
     let vbus = leviculum_nrf::init_vbus();
     let serial = leviculum_nrf::usb::init(&spawner, p.USBD, vbus, &rak4631::CONFIG);
-    leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::UsbUp);
+    leviculum_firmware::boot_trace::phase(leviculum_firmware::boot_trace::Phase::UsbUp);
 
     log_critical!("leviculum RAK4631 booting");
     log_critical!("[FW_BUILD] {}", leviculum_nrf::FW_BUILD_STAMP);
-    log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
+    log_critical!("[TIME_SOURCE] source={}", time_source_str());
     // GNSS presence banner (#240): the settled states are emitted as
     // `state=<no-hardware|no-fix|fix>` transitions by the GNSS task;
     // this boot line marks "machinery armed, answer pending" so a log
     // tail always carries a [GNSS_PRESENCE] anchor. A replay keyed on
     // the three settled states treats it like no line at all.
     #[cfg(feature = "gnss")]
-    log_critical!("[GNSS_PRESENCE] state=detecting baud=9600");
+    log_critical!(
+        "[GNSS_PRESENCE] state=detecting baud={}",
+        rak4631::GNSS_BAUD
+    );
     leviculum_nrf::log_boot_diagnostics(
         &boot,
         &boot_count,
@@ -169,7 +175,7 @@ async fn main(spawner: Spawner) {
     #[cfg(feature = "display")]
     let led_rx = rak4631::led_notification(p.P1_04);
 
-    let rng = leviculum_nrf::rng::RawHwRng::new();
+    let rng = Entropy;
 
     // Load or generate persistent identity from internal flash
     let mut id_store = leviculum_nrf::flash::NvmcIdentityStore::new(
@@ -182,11 +188,7 @@ async fn main(spawner: Spawner) {
     // core's link cap — the budget and the cap are the same constant.
     const MAX_ENDPOINT_LINKS: usize =
         leviculum_nrf::heap_census::max_endpoint_links(core::mem::size_of::<
-            leviculum_core::node::NodeCore<
-                leviculum_nrf::rng::RawHwRng,
-                EmbassyClock,
-                EmbeddedStorage,
-            >,
+            leviculum_core::node::NodeCore<Entropy, EmbassyClock, EmbeddedStorage>,
         >());
     const _: () = assert!(
         MAX_ENDPOINT_LINKS >= leviculum_nrf::ble::MAX_LINKS,
@@ -196,8 +198,8 @@ async fn main(spawner: Spawner) {
     let mut builder = NodeCoreBuilder::new()
         .enable_transport(true)
         .max_links(Some(MAX_ENDPOINT_LINKS))
-        .max_incoming_resource_size(leviculum_nrf::MAX_INCOMING_RESOURCE_BYTES)
-        .max_incoming_resources_per_link(leviculum_nrf::BOARD_INCOMING_RESOURCES_PER_LINK)
+        .max_incoming_resource_size(leviculum_heap_budget::MAX_INCOMING_RESOURCE_BYTES)
+        .max_incoming_resources_per_link(leviculum_heap_budget::BOARD_INCOMING_RESOURCES_PER_LINK)
         // #402: announces held back by the LoRa announce cap wait here, and
         // on a board the queue is a heap term, not a formality. One entry is
         // its raw announce (~183 B) plus its Vec header, destination, hops
@@ -259,18 +261,14 @@ async fn main(spawner: Spawner) {
     // against it. Printed beside `[TIME_SOURCE]`, which says
     // `restored-floor` when the seam took it.
     let mut time_checkpoint =
-        leviculum_nrf::time_floor::Checkpoint::restore_at_boot(|v| node.restore_emission_floor(v));
-    if leviculum_nrf::set_time_source(node.time_source()) {
-        log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
+        leviculum_nrf::time_floor::restore_at_boot(|v| node.restore_emission_floor(v));
+    if set_time_source(node.time_source()) {
+        log_critical!("[TIME_SOURCE] source={}", time_source_str());
     }
     const _: () = assert!(
         leviculum_nrf::heap_census::budget_total(core::mem::size_of::<
-            leviculum_core::node::NodeCore<
-                leviculum_nrf::rng::RawHwRng,
-                EmbassyClock,
-                EmbeddedStorage,
-            >,
-        >()) <= leviculum_nrf::HEAP_SIZE,
+            leviculum_core::node::NodeCore<Entropy, EmbassyClock, EmbeddedStorage>,
+        >()) <= leviculum_heap_budget::HEAP_SIZE,
         "HEAP_BUDGET total exceeds the heap (#388): shrink a term"
     );
 
@@ -296,12 +294,12 @@ async fn main(spawner: Spawner) {
     }
 
     // Register all three interfaces
-    node.set_interface_name(0, alloc::string::String::from("serial_usb"));
+    node.set_interface_name(0, alloc::string::String::from(rak4631::IFACE_NAMES[0]));
     node.set_interface_hw_mtu(0, 564);
     // Codeberg #117: the client-facing serial interface must be Gateway so the
     // node discovers unknown paths on behalf of the host.
     node.set_interface_mode(0, leviculum_core::InterfaceMode::Gateway);
-    node.set_interface_name(1, alloc::string::String::from("lora_sx1262"));
+    node.set_interface_name(1, alloc::string::String::from(rak4631::IFACE_NAMES[1]));
     // Codeberg #390: 508, not 255. Three places already agree on 508 for a
     // LoRa carrier -- the reference (`RNS/Interfaces/RNodeInterface.py`,
     // `HW_MTU = 508`), our own RNode constant (`leviculum-core/src/rnode.rs`,
@@ -336,7 +334,7 @@ async fn main(spawner: Spawner) {
     // no airtime to the band the question came in on. Pinned in
     // `leviculum-core/src/node/mvr_board_radio_pathresolve.rs`.
     node.set_interface_mode(1, leviculum_core::InterfaceMode::Gateway);
-    node.set_interface_name(2, alloc::string::String::from("ble"));
+    node.set_interface_name(2, alloc::string::String::from(rak4631::IFACE_NAMES[2]));
     node.set_interface_hw_mtu(2, 564);
     node.set_interface_mode(2, leviculum_core::InterfaceMode::Gateway);
     // #854: the BLE interface serves every link but one
@@ -346,7 +344,7 @@ async fn main(spawner: Spawner) {
     // #606: the USB serial interface runs no ingress burst limiter, LoRa
     // and BLE do. The table and its reasons are the heap budget's, which
     // sizes the held-announce cap for exactly the interfaces left on.
-    leviculum_nrf::iface_bytes::apply_board_ingress_control(&mut *node);
+    leviculum_firmware::iface_bytes::apply_board_ingress_control(&mut *node);
 
     // #234: boot-critical, because `log_fmt` DROPS a line while the
     // runtime-drain gate is shut — it returns before the ring buffer and
@@ -390,7 +388,6 @@ async fn main(spawner: Spawner) {
         p.P1_06.into(), // RESET
         p.P1_14.into(), // BUSY
         p.P1_15.into(), // DIO1
-        spim::Frequency::M4,
         leviculum_nrf::radio::FrontEnd {
             tcxo_voltage_reg: rak4631::CONFIG.lora_tcxo_voltage_reg,
             // No host-driven RX enable: DIO2 owns the whole antenna switch, and
@@ -434,10 +431,10 @@ async fn main(spawner: Spawner) {
         // jitter and collide anyway (see `lora_task`).
         let channel_seed = leviculum_nrf::lora::channel_seed();
         leviculum_nrf::lora::spawn(&spawner, lora, radio_cfg, channel_seed);
-        leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::LoraTask);
+        leviculum_firmware::boot_trace::phase(leviculum_firmware::boot_trace::Phase::LoraTask);
     } else {
-        leviculum_nrf::media::log_carrier_held_down("lora");
-        leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::LoraSkipped);
+        leviculum_firmware::media::log_carrier_held_down("lora");
+        leviculum_firmware::boot_trace::phase(leviculum_firmware::boot_trace::Phase::LoraSkipped);
     }
 
     // BLE — same Columba v2.2 service the T114 exposes.
@@ -452,6 +449,7 @@ async fn main(spawner: Spawner) {
         &spawner,
         media.ble_enabled,
         identity_hash,
+        leviculum_nrf::name::boot_gap_name(),
         vbus,
         p.RTC0,
         p.TIMER0,
@@ -473,7 +471,7 @@ async fn main(spawner: Spawner) {
         p.PPI_CH29,
         p.RNG,
     );
-    let ble_channels = leviculum_nrf::ble::channels();
+    let ble_channels = leviculum_firmware::ble_link::channels();
     info!("BLE ready");
 
     // Both spawn decisions are made: say what actually came up, then
@@ -594,7 +592,7 @@ async fn main(spawner: Spawner) {
         info!("battery task spawned");
     }
 
-    let (hu, hf) = leviculum_nrf::heap_stats();
+    let (hu, hf) = leviculum_firmware::heap::heap_stats();
     info!("heap u={} f={}", hu, hf);
     leviculum_nrf::log_stack("post-init");
 
@@ -622,7 +620,7 @@ async fn main(spawner: Spawner) {
     // position only, never as a clock.
     #[cfg(feature = "gnss")]
     let mut gnss_rx = {
-        let rx = leviculum_nrf::baseboard::GNSS_FIX.receiver();
+        let rx = leviculum_firmware::board_state::GNSS_FIX.receiver();
         if rx.is_none() {
             log_critical!("[TIME_SEED_REFUSED] source=gnss reason=watch_capacity");
         }
@@ -640,7 +638,7 @@ async fn main(spawner: Spawner) {
     // here on in the periodic banner and the identity query). This is
     // the only place they are written: a per-BSP copy on the gated path
     // was a line a late reader never saw (#234).
-    leviculum_nrf::identity::note_boot_identity(
+    leviculum_firmware::identity::note_boot_identity(
         *node.identity().hash(),
         node.probe_dest_hash().map(|h| *h.as_bytes()),
         delivery_hash.as_ref().map(|h| *h.as_bytes()),
@@ -654,7 +652,7 @@ async fn main(spawner: Spawner) {
     let pn_config = leviculum_nrf::pn::load_config_at_boot(rak4631::CONFIG.telemetry_flash_page);
     let mut pn_engine = leviculum_nrf::pn::Engine::new(&mut node, pn_config);
     if let Some(pn) = pn_engine.as_ref() {
-        leviculum_nrf::identity::note_propagation(*pn.destination_hash().as_bytes());
+        leviculum_firmware::identity::note_propagation(*pn.destination_hash().as_bytes());
         spawner.must_spawn(leviculum_nrf::pn::miner_task());
     } else {
         log_critical!("PN role=off reason=identity-underivable");
@@ -721,7 +719,7 @@ async fn main(spawner: Spawner) {
     // 8. Host fixed position (#238 control envelope)
     // 9. Telemetry evaluation tick (only while a target is configured)
     // 10. User button press that announces (#459; never on a board without one)
-    leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::MainLoop);
+    leviculum_firmware::boot_trace::phase(leviculum_firmware::boot_trace::Phase::MainLoop);
 
     // One engine pass: digest a dispatch's events, run the async half
     // (validation, flash flushes, periodic jobs), and put whatever the
@@ -747,7 +745,7 @@ async fn main(spawner: Spawner) {
                         [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                     let dispatched =
                         dispatch_actions(&mut ifaces, status_out.actions, &ifac_configs);
-                    leviculum_nrf::dispatch::settle("remote-status", &mut node, &dispatched);
+                    leviculum_firmware::dispatch::settle("remote-status", &mut node, &dispatched);
                 }
             }
             if let Some(pn) = pn_engine.as_mut() {
@@ -757,7 +755,7 @@ async fn main(spawner: Spawner) {
                     let mut ifaces: [&mut dyn Interface; 3] =
                         [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                     let dispatched = dispatch_actions(&mut ifaces, pn_out.actions, &ifac_configs);
-                    leviculum_nrf::dispatch::settle("pn", &mut node, &dispatched);
+                    leviculum_firmware::dispatch::settle("pn", &mut node, &dispatched);
                 }
             }
         };
@@ -849,7 +847,7 @@ async fn main(spawner: Spawner) {
             select3(
                 telemetry_tick,
                 announce_tick,
-                leviculum_nrf::button::announce_press(),
+                leviculum_firmware::button::announce_press(),
             ),
         )
         .await;
@@ -881,8 +879,8 @@ async fn main(spawner: Spawner) {
         // from traffic kept saying the birth state forever (Codeberg #398).
         // Reading the node is what keeps the banner honest without a
         // notification path per source.
-        if leviculum_nrf::set_time_source(node.time_source()) {
-            log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
+        if set_time_source(node.time_source()) {
+            log_critical!("[TIME_SOURCE] source={}", time_source_str());
         }
         // Write the calendar back at most hourly once a live source vouched
         // for it (#166 item 4); the store task does the flash work.
@@ -896,9 +894,9 @@ async fn main(spawner: Spawner) {
                 use leviculum_core::envelope;
                 use leviculum_core::transport::TimeSource;
                 let answer = if node.set_wall_time_unix_secs(unix_secs, TimeSource::Host) {
-                    leviculum_nrf::set_time_source(TimeSource::Host);
+                    set_time_source(TimeSource::Host);
                     log_critical!("[TIME_SEED] source=host unix={}", unix_secs);
-                    log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
+                    log_critical!("[TIME_SOURCE] source={}", time_source_str());
                     envelope::encode_ack(envelope::TYPE_WALL_TIME)
                 } else {
                     log_critical!("[TIME_SEED_REFUSED] source=host unix={}", unix_secs);
@@ -983,7 +981,7 @@ async fn main(spawner: Spawner) {
                                 [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                             let dispatched =
                                 dispatch_actions(&mut ifaces, out.actions, &ifac_configs);
-                            leviculum_nrf::dispatch::settle(
+                            leviculum_firmware::dispatch::settle(
                                 "pn-announce-host",
                                 &mut node,
                                 &dispatched,
@@ -1019,7 +1017,7 @@ async fn main(spawner: Spawner) {
                                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                                 let dispatched =
                                     dispatch_actions(&mut ifaces, out.actions, &ifac_configs);
-                                leviculum_nrf::dispatch::settle(
+                                leviculum_firmware::dispatch::settle(
                                     "announce-host",
                                     &mut node,
                                     &dispatched,
@@ -1064,9 +1062,9 @@ async fn main(spawner: Spawner) {
                     // A refusal leaves the gate open for the next fix:
                     // `leviculum_gnss_time::SeedGate::settle`.
                     if time_seed_gate.settle(node.set_wall_time_unix_secs(unix, TimeSource::Gnss)) {
-                        leviculum_nrf::set_time_source(TimeSource::Gnss);
+                        set_time_source(TimeSource::Gnss);
                         log_critical!("[TIME_SEED] source=gnss unix={}", unix);
-                        log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
+                        log_critical!("[TIME_SOURCE] source={}", time_source_str());
                     } else {
                         log_critical!("[TIME_SEED_REFUSED] source=gnss unix={}", unix);
                     }
@@ -1087,26 +1085,41 @@ async fn main(spawner: Spawner) {
                     let mut ifaces: [&mut dyn Interface; 3] =
                         [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                     let dispatched = dispatch_actions(&mut ifaces, actions, &ifac_configs);
-                    leviculum_nrf::dispatch::settle("announce-periodic", &mut node, &dispatched);
+                    leviculum_firmware::dispatch::settle(
+                        "announce-periodic",
+                        &mut node,
+                        &dispatched,
+                    );
                 }
             }
             Either4::Fourth(Either3::Third(())) => {
                 // A double press of the user button that got past its
                 // debouncer and its 30 s limit (#459, `leviculum_nrf::button`):
                 // both announces, booked in the cadence's duty budget. A
-                // board without a button never raises this.
+                // board without a button never raises this. The air watch
+                // around the dispatch plays `announce-sent` once the last
+                // LoRa packet it queued is keyed (order 930).
+                leviculum_firmware::feedback::announce_press_begin();
+                let lora_before = leviculum_nrf::lora::accepted_packets();
                 let actions = leviculum_nrf::announce::on_button_press(
                     &mut node,
                     &mut announce_gate,
                     pn_engine.as_mut(),
                     delivery_hash.as_ref(),
                 );
-                if !actions.is_empty() {
+                let announced = !actions.is_empty();
+                if announced {
                     let mut ifaces: [&mut dyn Interface; 3] =
                         [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                     let dispatched = dispatch_actions(&mut ifaces, actions, &ifac_configs);
-                    leviculum_nrf::dispatch::settle("announce-button", &mut node, &dispatched);
+                    leviculum_firmware::dispatch::settle("announce-button", &mut node, &dispatched);
                 }
+                leviculum_firmware::feedback::announce_press_end(
+                    lora_before,
+                    leviculum_nrf::lora::accepted_packets(),
+                    announced,
+                    leviculum_nrf::media::lora_active(),
+                );
                 // Then one immediate position report when a recipient is
                 // configured (order 914): armed here, sent by the next
                 // telemetry tick through the reporter's own path.
@@ -1125,7 +1138,7 @@ async fn main(spawner: Spawner) {
                 let mut ifaces: [&mut dyn Interface; 3] =
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
-                leviculum_nrf::dispatch::settle("ser-rx", &mut node, &dispatched);
+                leviculum_firmware::dispatch::settle("ser-rx", &mut node, &dispatched);
                 pn_step!(&output.events);
             }
             Either4::First(Either4::Second(data)) => {
@@ -1150,13 +1163,22 @@ async fn main(spawner: Spawner) {
                 let mut ifaces: [&mut dyn Interface; 3] =
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
-                leviculum_nrf::dispatch::settle("lora-rx", &mut node, &dispatched);
+                leviculum_firmware::dispatch::settle("lora-rx", &mut node, &dispatched);
                 pn_step!(&output.events);
             }
-            Either4::First(Either4::Third(Either::First((peer, data)))) => {
+            Either4::First(Either4::Third(Either::First(event))) => {
+                // `ble_link::deliver` routes peer transitions onto their
+                // own channel; only inbound packets ride this one.
+                let BleLinkEvent::Inbound {
+                    link: peer,
+                    packet: data,
+                } = event
+                else {
+                    continue;
+                };
                 // #388 census: this packet just left BLE_INCOMING
                 // custody (counted by the session that queued it).
-                leviculum_nrf::ble::incoming_held_sub(data.capacity());
+                leviculum_firmware::ble_link::incoming_held_sub(data.capacity());
                 // The reception itself is already on the log: columba's
                 // `BLE: RX <n>B conn=<h> frags=<k>` line names the link
                 // and the peer's fragmentation (#376), so a second
@@ -1183,7 +1205,7 @@ async fn main(spawner: Spawner) {
                 let mut ifaces: [&mut dyn Interface; 3] =
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
-                leviculum_nrf::dispatch::settle("ble-rx", &mut node, &dispatched);
+                leviculum_firmware::dispatch::settle("ble-rx", &mut node, &dispatched);
                 pn_step!(&output.events);
             }
             Either4::First(Either4::Third(Either::Second(event))) => {
@@ -1197,7 +1219,11 @@ async fn main(spawner: Spawner) {
                 // pull for a medium switched off mid-run dies in the
                 // interface's carrier-off drop like any other packet.
                 let (label, output) = match event {
-                    BlePeerEvent::Lost(peer) => {
+                    // `ble_link::deliver` routes inbound packets onto
+                    // their own channel; only peer transitions ride
+                    // this one.
+                    BleLinkEvent::Inbound { .. } => continue,
+                    BleLinkEvent::PeerLost { identity: peer, .. } => {
                         let output = node.handle_interface_peer_lost(InterfaceId(2), peer);
                         info!(
                             "BLE peer lost, {} paths culled",
@@ -1209,7 +1235,7 @@ async fn main(spawner: Spawner) {
                         );
                         ("ble-peer-lost", output)
                     }
-                    BlePeerEvent::Up(peer) => {
+                    BleLinkEvent::PeerUp { identity: peer, .. } => {
                         let mut output = node.handle_interface_peer_up(InterfaceId(2), peer);
                         info!("BLE peer up, {} pull actions", output.actions.len());
                         // #376: and announce OURSELVES to that peer, on
@@ -1239,7 +1265,7 @@ async fn main(spawner: Spawner) {
                 let mut ifaces: [&mut dyn Interface; 3] =
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
-                leviculum_nrf::dispatch::settle(label, &mut node, &dispatched);
+                leviculum_firmware::dispatch::settle(label, &mut node, &dispatched);
                 pn_step!(&output.events);
             }
             Either4::First(Either4::Fourth(())) => {
@@ -1301,7 +1327,7 @@ async fn main(spawner: Spawner) {
                 let mut ifaces: [&mut dyn Interface; 3] =
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
-                leviculum_nrf::dispatch::settle("timeout", &mut node, &dispatched);
+                leviculum_firmware::dispatch::settle("timeout", &mut node, &dispatched);
                 pn_step!(&output.events);
             }
             Either4::Fourth(Either3::First(())) => {
@@ -1322,7 +1348,7 @@ async fn main(spawner: Spawner) {
                         // (#344). `settle` counts and logs afterwards, as at
                         // every other site.
                         reporter.note_dispatch(&dispatched);
-                        leviculum_nrf::dispatch::settle("telemetry", &mut node, &dispatched);
+                        leviculum_firmware::dispatch::settle("telemetry", &mut node, &dispatched);
                     }
                 }
             }
@@ -1387,7 +1413,7 @@ where
     let has_fix = false;
     #[cfg(feature = "gnss")]
     let has_fix = {
-        use leviculum_nrf::baseboard::{GnssPresence, GNSS_FIX, GNSS_PRESENCE};
+        use leviculum_firmware::board_state::{GnssPresence, GNSS_FIX, GNSS_PRESENCE};
         if let Some(fix) = GNSS_FIX.try_get() {
             readings.latitude = fix.latitude;
             readings.longitude = fix.longitude;
@@ -1407,7 +1433,7 @@ where
         // Option since #380, and a pack whose voltage its classification
         // cannot explain sends no battery sensor at all rather than a
         // number a collector cannot check.
-        readings.battery_percent = leviculum_nrf::baseboard::BATTERY_STATE
+        readings.battery_percent = leviculum_firmware::board_state::BATTERY_STATE
             .try_get()
             .and_then(|b| b.percent);
     }

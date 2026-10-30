@@ -375,6 +375,10 @@ pub struct IncomingResourceTransfer {
 pub struct LxmfNode {
     delivery_destination: DestinationHash,
     config: LxmfNodeConfig,
+    /// Destinations whose link waits for a path. A want is spent by the link
+    /// it starts: the router counts one delivery attempt per want, so a want
+    /// that outlived its link would let every later announce or path answer
+    /// start an uncounted link (leviculum 1110).
     wanted_links: BTreeSet<DestinationHash>,
     pending_links: BTreeMap<DestinationHash, LinkId>,
     link_destinations: BTreeMap<LinkId, DestinationHash>,
@@ -475,7 +479,7 @@ impl LxmfNode {
     /// session stays free for the propagation role and the BLE sessions
     /// that the same cap has to afford.
     ///
-    /// Every caller that DOES have an inbox — `lntd`, `lnmsg`, `lnpnd` and
+    /// Every caller that DOES have an inbox — `lntd`, `loquax`, `lnpnd` and
     /// everything else going through [`Self::register`] — keeps
     /// [`Self::delivery_destination`] with its `ProofStrategy::All` and its
     /// `accepts_links`, and `register` sets both explicitly, so a node with
@@ -722,6 +726,7 @@ impl LxmfNode {
         let (link_id, _routed, core) = node
             .connect(destination, &signing_key)
             .map_err(|_| LxmfNodeError::DirectLinkUnavailable)?;
+        self.wanted_links.remove(&destination);
         self.pending_links.insert(destination, link_id);
         self.link_destinations.insert(link_id, destination);
         let output = LxmfNodeOutput {
@@ -1015,7 +1020,12 @@ impl LxmfNode {
                     && !self.pending_links.contains_key(&destination)
                     && node.has_path(&destination)
                 {
-                    let (_, follow_up) = self.start_direct_link(node, destination)?;
+                    let (_link_id, follow_up) = self.start_direct_link(node, destination)?;
+                    crate::tracing::debug!(
+                        "LXMF_DIRECT_LINK_ON_PATH dst={} link={} trigger=announce",
+                        destination,
+                        crate::tracing::Short(_link_id.as_bytes()),
+                    );
                     output.merge(follow_up);
                 }
             }
@@ -1024,7 +1034,12 @@ impl LxmfNode {
             } if self.wanted_links.contains(destination_hash)
                 && !self.pending_links.contains_key(destination_hash) =>
             {
-                let (_, follow_up) = self.start_direct_link(node, *destination_hash)?;
+                let (_link_id, follow_up) = self.start_direct_link(node, *destination_hash)?;
+                crate::tracing::debug!(
+                    "LXMF_DIRECT_LINK_ON_PATH dst={} link={} trigger=path",
+                    destination_hash,
+                    crate::tracing::Short(_link_id.as_bytes()),
+                );
                 output.merge(follow_up);
             }
             NodeEvent::LinkEstablished {

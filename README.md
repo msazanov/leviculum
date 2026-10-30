@@ -68,17 +68,25 @@ The binaries are statically linked against musl, so the package installs on Debi
 
 ### Applications
 
-Two programs ship as their own nightly packages, so neither drags in the auto-started `lnsd` service that `leviculum` sets up. Both are versioned independently of the stack — their version numbers track the programs, not the protocol core.
+Four programs ship as their own nightly packages, so none of them drags in the auto-started `lnsd` service that `leviculum` sets up. All four are versioned independently of the stack — their version numbers track the programs, not the protocol core.
 
 ```sh
 # lnomad — Nomadnet terminal browser
 sudo apt install ./lnomad-nightly-amd64.deb
 
+# loquax — LXMF messenger: plain `loquax` for people, `loquax send` for scripts
+sudo apt install ./loquax-nightly-amd64.deb
+
+# lnpnd — LXMF propagation node, drop-in for Python's lxmd
+sudo apt install ./lnpnd-nightly-amd64.deb
+
 # lblogd — dev-blog server (NomadNet page node + clearnet web)
 sudo apt install ./lblogd-nightly-amd64.deb
 ```
 
-Download them from the same [nightly directory](https://leviculum.network/releases/nightly/latest/) (mirror: the [Codeberg release](https://codeberg.org/Lew_Palm/leviculum/releases/tag/nightly)), as `.deb` or as a userspace `.tar.gz`, for amd64 and arm64. `lnomad` is a plain terminal program. `lblogd` installs and starts a systemd service that serves on `http://127.0.0.1:8180/` until you point it at a domain in `/etc/lblogd/config.toml`. Both need a running Reticulum instance for their mesh side — `lnsd` from the package above, or the Python `rnsd`.
+Download them from the same [nightly directory](https://leviculum.network/releases/nightly/latest/) (mirror: the [Codeberg release](https://codeberg.org/Lew_Palm/leviculum/releases/tag/nightly)), as `.deb` or as a userspace `.tar.gz`, for amd64 and arm64. `lnomad` and `loquax` are plain terminal programs. `lnpnd` installs a systemd service that is enabled but not started, so you can put the node's identity at `/etc/lnpnd/identity` before it first goes on the air. `lblogd` installs and starts a systemd service that serves on `http://127.0.0.1:8180/` until you point it at a domain in `/etc/lblogd/config.toml`. All four need a running Reticulum instance for their mesh side — `lnsd` from the package above, or the Python `rnsd`.
+
+The sixth package, `lnflash`, is the firmware flasher; see [Flashing LoRa hardware](#flashing-lora-hardware-optional) below.
 
 ### Build from source
 
@@ -155,7 +163,19 @@ sudo ./lnflash            # add --dry-run first to see what it would do
 
 Nothing is downloaded and nothing is installed; everything it writes to the
 board is in that directory. The flasher binary is amd64, the images inside it
-are not architecture-specific. The boards it carries an image for:
+are not architecture-specific.
+
+The same bundle ships as a package, which puts `lnflash` in `/usr/bin` and the
+images under `/usr/share/lnflash`, where it finds them from any directory:
+
+```sh
+wget https://leviculum.network/releases/nightly/latest/lnflash-nightly-amd64.deb
+# mirror: https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnflash-nightly-amd64.deb
+sudo apt install ./lnflash-nightly-amd64.deb
+sudo lnflash --dry-run
+```
+
+The boards it carries an image for:
 
 | board | hardware | built from source by |
 | --- | --- | --- |

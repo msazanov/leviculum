@@ -1,0 +1,354 @@
+=== click ===
+--- frame 1: attached ---
+┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
+│▌<61ddb79a…>            ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│ <5ec0ea2e…>            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 2: second conversation ---
+┌● Loquax afbda7b3───────┐┌  <5ec0ea2e…>  unknown───────── no propagation node ┐
+│ <61ddb79a…>            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│▌<5ec0ea2e…>            ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 3: typed ---
+┌  Loquax afbda7b3───────┐┌  <5ec0ea2e…>  unknown───────── no propagation node ┐
+│ <61ddb79a…>            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│▌<5ec0ea2e…>            ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        │├● to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
+│                        ││hello by mouse                                      │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+--- frame 4: sent by click ---
+┌  Loquax afbda7b3───────┐┌  <5ec0ea2e…>  unknown───────── no propagation node ┐
+│▌<5ec0ea2e…>      12:00 ││                                                    │
+│▌you: hello by mouse    ││                                                    │
+│                        ││                                                    │
+│ <61ddb79a…>            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││                            hello by mouse  12:00 ○ │
+│                        │├● to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+--- frame 5: message selected ---
+┌  Loquax afbda7b3───────┐┌● <5ec0ea2e…>  unknown───────── no propagation node ┐
+│▌<5ec0ea2e…>      12:00 ││                                                    │
+│▌you: hello by mouse    ││                                                    │
+│                        ││                                                    │
+│ <61ddb79a…>            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││                           ▌hello by mouse  12:00 ○ │
+│                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 6: detail ---
+┌  Loquax afbda7b3───────┐┌● <5ec0ea2e…>  unknown───────── no propagation node ┐
+│▌<5ec0ea2e…>      12:00 ││                                                    │
+│▌you: hello by mouse    ││                                                    │
+│                        ││                                                    │
+│ <61ddb79a…>            ││                                                    │
+│                        ││                                                    │
+│ ┌ message ─────────────────────────────────────────────────────────────────┐ │
+│ │from you to <5ec0ea2e…>                                                   │ │
+│ │peer   5ec0ea2ecbc35ac16053c86cc29663ec                                   │ │
+│ │id     none yet: the router has not queued it                             │ │
+│ │size   14 bytes                                                           │ │
+│ │state  queued                                                             │ │
+│ │                                                                          │ │
+│ │on this device                                                            │ │
+│ │12:00:00  queued                                                          │ │
+│ └────────────────────────────────────────────────────────────── Esc closes ┘ │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││                           ▌hello by mouse  12:00 ○ │
+│                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 7: closed ---
+┌  Loquax afbda7b3───────┐┌● <5ec0ea2e…>  unknown───────── no propagation node ┐
+│▌<5ec0ea2e…>      12:00 ││                                                    │
+│▌you: hello by mouse    ││                                                    │
+│                        ││                                                    │
+│ <61ddb79a…>            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││                           ▌hello by mouse  12:00 ○ │
+│                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 8: help ---
+┌ Loquax help ─────────────────────────────────────────────────────────────────┐
+│Move                                                                          █
+│  j / k   ↓ / ↑   Ctrl-n / Ctrl-p               scroll a line                 █
+│  Ctrl-f / Ctrl-b   Ctrl-v   PageDown / PageUp  page down / up                █
+│  Ctrl-d / Ctrl-u                               half a page                   █
+│  g / G   Home / End                            top / bottom                  █
+│  Ctrl-↑ / Ctrl-↓                               top / bottom (Signal)         ║
+│  PageDown / PageUp                             page the messages (compose)   ║
+│                                                                              ║
+│Conversations                                                                 ║
+│  Enter                                         open the selected conversation║
+│  Enter                                         open the selected result      ║
+│  : delete conversation                         delete the conversation       ║
+│                                                on this device; y confirms    ║
+│  : pin                                         pin or unpin the conversation ║
+│  : rename                                      name the peer                 ║
+│                                                empty clears                  ║
+│  : block                                       block the peer                ║
+│                                                kept, not shown               ║
+│  : unblock                                     unblock the peer              ║
+│  : blocked                                     list the blocked, or the rest ║
+│  : import                                      import from another messenger ║
+│                                                contacts and history; the     ║
+└──────────────────────────────────────────────────────────────────────────────┘
+=== wheel ===
+--- frame 1: list focused ---
+┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
+│▌<61ddb79a…>      12:00 ││                                 message 1  12:00 ○ │
+│▌you: message 10        ││                                                    │
+│                        ││                                 message 2  12:00 ○ │
+│ <5ec0ea2e…>            ││                                                    │
+│                        ││                                 message 3  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 4  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 5  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 6  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 7  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 8  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 9  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                message 10  12:00 ○ │
+│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 2: wheeled up ---
+┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
+│▌<61ddb79a…>      12:00 ││           nothing earlier on this device           │
+│▌you: message 10        ││                    ── Today ──                     │
+│                        ││                                 message 1  12:00 ○ │
+│ <5ec0ea2e…>            ││                                                    │
+│                        ││                                 message 2  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 3  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 4  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 5  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 6  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 7  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 8  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 9  12:00 ○ │
+│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 3: wheeled down ---
+┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
+│▌<61ddb79a…>      12:00 ││                                 message 1  12:00 ○ │
+│▌you: message 10        ││                                                    │
+│                        ││                                 message 2  12:00 ○ │
+│ <5ec0ea2e…>            ││                                                    │
+│                        ││                                 message 3  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 4  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 5  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 6  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 7  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 8  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 9  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                message 10  12:00 ○ │
+│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+=== drag ===
+--- frame 1: two sent ---
+┌  Loquax afbda7b3───────┐┌● <61ddb79a…>  unknown───────── no propagation node ┐
+│▌<61ddb79a…>      12:00 ││                                                    │
+│▌you: second line       ││                                                    │
+│                        ││                                                    │
+│ <5ec0ea2e…>            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││                                first line  12:00 ○ │
+│                        ││                                                    │
+│                        ││                              ▌second line  12:00 ○ │
+│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- osc52 \e]52;c;Zmlyc3QgbGluZQpzZWNvbmQgbGluZQ==\e\ ---
+--- frame 2: dragged ---
+┌  Loquax afbda7b3───────┐┌● <61ddb79a…>  unknown───────── no propagation node ┐
+│▌<61ddb79a…>      12:00 ││                                                    │
+│▌you: second line       ││                                                    │
+│                        ││                                                    │
+│ <5ec0ea2e…>            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││                               ▌f┌─────────────────┐│
+│                        ││                                 │✓ copied 22 chars││
+│                        ││                               se└─────────────────┘│
+│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 3: selected ---
+┌  Loquax afbda7b3───────┐┌● <61ddb79a…>  unknown───────── no propagation node ┐
+│▌<61ddb79a…>      12:00 ││                                                    │
+│▌you: second line       ││                                                    │
+│                        ││                                                    │
+│ <5ec0ea2e…>            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││                               ▌first line  12:00 ○ │
+│                        ││                                                    │
+│                        ││                               second line  12:00 ○ │
+│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit

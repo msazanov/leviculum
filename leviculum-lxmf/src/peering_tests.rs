@@ -1225,6 +1225,70 @@ fn nothing_to_offer_is_none_but_pure_skips_still_advance() {
     assert_eq!(plan.cursor_target, 6);
 }
 
+#[test]
+fn an_incremental_offer_never_steps_past_either_resumable_bound() {
+    for encoded_bound in [false, true] {
+        let mut peer = peer_at(1);
+        peer.sync_limit_kb = if encoded_bound { 32 } else { 1 };
+        let budget = if encoded_bound {
+            OFFER_PROBE_BUDGET
+        } else {
+            OFFER_BYTES_LIMIT
+        };
+        let mut builder = OfferBuilder::new(&peer, budget);
+        for meta in [entry(2, 300, 0), entry(3, 5000, 16), entry(4, 300, 16)] {
+            assert_eq!(builder.push(&meta), core::ops::ControlFlow::Continue(()));
+        }
+        assert_eq!(
+            builder.push(&entry(5, 700, 16)),
+            core::ops::ControlFlow::Break(())
+        );
+        // Even an ignored cursor entry or a permanent skip cannot mutate
+        // the plan after the traversal should have stopped.
+        for meta in [entry(1, 300, 16), entry(6, 300, 0), entry(7, 5000, 16)] {
+            assert_eq!(builder.push(&meta), core::ops::ControlFlow::Break(()));
+        }
+        assert_eq!(
+            builder.finish(),
+            Some(OfferPlan {
+                ids: vec![entry(4, 300, 16).transient_id],
+                cursor_target: 4,
+                skipped_oversize: 1,
+                skipped_low_value: 1,
+            })
+        );
+    }
+}
+
+#[test]
+fn an_ordered_offer_walk_stops_without_collecting_the_tail() {
+    let peer = peer_at(0);
+    let mut builder = OfferBuilder::new(&peer, OFFER_PROBE_BUDGET);
+    let mut visited = 0;
+    let stopped = (1..=1_000_000).try_for_each(|sequence| {
+        visited += 1;
+        builder.push(&entry(sequence, 300, 16))
+    });
+    assert_eq!(stopped, core::ops::ControlFlow::Break(()));
+    assert_eq!(visited, 2);
+    let plan = builder.finish().unwrap();
+    assert_eq!(plan.ids, vec![entry(1, 300, 16).transient_id]);
+    assert_eq!(plan.cursor_target, 1);
+}
+
+#[test]
+fn an_offer_stays_strictly_below_the_sync_limit() {
+    let mut peer = peer_at(0);
+    peer.sync_limit_kb = 1;
+    assert_eq!(
+        build_offer(&peer, &[entry(1, 960, 16)], OFFER_BYTES_LIMIT),
+        None
+    );
+    let plan = build_offer(&peer, &[entry(1, 959, 16)], OFFER_BYTES_LIMIT).unwrap();
+    assert_eq!(plan.ids, vec![entry(1, 959, 16).transient_id]);
+    assert_eq!(plan.cursor_target, 1);
+}
+
 // ---- response mapping ----
 
 #[test]

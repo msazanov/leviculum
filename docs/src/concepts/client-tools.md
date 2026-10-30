@@ -299,6 +299,10 @@ today; this rule binds the first one that does.
 
 ## Adding the next tool: the checklist
 
+A GUI frontend of the messenger or the browser is a frontend of an
+existing core, not a new tool, and follows [A messenger whose core runs
+anywhere](handheld-messenger.md), not this checklist (2026-10-25).
+
 1. **Name and scope.** `ln*` counterpart of one reference tool, or a
    new testing tool per the precedent above. Check the tracker first
    (#173 covers probe and path query).

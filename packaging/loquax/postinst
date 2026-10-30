@@ -1,0 +1,53 @@
+#!/bin/sh
+# postinst for loquax: provisions the service user and the state directory
+# of Loquax Mailbox (loquax-mailbox.service). Idempotent; safe to re-run
+# on upgrade (case=configure with a $2 previous version). The unit is
+# installed disabled and is not started (loquax/Cargo.toml,
+# systemd-units): a person's mailbox is theirs to switch on.
+
+set -e
+
+STATE_DIR=/var/lib/loquax-mailbox
+
+case "$1" in
+    configure)
+        if ! getent group loquax >/dev/null; then
+            addgroup --quiet --system loquax
+        fi
+
+        if ! getent passwd loquax >/dev/null; then
+            adduser --quiet --system \
+                --ingroup loquax \
+                --home "$STATE_DIR" --no-create-home \
+                --gecos "Loquax Mailbox" \
+                --shell /usr/sbin/nologin \
+                loquax
+        fi
+
+        # The identity lives here, and it is the user's address: 0700.
+        mkdir -p "$STATE_DIR"
+        chown loquax:loquax "$STATE_DIR"
+        chmod 0700 "$STATE_DIR"
+
+        if [ -z "$2" ]; then
+            echo ""
+            echo "loquax: Loquax Mailbox is installed as a system service and is"
+            echo "switched off. It keeps your mail while your devices are off."
+            echo "To run it on this machine:"
+            echo "    sudo loquax mailbox enable"
+            echo "Its state is in $STATE_DIR. Admit a device with:"
+            echo "    sudo -u loquax LNMSG_HOME=$STATE_DIR loquax mailbox admit"
+            echo "It needs a running Reticulum daemon (lnsd from the 'leviculum'"
+            echo "package, or the Python rnsd), and a propagation node named in"
+            echo "$STATE_DIR/config (propagation_node = <hash>); see loquax(1)."
+            echo ""
+        fi
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

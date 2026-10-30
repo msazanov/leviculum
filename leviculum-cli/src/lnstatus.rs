@@ -130,6 +130,17 @@ struct Args {
     )]
     identities: bool,
 
+    /// show each interface's origin (configured or default) and the automatic layer's decision
+    ///
+    /// Additive Leviculum extension (Codeberg #471): `rnstatus` has no
+    /// counterpart, and lnsd serves the `origin` and `auto_layer` keys on
+    /// every query, so without the flag the render stays byte-identical to
+    /// rnstatus's (the drop-in parity tests pin it). Long form only: a
+    /// single letter is the namespace rnstatus grows into, and a future
+    /// rnstatus flag on it would break the drop-in contract.
+    #[arg(long = "origin", default_value_t = false)]
+    origin: bool,
+
     /// transport identity hash of remote instance to get status from
     #[arg(short = 'R')]
     remote: Option<String>,
@@ -182,6 +193,7 @@ impl Args {
             sort: self.sort.clone(),
             reverse: self.reverse,
             name_filter: self.filter.clone(),
+            origin: self.origin,
             // We reach the daemon over the RPC socket only and never attach
             // as a shared-instance client, so none of the clients the daemon
             // counts is us. See `StatusOptions::observer_clients`.
@@ -630,6 +642,7 @@ mod cli_tests {
         assert!(!o.dispall && !o.astats && !o.pstats && !o.lstats);
         assert!(!o.burst_filter && !o.totals && !o.reverse);
         assert!(o.sort.is_none() && o.name_filter.is_none());
+        assert!(!o.origin, "rnstatus's render unless asked (#471)");
         assert!(!a.json && !a.monitor && !a.discovered);
         assert_eq!(a.monitor_interval, 1.0);
     }
@@ -658,6 +671,7 @@ mod cli_tests {
         assert!(parse(&["--link-stats"]).status_options().lstats);
         assert!(parse(&["--burst"]).status_options().burst_filter);
         assert!(parse(&["--totals"]).status_options().totals);
+        assert!(parse(&["--origin"]).status_options().origin);
         assert!(parse(&["--reverse"]).status_options().reverse);
         assert!(parse(&["--json"]).json);
         assert!(parse(&["--monitor"]).monitor);

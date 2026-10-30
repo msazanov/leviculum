@@ -1,0 +1,28 @@
+#!/bin/sh
+# postrm for loquax: on purge, remove Loquax Mailbox's state and the
+# service user and group. A plain remove keeps them.
+
+set -e
+
+case "$1" in
+    purge)
+        # This destroys the mailbox's identity, which is the user's
+        # address, and the archive with it. That is what purge means;
+        # `apt remove` without --purge leaves it all in place.
+        rm -rf /var/lib/loquax-mailbox
+
+        if getent passwd loquax >/dev/null; then
+            deluser --quiet --system loquax >/dev/null 2>&1 || true
+        fi
+        if getent group loquax >/dev/null; then
+            delgroup --quiet --system loquax >/dev/null 2>&1 || true
+        fi
+        ;;
+
+    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

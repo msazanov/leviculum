@@ -13,15 +13,108 @@ firmware or our own. Each picks its own USB identity, and a crashed one
 picks none. The bootloader underneath is the same in all five cases,
 answers on a fixed USB ID, and publishes what it is in a text file.
 
+## Product goal (decided 2026-10-26, Lew)
+
+Recorded on Codeberg #476, which is the authority; this section only
+places it. **Zero config for nine of ten users.** Start `lnflash` and it
+flashes every attached board it recognises and has firmware for in the
+bundle, with the newest image that fits the board and with settings it
+can estimate on its own. The user who knows nothing about the hardware
+must be able to use it well.
+
+**Power users keep every choice:** parameters, a configuration, prompts
+or menus to set, query and override each decision, and a dry run that
+prints what would happen.
+
+**A small, modern GUI for the same tool**, sharing widgets and the
+interaction model with the messenger and the browser ([GUI
+toolkit](gui-toolkit.md), "Decision"; [A messenger whose core runs
+anywhere](handheld-messenger.md), "The core/frontend cut"). The same
+rule holds there: start, it flashes, done; everything else sits behind
+an advanced view.
+
+### Where the tool stands against the goal
+
+Read from `lnflash/src/`, its README and `lnflash(1)` on 2026-10-26.
+This is a reading, not the audit; the end-to-end audit with a test per
+path is #476's task 1.
+
+Automatic today:
+
+- **Bundle discovery**: `--bundle`, then `$LNFLASH_BUNDLE`, then next to
+  the binary, then `/usr/share/lnflash` (`locate`,
+  `lnflash/src/manifest.rs:1018`).
+- **The self check**: `--check-bundle` verifies the manifest and every
+  payload checksum (`verify_all`, `lnflash/src/main.rs:1008`).
+- **Entry** by the 1200-baud touch, then waiting for the bootloader
+  (`enter_bootloader`, `lnflash/src/flow.rs:3928`).
+- **Identity from the bootloader**, never from the running firmware
+  (`resolve_identity`, `lnflash/src/flow.rs:530`), the SoftDevice
+  precondition with its remedy, and the read back of the `[FW_BUILD]`
+  banner.
+- **Transports**: `uf2-msc` and `dfu-serial`, the two variants of
+  `Transport` (`lnflash/src/manifest.rs:129`). The third, the ESP32 ROM
+  loader through `espflash` or `esptool`, exists as `lnflash/src/esp.rs`,
+  but no flash run reaches it yet: nothing in `flow.rs` calls it.
+
+Where it asks:
+
+- A Board-ID several models publish, when `--board` does not name one:
+  type the board's name (`board_id_shared`,
+  `lnflash/src/flow.rs:365`).
+- A board at level *expected*: type yes, which `--yes` deliberately never
+  gives (`put_level_question`, `lnflash/src/flow.rs:408`).
+- "Overwrite the firmware on this board?" on both transports (`Cancelled`,
+  `lnflash/src/flow.rs:3292` and `lnflash/src/flow.rs:3471`).
+- A double-tap when no software trigger worked (`wait_for_human`,
+  `lnflash/src/flow.rs:3973`); under `--yes` this fails the board.
+- After the flash, without the matching flags: the radio settings, eu868
+  on Enter (`ask_for_radio`, `lnflash/src/flow.rs:3846`); remote status
+  queries, no on Enter (`ASK_MANAGEMENT`, `lnflash/src/mgmt.rs:111`);
+  telemetry, no on Enter (`ASK_TELEMETRY`, `lnflash/src/telemetry.rs:97`).
+
+Where it stops, nothing written:
+
+- No Board-ID (`NoBoardId`, `lnflash/src/flow.rs:539`); a Board-ID the
+  bundle does not carry (`UnknownBoard`, `lnflash/src/flow.rs:548`); the
+  wrong model for `--board` (`WrongBoard`, `lnflash/src/flow.rs:560`); a
+  shared Board-ID without the typed name (`AmbiguousBoardId`,
+  `lnflash/src/flow.rs:372`); level *expected* without the typed yes
+  (`NeedsConfirmation`, `lnflash/src/flow.rs:424`).
+- A dfu-serial bootloader on an ID no board claims (`UnknownBootloader`,
+  `lnflash/src/flow.rs:452`); a running ID shared beyond the boards
+  `--board` names (`SharedRunningId`, `lnflash/src/flow.rs:3058`); a
+  board touched into its bootloader that turns out not named
+  (`TouchedNotNamed`, `lnflash/src/flow.rs:3145`); a bootloader that
+  never appeared (`NoBootloader`, `lnflash/src/flow.rs:3992`).
+- A SoftDevice the bundle has no remedy for (`NoRemedy`,
+  `lnflash/src/flow.rs:2810`), or a remedy that did not take
+  (`RemedyDidNotTake`, `lnflash/src/flow.rs:658`).
+- Not root: said in the first lines (`is_root`,
+  `lnflash/src/main.rs:1015`), the run identifies and then cannot write.
+- An empty bus fails a real run (`lnflash/src/main.rs:1042`).
+
+No estimate yet:
+
+- **Region**: none is guessed. The offered default is always eu868
+  (`default_preset`, `lnflash/src/flow.rs:3836`).
+- **Radio settings**: a preset or the fields, prompted or given; nothing
+  is derived from the board or the place.
+- **Revision**: nothing in `lnflash/src/` reads a board revision; the
+  serial DFU init packet states `DEVICE_REVISION_ANY`
+  (`lnflash/src/dfu.rs:71`). Choice of image per revision: not checked.
+- Two boards of one kind, a failed flash and a pulled cable as zero
+  config paths: not checked here; that is the audit.
+
 ## The three states a board can be in
 
 **Application.** Our firmware enumerates `1209:0001` (T114) or
 `1209:0002` (RAK4631), from `usb_vid`/`usb_pid` in
-`leviculum-nrf/src/boards/t114.rs:172-173` and
-`leviculum-nrf/src/boards/rak4631.rs:187`. Two CDC ports: interface 00
+`leviculum-nrf/src/boards/t114.rs:189-190` and
+`leviculum-nrf/src/boards/rak4631.rs:183`. Two CDC ports: interface 00
 is the debug log, interface 02 the Reticulum transport. Both IDs are
 squatted pid.codes test IDs, flagged as a TODO at
-`leviculum-nrf/src/usb.rs:126`. Heltec stock firmware uses `239a:8071`.
+`leviculum-nrf/src/usb.rs:127`. Heltec stock firmware uses `239a:8071`.
 Meshtastic on the SenseCAP Solar Node uses `2886:0059`, and calls itself
 "XIAO-BOOT" while doing so. Nothing stops an application from naming
 itself after a bootloader, which is the sharpest available argument for
@@ -50,7 +143,7 @@ Two mechanisms, and only one of them is ours to control.
 
 **1200-baud touch.** The host opens a CDC port at exactly 1200 baud.
 Our firmware answers the resulting `SET_LINE_CODING` in
-`leviculum-nrf/src/usb.rs:196`, writes `DFU_MAGIC_UF2_RESET` (`0x57`) to
+`leviculum-nrf/src/usb.rs:197`, writes `DFU_MAGIC_UF2_RESET` (`0x57`) to
 `GPREGRET` at `0x4000_051C` and resets. The bootloader reads that
 retained register on the next boot and stays in mass-storage mode.
 Measured latency from `stty ... 1200` to the bootloader appearing on
@@ -273,7 +366,7 @@ with what each board's `INFO_UF2.TXT` claims. A tool that cross-checks
 the two is immune to a bootloader too old to report the line at all.
 
 **The image is not part of this repo's source.** The crate dependency
-(`leviculum-nrf/Cargo.toml:273`) supplies Rust bindings, not the blob.
+(`leviculum-nrf/Cargo.toml:290`) supplies Rust bindings, not the blob.
 The authoritative copy is Nordic's own distribution, downloaded
 2026-08-10 to `~/coding/s140_nrf52_730/`, containing
 `s140_nrf52_7.3.0_softdevice.hex` (md5
@@ -546,7 +639,7 @@ Start with how wide the field actually is. The Meshtastic tree carries
 
 **Two transports cover 155 of the 160 flashable variants**, and we
 already own both: the UF2 path in `leviculum-nrf/tools/uf2-runner.sh`
-and the ESP path behind `Justfile:843`, which drives `esptool`. The
+and the ESP path behind `Justfile:882`, which drives `esptool`. The
 work is not building 162 things. It is separating two mechanisms
 cleanly and turning everything else into data.
 
@@ -608,8 +701,8 @@ mattering. The RAK4631 looks like the same problem, since the bare
 module and the Pocket V2 share a `Board-ID` and have separate builds,
 but the baseboard build degrades cleanly on a bare module: the display
 is found by an I2C probe and its task exits when nothing answers
-(`leviculum-nrf/src/display.rs:162-168`), the button pin is pulled to its
-released level so it never reads as pressed (`leviculum-nrf/src/button.rs:72`), the GNSS
+(`leviculum-nrf/src/display.rs:160-166`), the button pin is pulled to its
+released level so it never reads as pressed (`leviculum-nrf/src/button.rs:46`), the GNSS
 task waits on a UART that stays silent, and the battery task publishes
 into a watch channel whose only subscriber is the display that is not
 running. One image therefore covers both, at 47.6 KiB of flash and
@@ -625,7 +718,11 @@ physical double-tap, a DTR/RTS sequence on ESP32, BOOTSEL on RP2040.
 **Transport** — how do the bytes get in? The two above, and for
 `lnflash` today two of its own: `uf2-msc` copies a UF2 onto the
 bootloader's drive, `dfu-serial` sends Nordic's legacy serial DFU over the
-bootloader's CDC port (below, "The second transport: serial DFU").
+bootloader's CDC port (below, "The second transport: serial DFU"). A
+third, the ESP32 ROM's serial loader driven through `espflash` or
+`esptool`, is `lnflash/src/esp.rs` with its catalogue section
+`[board.<name>.esp]` (Codeberg #473); no board's flashing half uses it
+yet.
 
 **Verify** — did it take? Re-enumeration plus the `[FW_BUILD]` banner
 with a matching git SHA.

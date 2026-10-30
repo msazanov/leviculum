@@ -5212,6 +5212,19 @@ convert = "hex-to-uf2"
             .find(|d| d.name == "3-2.3.1")
             .unwrap();
 
+        // Something in the queue before the read starts, so that the queue
+        // going empty below is the read's flush and nothing else. An empty
+        // queue on its own proves nothing: it is empty before anybody
+        // flushed it, and a writer that ran first then wrote both lines
+        // into the flush (forge pipeline 571, 2026-10-26). Not a banner, so
+        // the read has nothing to make of it even if it saw it.
+        let pending = b"[INFO!] [BOOT] reset reason=SREQ\r\n";
+        pty.write_raw(pending);
+        assert!(
+            pty.wait_until_queue(Duration::from_secs(5), |queued| queued >= pending.len()),
+            "the pending line never reached the port's input queue"
+        );
+
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 // Both lines arrive AFTER the flush, in the order the board

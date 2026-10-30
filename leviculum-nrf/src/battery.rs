@@ -15,7 +15,7 @@
 //! BATTERY_PCT reportable=<0|1> pack_mv=<n> cells=<n>S band_lo_mv=<n> band_hi_mv=<n> t=<ms>
 //! ```
 //!
-//! Before this the module sampled the pack, fed [`BATTERY_STATE`] for
+//! Before this the module sampled the pack, fed [`BATTERY_STATE`](leviculum_firmware::board_state::BATTERY_STATE) for
 //! the display, and said nothing at all — one `[BAT] init` line at
 //! startup and then silence for the rest of the boot. A Pocket V2 that
 //! restarted twice during a 90 minute field walk on battery produced
@@ -72,6 +72,16 @@
 //! divider itself and the pins come from the board file
 //! (`boards/t114.rs`, `rak4631.rs`, `solarnode.rs`, `t1000e.rs`),
 //! which stays their single source.
+//!
+//! # Which half lives here
+//!
+//! Since #469 991 the sampling task, its cadences, the classification at
+//! boot, the filter, the window and the lines are the orchestration's
+//! ([`leviculum_firmware::battery`]). This file configures the SAADC
+//! channel and the divider's enable line and hands the orchestration a
+//! [`BatteryGauge`],
+//! [`SaadcGauge`], that takes one reading with the board's
+//! [`BatteryScale`].
 
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{AnyPin, Level, Output, OutputDrive};
@@ -80,35 +90,20 @@ use embassy_nrf::saadc::{self, AnyInput, ChannelConfig, Config, Reference, Resol
 use embassy_nrf::{bind_interrupts, Peri};
 use embassy_time::{Duration, Timer};
 
-use leviculum_battery_scale::{
-    classify_cell_count, pack_percent, AcquisitionTime, AdcGain, BatteryEwma, BatteryLine,
-    BatteryPercentLine, BatteryWindow,
-};
+use leviculum_battery_scale::{AcquisitionTime, AdcGain};
 
 /// Re-exported so a bin can build its board's scale without naming the
 /// crate: the board file states the divider, the bin picks the
 /// constructor that matches how it states it.
 pub use leviculum_battery_scale::{BatteryScale, Divider};
 
-use crate::baseboard::{BatteryState, BATTERY_STATE};
+use leviculum_firmware::battery::GaugeFacts;
+use leviculum_firmware::clock::EmbassyClock;
+use leviculum_firmware::seams::BatteryGauge;
 
 bind_interrupts!(pub struct BatteryIrqs {
     SAADC => saadc::InterruptHandler;
 });
-
-/// How often the ADC is read.
-const SAMPLE_PERIOD: Duration = Duration::from_secs(1);
-
-/// Samples between two [`BATTERY_STATE`] updates — 5 s, the cadence the
-/// display has always been fed at. Deliberately unchanged: the status
-/// screen quantises the pack voltage to 100 mV and the charge to 1 %
-/// (`leviculum_screen::FrameKey`), and a transmit sag is larger than
-/// 100 mV, so publishing every sample would have put a redraw on the
-/// screen for every packet the node sends.
-const SAMPLES_PER_PUBLISH: u32 = 5;
-
-/// Samples between two `BATTERY` lines.
-const SAMPLES_PER_REPORT: u32 = 30;
 
 /// How long the divider needs after its enable pin is asserted before
 /// the voltage on the ADC pin is the pack's. Meshtastic waits the same
@@ -220,45 +215,35 @@ fn saadc_time(time: AcquisitionTime) -> saadc::Time {
     }
 }
 
-/// Take one reading, in millivolts at the battery terminal.
-///
-/// The divider-enable pin, where the board has one, is asserted only for
-/// the duration of the sample: on the T114 the divider is 490 kΩ across
-/// the pack and on the solar node 1.51 MΩ, and leaving either enabled
-/// between samples would drain the pack for nothing 99 % of the time.
-async fn sample_pack_mv(
-    adc: &mut Saadc<'static, 1>,
-    divider_enable: &mut Option<EnableLine>,
-    scale: &BatteryScale,
-) -> u16 {
-    if let Some(enable) = divider_enable.as_mut() {
-        enable.on();
-        Timer::after(Duration::from_millis(DIVIDER_SETTLE_MS)).await;
-    }
-    let mut buf = [0i16; 1];
-    adc.sample(&mut buf).await;
-    if let Some(enable) = divider_enable.as_mut() {
-        enable.off();
-    }
-    scale.raw_to_battery_mv(buf[0])
+/// The board's battery gauge as the orchestration reads it: the SAADC
+/// channel behind the divider, the divider's enable line where the board
+/// has one, and the board's scale.
+pub struct SaadcGauge {
+    adc: Saadc<'static, 1>,
+    divider_enable: Option<EnableLine>,
+    scale: BatteryScale,
 }
 
-/// Say, on a line of its own, that the percentage just started or
-/// stopped being derivable.
-///
-/// Critical rather than gated: these lines are rare by construction — one
-/// per transition, not one per sample — and each of them is what explains
-/// a gap in the `pct=` series that a capture would otherwise have to
-/// guess at. A field board has no host to open the `RUNTIME_DRAIN_OPEN`
-/// gate, and this is precisely the run in which the gap appears.
-fn log_percent_gate(pack_mv: u16, cell_count: u8, reportable: bool) {
-    crate::log::log_fmt_critical(
-        "[BAT] ",
-        format_args!(
-            "{}",
-            BatteryPercentLine::new(pack_mv, cell_count, reportable)
-        ),
-    );
+impl BatteryGauge for SaadcGauge {
+    /// Take one reading, in millivolts at the battery terminal.
+    ///
+    /// The divider-enable pin, where the board has one, is asserted only
+    /// for the duration of the sample: on the T114 the divider is 490 kΩ
+    /// across the pack and on the solar node 1.51 MΩ, and leaving either
+    /// enabled between samples would drain the pack for nothing 99 % of
+    /// the time.
+    async fn sample_mv(&mut self) -> u16 {
+        if let Some(enable) = self.divider_enable.as_mut() {
+            enable.on();
+            Timer::after(Duration::from_millis(DIVIDER_SETTLE_MS)).await;
+        }
+        let mut buf = [0i16; 1];
+        self.adc.sample(&mut buf).await;
+        if let Some(enable) = self.divider_enable.as_mut() {
+            enable.off();
+        }
+        self.scale.raw_to_battery_mv(buf[0])
+    }
 }
 
 #[embassy_executor::task]
@@ -281,125 +266,23 @@ pub async fn battery_task(
     ch.reference = Reference::INTERNAL;
     ch.gain = saadc_gain(scale.gain());
     ch.time = saadc_time(scale.acquisition_time());
-    let mut adc = Saadc::new(saadc_periph, BatteryIrqs, config, [ch]);
+    let adc = Saadc::new(saadc_periph, BatteryIrqs, config, [ch]);
 
     // The enable pin starts INACTIVE — which is not the same as low, see
     // `EnableLine`: the divider is switched on per sample, not for the
     // lifetime of the task.
-    let mut divider_enable = divider_enable.map(EnableLine::new);
+    let divider_enable = divider_enable.map(EnableLine::new);
 
-    // One sample decides the cell count for the lifetime of the task.
-    // Persisting it across boots waits for the flash store; redoing it
-    // costs one ADC reading.
-    let first_mv = sample_pack_mv(&mut adc, &mut divider_enable, &scale).await;
-    let class = classify_cell_count(first_mv);
-    // Critical, i.e. past the `RUNTIME_DRAIN_OPEN` gate, and this is the
-    // one place in the module where that is right: the gate stays shut
-    // until DTR-assert or 30 s of uptime, whichever comes first, and a
-    // board on battery in a field has neither a host nor, if it resets
-    // inside that window, a second chance. The boot statement is exactly
-    // the one #380 went looking for and did not find. Everything after
-    // it is routine and stays gated.
-    crate::log::log_fmt_critical(
-        "[BAT] ",
-        format_args!(
-            "init pack_mv={} cells={}S full_scale_mv={} acq_us={}",
-            first_mv,
-            class.cells,
-            scale.terminal_full_scale_mv(),
-            scale.acquisition_time().micros()
-        ),
-    );
-    if !class.plausible {
-        // Not a pack voltage: a floating input, a divider whose enable
-        // pin is not doing what the board file says, or a multiplier
-        // that does not match the board this image is running on. 1S is
-        // the fallback because it cannot make an empty pack look full.
-        crate::log::log_fmt_critical(
-            "[WARN] ",
-            format_args!(
-                "[BAT] implausible first reading pack_mv={} (full scale {} mV) — assuming 1S",
-                first_mv,
-                scale.terminal_full_scale_mv()
-            ),
-        );
-    }
-    let cell_count = class.cells;
-
-    let sender = BATTERY_STATE.sender();
-    let mut ewma = BatteryEwma::new(first_mv);
-    let mut window = BatteryWindow::new(first_mv);
-
-    let publish = |mv: u16, percent: Option<u8>| {
-        sender.send(BatteryState {
-            voltage_mv: mv,
-            percent,
-            cell_count,
-        });
+    let facts = GaugeFacts {
+        full_scale_mv: scale.terminal_full_scale_mv(),
+        acquisition_us: scale.acquisition_time().micros(),
     };
-    let report = |mv: u16, percent: Option<u8>, window: &BatteryWindow, at_boot: bool| {
-        let line = BatteryLine {
-            mv,
-            min_mv: window.min_mv(),
-            max_mv: window.max_mv(),
-            percent,
-            cells: cell_count,
-        };
-        // Same gate argument as the `init` line above: the boot one
-        // bypasses, the every-30-s ones do not.
-        if at_boot {
-            crate::log::log_fmt_critical("[BAT] ", format_args!("{}", line));
-        } else {
-            crate::log::log_fmt("[BAT] ", format_args!("{}", line));
-        }
+    let gauge = SaadcGauge {
+        adc,
+        divider_enable,
+        scale,
     };
-
-    // Say it once at boot rather than 30 s in: a board that resets
-    // before the first period is up would otherwise report nothing at
-    // all, which is exactly the boot worth hearing about.
-    let mut percent = pack_percent(first_mv, cell_count);
-    let mut reportable = percent.is_some();
-    publish(first_mv, percent);
-    report(first_mv, percent, &window, true);
-    if !reportable {
-        // Only the withheld state earns a line at boot. A boot that CAN
-        // derive a percentage has already said so, with `pct=` on the
-        // `BATTERY` line immediately above; a boot that cannot is the
-        // anomaly, and it is critical for the same reason `init` is — a
-        // board on battery in a field has no host to open the drain gate.
-        log_percent_gate(first_mv, cell_count, false);
-    }
-
-    let mut samples: u32 = 0;
-    loop {
-        Timer::after(SAMPLE_PERIOD).await;
-        let pack_mv = sample_pack_mv(&mut adc, &mut divider_enable, &scale).await;
-        let filtered = ewma.step(pack_mv);
-        window.observe(pack_mv);
-        samples = samples.wrapping_add(1);
-
-        // Judged on the same number the percentage would be derived from,
-        // in the same iteration it is derived in, so the line and the
-        // published state can never disagree about which side of the band
-        // the pack is on. Every sample, not every report: the transition
-        // is the event, and waiting up to 30 s to mention it would put it
-        // in the wrong place on a merged timeline.
-        percent = pack_percent(filtered, cell_count);
-        if percent.is_some() != reportable {
-            reportable = percent.is_some();
-            log_percent_gate(filtered, cell_count, reportable);
-        }
-
-        if samples.is_multiple_of(SAMPLES_PER_PUBLISH) {
-            publish(filtered, percent);
-        }
-        if samples.is_multiple_of(SAMPLES_PER_REPORT) {
-            report(filtered, percent, &window, false);
-            // Seed the next window with the sample that closed this one,
-            // so no sample falls between two windows.
-            window.restart(pack_mv);
-        }
-    }
+    leviculum_firmware::battery::run(gauge, EmbassyClock, facts).await
 }
 
 /// Convenience wrapper invoked from the bin file.

@@ -19,12 +19,12 @@ driver:
   clock; time is handed in. `now_ms()` is a timer, not a calendar —
   on the host it counts milliseconds since process start
   (`leviculum-std/src/clock.rs:45`), on the nRF52 it is the Embassy
-  timer (`leviculum-nrf/src/clock.rs:8`). Which wire fields need
+  timer (`leviculum-nrf/firmware/src/clock.rs:12`). Which wire fields need
   calendar time instead, and where a clockless node gets it, is the
   subject of [Time and Clocks](time-and-clocks.md).
 - **`Storage`** (`traits.rs:610`) — supplies persistence and lookup
   for every collection the protocol maintains. `flush()` defaults to a
-  no-op (`traits.rs:1005`) so a RAM-only backend needs to implement
+  no-op (`traits.rs:1008`) so a RAM-only backend needs to implement
   nothing extra.
 - **`Interface`** (`traits.rs:321`) — supplies framing and the wire (see
   [Interface Isolation](interface-isolation.md) and the
@@ -53,7 +53,7 @@ page before changing the trait surface.
 
 The same `NodeCore` is parameterised over its `Storage`
 implementation, so embedding is a matter of choosing a backend
-(`leviculum-core/src/node/mod.rs:437`,
+(`leviculum-core/src/node/mod.rs:471`,
 `NodeCore<R: CryptoRngCore, C: Clock, S: Storage>`):
 
 | Backend | Where | Behaviour |

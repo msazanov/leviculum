@@ -13,12 +13,17 @@
 #![warn(unreachable_pub)]
 
 pub mod api;
+pub mod auto_layer;
 pub(crate) mod autoconnect;
 pub(crate) mod clock;
 pub mod config;
 pub(crate) mod counter64;
+/// Reaching a running daemon's shared-instance RPC from a client tool: the
+/// instance name and authkey a config directory implies.
+pub mod daemon_rpc;
 pub(crate) mod discovery;
 pub mod driver;
+pub mod durable;
 pub mod error;
 /// `EVENT_CATALOG` completeness, checked against the tree.
 ///
@@ -48,6 +53,7 @@ pub mod heap_accounting;
 pub(crate) mod ini_config;
 pub mod interfaces;
 pub(crate) mod known_destinations;
+pub mod local_time;
 pub(crate) mod packet_hashlist;
 /// The process's own memory view for the SIGUSR1 census: allocator totals,
 /// the anonymous-mapping histogram and the gap arithmetic (Codeberg #437).
@@ -101,4 +107,6 @@ pub use rpc::{
     TRANSPORT_TABLE_NAMES,
 };
 /// Writers for private key material: owner-only from creation (L-0039).
-pub use storage::{atomic_write_secret, create_secret_dir_all, create_secret_file};
+pub use storage::{
+    atomic_write_secret, create_secret_dir_all, create_secret_file, narrow_secret_mode,
+};

@@ -1,0 +1,22 @@
+[package]
+name = "leviculum-mapfill-measure"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lew Palm"]
+license = "AGPL-3.0-or-later"
+description = "Host harness of the map measurement (#474): vector tiles to the flat fixture, and the fixture drawn by leviculum-mapfill into PNGs"
+publish = false
+
+# Its own workspace, excluded from the root one, as it was when it carried
+# the MVT decoder itself. Nothing ships from here; it writes `fixtures/` and
+# PNGs.
+[workspace]
+
+[dependencies]
+leviculum-mapfill = { path = "..", features = ["std"] }
+embedded-graphics = "0.8"
+# The tree's one MVT decoder, which started here, moved to the map tool
+# when the cut needed it too, and to leviculum-mapcut when loquax did
+# (1089); prost and tinymvt come in through it.
+leviculum-mapcut = { path = "../../leviculum-mapcut" }
+png = "0.18"

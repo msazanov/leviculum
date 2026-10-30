@@ -1,0 +1,253 @@
+//! The admission code: what `loquax home admit` prints on the home node and
+//! `loquax home join` reads on the new device.
+//!
+//! It carries the home identity's public key (64 bytes), from which the
+//! client derives both the home destination it links to and the LXMF address
+//! it shows as its own, and a single-use token (16 bytes). Four bytes of
+//! SHA-256 over the two follow, so a code mistyped by hand is refused before
+//! anything goes on the wire rather than turning into a link to nowhere.
+//! The 84 bytes are written in RFC 4648 base32, lower case and unpadded,
+//! behind the prefix `lqxh1`: 140 characters, which a terminal can copy and
+//! slice 5's QR code can carry.
+//!
+//! A phone has no shared instance to reach the home node through, so it
+//! also needs the home node's TCP server. `loquax home admit --server`
+//! writes it behind the code, `lqxh1...@host:port` (an IPv6 address in
+//! brackets), so one scan or one paste carries both. The base32 alphabet
+//! has no `@`, so the split is unambiguous, and a code without the address
+//! reads as before.
+
+use alloc::string::String;
+use alloc::vec::Vec;
+
+/// What separates the code from the home node's address in the combined form.
+pub const SERVER_SEPARATOR: char = '@';
+
+/// What every code starts with, so a code is told from an address or a hash
+/// at a glance, and a later format can take `lqxh2`.
+pub const PREFIX: &str = "lqxh1";
+
+const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+const CHECK_LEN: usize = 4;
+const BODY_LEN: usize = 64 + 16;
+
+/// An admission code, parsed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HomeCode {
+    /// The home identity's public key, X25519 then Ed25519, as RNS writes it.
+    pub public_key: [u8; 64],
+    /// The single-use admission token.
+    pub token: [u8; 16],
+}
+
+/// Why a text is not a code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodeError {
+    /// It does not start with [`PREFIX`].
+    Prefix,
+    /// A character outside the base32 alphabet, or the wrong length.
+    Shape,
+    /// The checksum does not match: a typo.
+    Checksum,
+}
+
+impl core::fmt::Display for CodeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Prefix => write!(f, "a home code starts with {PREFIX}"),
+            Self::Shape => write!(f, "not a home code: wrong length or a stray character"),
+            Self::Checksum => write!(f, "the home code has a typo (its checksum does not match)"),
+        }
+    }
+}
+
+impl HomeCode {
+    /// The code as text.
+    pub fn encode(&self) -> String {
+        let mut bytes = Vec::with_capacity(BODY_LEN + CHECK_LEN);
+        bytes.extend_from_slice(&self.public_key);
+        bytes.extend_from_slice(&self.token);
+        let check = leviculum_core::crypto::sha256(&bytes);
+        bytes.extend_from_slice(&check[..CHECK_LEN]);
+        let mut text = String::from(PREFIX);
+        text.push_str(&base32(&bytes));
+        text
+    }
+
+    /// The code with the home node's TCP server behind it, `host:port`:
+    /// what a phone takes in one go.
+    pub fn encode_with_server(&self, server: &str) -> String {
+        let mut text = self.encode();
+        text.push(SERVER_SEPARATOR);
+        text.push_str(server.trim());
+        text
+    }
+
+    /// Read a code, in either form; an address behind it is dropped. A
+    /// device that joins through its shared instance has no use for it.
+    pub fn parse(text: &str) -> Result<Self, CodeError> {
+        Self::parse_with_server(text).map(|(code, _)| code)
+    }
+
+    /// Read a code and the address behind it, if any. Whitespace anywhere
+    /// is ignored, and the code's case is, so a code that a terminal
+    /// wrapped or a person typed in capitals still reads. The address is
+    /// not checked here: whoever dials it says what is wrong with it.
+    pub fn parse_with_server(text: &str) -> Result<(Self, Option<String>), CodeError> {
+        let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        let (code, server) = match compact.split_once(SERVER_SEPARATOR) {
+            Some((code, server)) => (code, Some(server).filter(|s| !s.is_empty())),
+            None => (compact.as_str(), None),
+        };
+        let code = Self::parse_code(&code.to_ascii_lowercase())?;
+        Ok((code, server.map(String::from)))
+    }
+
+    fn parse_code(compact: &str) -> Result<Self, CodeError> {
+        let body = compact.strip_prefix(PREFIX).ok_or(CodeError::Prefix)?;
+        let bytes = unbase32(body).ok_or(CodeError::Shape)?;
+        if bytes.len() != BODY_LEN + CHECK_LEN {
+            return Err(CodeError::Shape);
+        }
+        let (payload, check) = bytes.split_at(BODY_LEN);
+        if leviculum_core::crypto::sha256(payload)[..CHECK_LEN] != *check {
+            return Err(CodeError::Checksum);
+        }
+        let mut public_key = [0u8; 64];
+        public_key.copy_from_slice(&payload[..64]);
+        let mut token = [0u8; 16];
+        token.copy_from_slice(&payload[64..]);
+        Ok(Self { public_key, token })
+    }
+}
+
+fn base32(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 8 / 5 + 1);
+    let mut buffer = 0u32;
+    let mut bits = 0u32;
+    for &byte in bytes {
+        buffer = (buffer << 8) | u32::from(byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(char::from(ALPHABET[((buffer >> bits) & 31) as usize]));
+        }
+    }
+    if bits > 0 {
+        out.push(char::from(ALPHABET[((buffer << (5 - bits)) & 31) as usize]));
+    }
+    out
+}
+
+fn unbase32(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() * 5 / 8);
+    let mut buffer = 0u32;
+    let mut bits = 0u32;
+    for c in text.bytes() {
+        let value = ALPHABET.iter().position(|&a| a == c)? as u32;
+        buffer = (buffer << 5) | value;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buffer >> bits) & 0xff) as u8);
+        }
+    }
+    // The tail holds fewer than eight bits, which must all be zero.
+    (buffer & ((1 << bits) - 1) == 0).then_some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn code() -> HomeCode {
+        let mut public_key = [0u8; 64];
+        for (i, b) in public_key.iter_mut().enumerate() {
+            *b = i as u8 * 3;
+        }
+        HomeCode {
+            public_key,
+            token: [0xa5; 16],
+        }
+    }
+
+    #[test]
+    fn a_code_reads_back_as_it_was_written() {
+        let text = code().encode();
+        assert!(text.starts_with(PREFIX));
+        assert_eq!(text.len(), PREFIX.len() + 135);
+        assert_eq!(HomeCode::parse(&text), Ok(code()));
+    }
+
+    #[test]
+    fn wrapped_or_capitalised_text_still_reads() {
+        let text = code().encode();
+        let (a, b) = text.split_at(60);
+        let mangled = alloc::format!("  {}\n{} ", a.to_ascii_uppercase(), b);
+        assert_eq!(HomeCode::parse(&mangled), Ok(code()));
+    }
+
+    #[test]
+    fn a_typo_is_refused_by_the_checksum() {
+        let mut text = code().encode().into_bytes();
+        let at = PREFIX.len() + 20;
+        text[at] = if text[at] == b'a' { b'b' } else { b'a' };
+        let text = String::from_utf8(text).expect("ascii");
+        assert_eq!(HomeCode::parse(&text), Err(CodeError::Checksum));
+    }
+
+    #[test]
+    fn the_address_rides_behind_the_code() {
+        let text = code().encode_with_server("homenode.example:4242");
+        assert_eq!(
+            HomeCode::parse_with_server(&text),
+            Ok((code(), Some("homenode.example:4242".into())))
+        );
+        // A device that joins through its shared instance drops it.
+        assert_eq!(HomeCode::parse(&text), Ok(code()));
+        // An IPv6 address keeps its brackets, a host name its case.
+        let text = code().encode_with_server("[fd00::1]:4242");
+        assert_eq!(
+            HomeCode::parse_with_server(&text).map(|(_, server)| server),
+            Ok(Some("[fd00::1]:4242".into()))
+        );
+        let (a, b) = text.split_at(70);
+        let wrapped = alloc::format!("{}\n{}", a.to_ascii_uppercase(), b);
+        assert_eq!(
+            HomeCode::parse_with_server(&wrapped),
+            Ok((code(), Some("[fd00::1]:4242".into())))
+        );
+        let text = alloc::format!("{}@Home.Example:1", code().encode());
+        assert_eq!(
+            HomeCode::parse_with_server(&text).map(|(_, server)| server),
+            Ok(Some("Home.Example:1".into()))
+        );
+    }
+
+    #[test]
+    fn a_code_alone_or_with_an_empty_address_has_none() {
+        let text = code().encode();
+        assert_eq!(HomeCode::parse_with_server(&text), Ok((code(), None)));
+        let text = alloc::format!("{text}@");
+        assert_eq!(HomeCode::parse_with_server(&text), Ok((code(), None)));
+        // The checksum still guards the code in front of an address.
+        let mut broken = code().encode_with_server("h:1").into_bytes();
+        let at = PREFIX.len() + 20;
+        broken[at] = if broken[at] == b'a' { b'b' } else { b'a' };
+        let broken = String::from_utf8(broken).expect("ascii");
+        assert_eq!(
+            HomeCode::parse_with_server(&broken),
+            Err(CodeError::Checksum)
+        );
+    }
+
+    #[test]
+    fn other_text_is_not_a_code() {
+        assert_eq!(
+            HomeCode::parse("76cff79ab2f43bebcb7398e08e56ee0f"),
+            Err(CodeError::Prefix)
+        );
+        assert_eq!(HomeCode::parse("lqxh1abc"), Err(CodeError::Shape));
+        assert_eq!(HomeCode::parse("lqxh1ab!d"), Err(CodeError::Shape));
+    }
+}

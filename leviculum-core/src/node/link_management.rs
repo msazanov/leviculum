@@ -18,7 +18,7 @@ use crate::event_scalar::MsOrNone;
 use crate::hex_fmt::{HexFmt, HexShort};
 use crate::link::channel::{ChannelAction, ChannelError, Message, ReceiveOutcome};
 use crate::link::{Link, LinkCloseReason, LinkError, LinkId, LinkPhase, LinkState};
-use crate::packet::{packet_hash, Packet, PacketContext, PacketType};
+use crate::packet::{packet_hash, packet_hash_from_packet, Packet, PacketContext, PacketType};
 use crate::traits::{Clock, Storage};
 use crate::transport::DropReason;
 use rand_core::CryptoRngCore;
@@ -155,7 +155,7 @@ impl Message for RawBytesMessage<'_> {
 /// Every datum exists exactly once. Lookups are linear scans, n is bounded
 /// by channel window size × active links (realistically < 100, typically < 20).
 mod ext;
-use ext::cipher_proof_identifier;
+use ext::link_proof_id;
 
 pub(super) struct ReceiptTracker {
     entries: Vec<ReceiptEntry>,
@@ -702,6 +702,36 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.process_events_and_actions()
     }
 
+    /// Close every own link attached to `iface_idx`, which was removed for
+    /// good (931, Codeberg #468). Unlike [`close_link`](Self::close_link) no
+    /// close frame is built: the interface it would go out on is gone, and
+    /// addressing it would only produce a `no-such-interface` drop. Returns
+    /// how many links were closed.
+    pub(super) fn close_links_on_removed_interface(&mut self, iface_idx: usize) -> usize {
+        let gone: Vec<LinkId> = self
+            .links
+            .iter()
+            .filter(|(_, link)| link.attached_interface() == Some(iface_idx))
+            .map(|(id, _)| *id)
+            .collect();
+        for link_id in &gone {
+            let Some(link) = self.links.get_mut(link_id) else {
+                continue;
+            };
+            let is_initiator = link.is_initiator();
+            let destination_hash = *link.destination_hash();
+            link.close();
+            self.remove_link(link_id);
+            self.emit_link_closed(
+                *link_id,
+                LinkCloseReason::InterfaceRemoved,
+                is_initiator,
+                destination_hash,
+            );
+        }
+        gone.len()
+    }
+
     /// Get a link by ID
     pub fn link(&self, link_id: &LinkId) -> Option<&crate::link::Link> {
         self.links
@@ -984,20 +1014,19 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     pub(super) fn process_link_packet(
         &mut self,
         packet: &Packet,
-        raw_packet: &[u8],
         raw_hash: Option<&[u8; 32]>,
         now_ms: u64,
         interface_index: usize,
     ) {
         match packet.flags.packet_type {
             PacketType::LinkRequest => {
-                self.handle_link_request(packet, raw_packet, interface_index);
+                self.handle_link_request(packet, interface_index);
             }
             PacketType::Proof => {
                 self.handle_link_proof(packet, raw_hash, now_ms, interface_index);
             }
             PacketType::Data => {
-                self.handle_link_data(packet, raw_packet, raw_hash, now_ms, interface_index);
+                self.handle_link_data(packet, raw_hash, now_ms, interface_index);
             }
             PacketType::Announce => {
                 // Announces are not link packets, ignore
@@ -1006,7 +1035,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     }
 
     /// Handle an incoming LINK_REQUEST packet
-    fn handle_link_request(&mut self, packet: &Packet, raw_packet: &[u8], interface_index: usize) {
+    fn handle_link_request(&mut self, packet: &Packet, interface_index: usize) {
         let dest_hash = DestinationHash::new(packet.destination_hash);
 
         // Check if we accept links for this destination (consolidated with self.destinations)
@@ -1023,8 +1052,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             return;
         }
 
-        // Calculate link ID from raw packet
-        let link_id = Link::calculate_link_id(raw_packet);
+        // Link IDs omit MTU signalling, unlike the full packet hash.
+        let link_id = Link::calculate_link_id_from_packet(packet);
 
         // Check if we already have this link
         if let Some(link) = self.links.get(&link_id) {
@@ -1192,9 +1221,22 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             interface_index,
         );
 
-        // Check if this is a data proof (not a link establishment proof)
-        if proof_data.len() == PROOF_DATA_SIZE && packet.context == PacketContext::None {
-            self.handle_data_proof(&link_id, proof_data);
+        // A packet proof (hash + signature) is matched against the receipts
+        // whatever its context, except a link request proof or a resource
+        // proof, as the reference does (Transport.py:2171, :2238, :2244-2281).
+        // Python marks its packet proofs NONE (Link.py:392); Ratspeak marks
+        // them LINKPROOF (0xFD), and before #232 that one fell through to the
+        // link request proof path below and was refused on an established
+        // link. A LINKPROOF proof on a link still pending is offered to the
+        // receipts too, matches none and goes no further, which is what the
+        // reference does with it: only LRPROOF reaches `pending_links`.
+        if proof_data.len() == PROOF_DATA_SIZE
+            && !matches!(
+                packet.context,
+                PacketContext::Lrproof | PacketContext::ResourcePrf
+            )
+        {
+            self.handle_data_proof(&link_id, proof_data, packet.context);
             return;
         }
 
@@ -1400,7 +1442,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     }
 
     /// Handle a data proof packet (PROVE_ALL response)
-    fn handle_data_proof(&mut self, link_id: &LinkId, proof_data: &[u8]) {
+    fn handle_data_proof(&mut self, link_id: &LinkId, proof_data: &[u8], context: PacketContext) {
         if proof_data.len() != PROOF_DATA_SIZE {
             crate::tracing::debug!(
                 len = proof_data.len(),
@@ -1467,6 +1509,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             if let Some(sequence) = self.receipt_tracker.confirm_delivery(&truncated) {
                 crate::tracing::debug!(
                     receipts = self.receipt_tracker.len(),
+                    ctx = ?context,
                     "link_mgr: data proof validated — delivered"
                 );
 
@@ -1561,7 +1604,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     fn handle_link_data(
         &mut self,
         packet: &Packet,
-        raw_packet: &[u8],
         raw_hash: Option<&[u8; 32]>,
         now_ms: u64,
         interface_index: usize,
@@ -1629,12 +1671,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             PacketContext::Lrrtt => self.handle_rtt_packet(link_id, packet, rx, now_ms),
             PacketContext::Keepalive => self.handle_keepalive_packet(link_id, packet, now_ms),
             PacketContext::LinkClose => self.handle_close_packet(link_id, packet),
-            PacketContext::Channel => {
-                self.handle_channel_packet(link_id, packet, raw_packet, rx, now_ms)
-            }
+            PacketContext::Channel => self.handle_channel_packet(link_id, packet, rx, now_ms),
             PacketContext::Tunnel => self.handle_tunnel_packet(link_id, packet, now_ms),
             PacketContext::ResourceAdv => {
-                self.handle_resource_adv(link_id, packet, raw_packet, rx, now_ms);
+                self.handle_resource_adv(link_id, packet, rx, now_ms);
             }
             PacketContext::ResourceReq => {
                 self.handle_resource_req(link_id, packet, now_ms);
@@ -1643,7 +1683,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 self.handle_resource_data(link_id, packet, now_ms);
             }
             PacketContext::ResourceHmu => {
-                self.handle_resource_hmu(link_id, packet, raw_packet, now_ms);
+                self.handle_resource_hmu(link_id, packet, now_ms);
             }
             PacketContext::ResourceIcl => {
                 self.handle_resource_cancel(link_id, packet, true);
@@ -1655,10 +1695,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 self.handle_link_identify(link_id, packet, now_ms);
             }
             PacketContext::Request => {
-                self.handle_request_packet(link_id, packet, raw_packet, rx, now_ms);
+                self.handle_request_packet(link_id, packet, rx, now_ms);
             }
             PacketContext::Response => {
-                self.handle_response_packet(link_id, packet, raw_packet, now_ms);
+                self.handle_response_packet(link_id, packet, now_ms);
             }
             PacketContext::CacheRequest => {
                 self.handle_cache_request(link_id, packet, now_ms);
@@ -1684,9 +1724,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             | PacketContext::Command
             | PacketContext::CommandStatus
             | PacketContext::LinkProof
-            | PacketContext::Lrproof => {
-                self.handle_plain_data_packet(link_id, packet, raw_packet, rx, now_ms)
-            }
+            | PacketContext::Lrproof => self.handle_plain_data_packet(link_id, packet, rx, now_ms),
         }
     }
 
@@ -1804,7 +1842,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         &mut self,
         link_id: LinkId,
         packet: &Packet,
-        raw_packet: &[u8],
         rx: LinkRx<'_>,
         now_ms: u64,
     ) {
@@ -1875,11 +1912,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             let rtt_ms = link.rtt_ms();
             let link_cipher = link.cipher();
             let channel = link.ensure_channel(rtt_ms);
-            // Proofs bind to the token tag that `link.decrypt` just verified,
-            // not to a second SHA-256 pass over the payload: see
-            // `proof_identifier` for why that is not a weakening.
-            let full_packet_hash = cipher_proof_identifier(
-                raw_packet,
+            let full_packet_hash = link_proof_id(
+                packet,
+                rx.raw_hash,
                 proof_binding_policy.for_cipher(link_cipher),
                 link_cipher,
             );
@@ -2094,7 +2129,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         &mut self,
         link_id: LinkId,
         packet: &Packet,
-        raw_packet: &[u8],
         rx: LinkRx<'_>,
         now_ms: u64,
     ) {
@@ -2126,15 +2160,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             Ok(len) => {
                 plaintext.truncate(len);
 
-                let link_cipher = link.cipher();
-                let full_packet_hash = cipher_proof_identifier(
-                    raw_packet,
-                    proof_binding_policy.for_cipher(link_cipher),
-                    link_cipher,
-                );
-
                 match link.proof_strategy() {
                     ProofStrategy::All => {
+                        let full_packet_hash = link_proof_id(
+                            packet,
+                            rx.raw_hash,
+                            proof_binding_policy.for_cipher(link.cipher()),
+                            link.cipher(),
+                        );
                         if let Some(signing_key) = link.proof_signing_key() {
                             if let Ok(proof_packet) = link.build_data_proof_packet_with_signing_key(
                                 &full_packet_hash,
@@ -2145,6 +2178,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         }
                     }
                     ProofStrategy::App => {
+                        let full_packet_hash = link_proof_id(
+                            packet,
+                            rx.raw_hash,
+                            proof_binding_policy.for_cipher(link.cipher()),
+                            link.cipher(),
+                        );
                         self.events.push(NodeEvent::LinkProofRequested {
                             link_id,
                             packet_hash: full_packet_hash,
@@ -2321,7 +2360,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         &mut self,
         link_id: LinkId,
         packet: &Packet,
-        raw_packet: &[u8],
         rx: LinkRx<'_>,
         now_ms: u64,
     ) {
@@ -2358,8 +2396,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             };
         let plaintext = &plaintext[..plaintext_len];
 
-        // Compute request_id = truncated_packet_hash(raw_packet)
-        let request_id = crate::packet::truncated_packet_hash(raw_packet);
+        // Packet requests use the original full packet hash, truncated to 16 bytes.
+        let full_packet_hash = rx
+            .raw_hash
+            .copied()
+            .unwrap_or_else(|| packet_hash_from_packet(packet));
+        let mut request_id = [0u8; TRUNCATED_HASHBYTES];
+        request_id.copy_from_slice(&full_packet_hash[..TRUNCATED_HASHBYTES]);
 
         if self.handle_request_payload(link_id, request_id, plaintext) == RequestDispatch::NoHandler
         {
@@ -2499,15 +2542,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Handle an incoming response packet (initiator side).
     ///
     /// Protocol: plaintext = msgpack fixarray(2) [request_id, response_data].
-    fn handle_response_packet(
-        &mut self,
-        link_id: LinkId,
-        packet: &Packet,
-        raw_packet: &[u8],
-        now_ms: u64,
-    ) {
-        let _ = raw_packet; // request_id is inside the payload, not derived from packet hash
-
+    fn handle_response_packet(&mut self, link_id: LinkId, packet: &Packet, now_ms: u64) {
         let Some(link) = self.links.get_mut(&link_id) else {
             return;
         };
@@ -2846,7 +2881,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         &mut self,
         link_id: LinkId,
         packet: &Packet,
-        _raw_packet: &[u8],
         rx: LinkRx<'_>,
         now_ms: u64,
     ) {
@@ -3601,13 +3635,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     }
 
     /// Handle a ResourceHmu packet (hashmap update).
-    fn handle_resource_hmu(
-        &mut self,
-        link_id: LinkId,
-        packet: &Packet,
-        _raw_packet: &[u8],
-        now_ms: u64,
-    ) {
+    fn handle_resource_hmu(&mut self, link_id: LinkId, packet: &Packet, now_ms: u64) {
         let Some(link) = self.links.get_mut(&link_id) else {
             return;
         };
@@ -4768,21 +4796,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             destination_hash,
         });
     }
-
-    pub(super) fn repack_packet(&self, packet: &Packet) -> Option<Vec<u8>> {
-        let size = packet.packed_size();
-        let mut buf = alloc::vec![0u8; size];
-        match packet.pack(&mut buf) {
-            Ok(len) => {
-                buf.truncate(len);
-                Some(buf)
-            }
-            Err(e) => {
-                crate::tracing::warn!(?e, "repack_packet failed — dropping packet");
-                None
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -4919,4 +4932,257 @@ enum RequestDispatch {
     NoHandler,
     /// Malformed, or refused by the handler's policy.
     Ignored,
+}
+
+#[cfg(test)]
+mod inbound_hash_tests {
+    use super::*;
+    use crate::destination::{Destination, DestinationType, Direction};
+    use crate::identity::Identity;
+    use crate::memory_storage::MemoryStorage;
+    use crate::node::NodeCoreBuilder;
+    use crate::packet::{HeaderType, TransportType};
+    use crate::test_utils::{MockClock, TEST_TIME_MS};
+    use crate::transport::{Action, InterfaceId, TickOutput};
+    use rand_core::OsRng;
+
+    type Node = NodeCore<OsRng, MockClock, MemoryStorage>;
+    const IFACE: InterfaceId = InterfaceId(0);
+
+    fn packets(output: TickOutput) -> Vec<Vec<u8>> {
+        output
+            .actions
+            .into_iter()
+            .map(|action| match action {
+                Action::SendPacket { data, .. } | Action::Broadcast { data, .. } => data,
+            })
+            .collect()
+    }
+
+    fn linked_pair() -> (Node, Node, LinkId) {
+        let identity = Identity::generate(&mut OsRng);
+        let signing_key = identity.ed25519_verifying().to_bytes();
+        let mut destination = Destination::new(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "hashes",
+            &["link"],
+        )
+        .unwrap();
+        destination.set_accepts_links(true);
+        destination.set_proof_strategy(ProofStrategy::All);
+        let destination_hash = *destination.hash();
+        let announce = destination
+            .announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000)
+            .unwrap();
+        let mut announce_bytes = alloc::vec![0u8; announce.packed_size()];
+        announce.pack(&mut announce_bytes).unwrap();
+
+        let mut sender = NodeCoreBuilder::new().build(
+            OsRng,
+            MockClock::new(TEST_TIME_MS),
+            MemoryStorage::with_defaults(),
+        );
+        let mut receiver = NodeCoreBuilder::new().build(
+            OsRng,
+            MockClock::new(TEST_TIME_MS),
+            MemoryStorage::with_defaults(),
+        );
+        sender.set_interface_hw_mtu(IFACE.0, 16_384);
+        receiver.set_interface_hw_mtu(IFACE.0, 16_384);
+        receiver.register_destination(destination);
+        receiver.register_request_handler(
+            destination_hash,
+            "/hash",
+            super::super::request::RequestPolicy::AllowAll,
+        );
+        let _ = sender.handle_packet(IFACE, &announce_bytes);
+        let (link_id, _, output) = sender.connect(destination_hash, &signing_key).unwrap();
+        let mut to_receiver = packets(output);
+        for _ in 0..8 {
+            if to_receiver.is_empty() {
+                break;
+            }
+            let mut back = Vec::new();
+            for raw in to_receiver {
+                back.extend(packets(receiver.handle_packet(IFACE, &raw)));
+            }
+            to_receiver = Vec::new();
+            for raw in back {
+                to_receiver.extend(packets(sender.handle_packet(IFACE, &raw)));
+            }
+        }
+        assert!(to_receiver.is_empty());
+        assert!(sender.link(&link_id).unwrap().is_active());
+        assert!(receiver.link(&link_id).unwrap().is_active());
+        assert_eq!(sender.link(&link_id).unwrap().negotiated_mtu(), 16_384);
+        assert_eq!(receiver.link(&link_id).unwrap().negotiated_mtu(), 16_384);
+        (sender, receiver, link_id)
+    }
+
+    fn as_header(raw: &[u8], header_type: HeaderType) -> Packet {
+        let mut packet = Packet::unpack(raw).unwrap();
+        packet.flags.header_type = header_type;
+        packet.flags.transport_type = TransportType::Transport;
+        packet.hops = 9;
+        packet.transport_id = (header_type == HeaderType::Type2).then_some([0xA7; 16]);
+        packet
+    }
+
+    fn assert_proof(sender: &Node, link_id: &LinkId, output: &TickOutput, hash: &[u8; 32]) {
+        assert!(
+            output.actions.iter().any(|action| {
+                let (Action::SendPacket { data, .. } | Action::Broadcast { data, .. }) = action;
+                let proof = Packet::unpack(data).unwrap();
+                proof.flags.packet_type == PacketType::Proof
+                    && sender
+                        .link(link_id)
+                        .unwrap()
+                        .validate_data_proof(proof.data.as_slice(), hash)
+            }),
+            "receiver did not produce a valid proof for the selected hash"
+        );
+    }
+
+    #[test]
+    fn original_hash_or_canonical_parts_feed_plain_and_buffered_channel_proofs() {
+        for supplied in [false, true] {
+            for header_type in [HeaderType::Type1, HeaderType::Type2] {
+                let (sender, mut receiver, link_id) = linked_pair();
+                let raw = sender
+                    .link(&link_id)
+                    .unwrap()
+                    .build_data_packet(b"plain payload", &mut OsRng)
+                    .unwrap();
+                let packet = as_header(&raw, header_type);
+                // A distinct supplied value makes ignoring the original hash observable.
+                let hash = if supplied {
+                    [0xB2; 32]
+                } else {
+                    packet_hash(&raw)
+                };
+                receiver.process_link_packet(
+                    &packet,
+                    supplied.then_some(&hash),
+                    TEST_TIME_MS,
+                    IFACE.0,
+                );
+                let output = receiver.process_events_and_actions();
+                assert!(output.events.iter().any(|event| matches!(event,
+                    NodeEvent::LinkDataReceived { data, .. } if data == b"plain payload"
+                )));
+                assert_proof(&sender, &link_id, &output, &hash);
+
+                receiver
+                    .link_mut(&link_id)
+                    .unwrap()
+                    .set_proof_strategy(ProofStrategy::App);
+                receiver.process_link_packet(
+                    &packet,
+                    supplied.then_some(&hash),
+                    TEST_TIME_MS,
+                    IFACE.0,
+                );
+                let output = receiver.process_events_and_actions();
+                assert!(output.events.iter().any(|event| matches!(event,
+                    NodeEvent::LinkProofRequested { packet_hash, .. } if *packet_hash == hash
+                )));
+                let output = receiver.send_data_proof(&link_id, &hash).unwrap();
+                assert_proof(&sender, &link_id, &output, &hash);
+
+                receiver.channel_delivery_budget = Some(1);
+                let later = crate::link::channel::Envelope::new(1, 1, b"buffered payload".to_vec());
+                let raw = sender
+                    .link(&link_id)
+                    .unwrap()
+                    .build_data_packet_with_context(
+                        &later.pack(),
+                        PacketContext::Channel,
+                        &mut OsRng,
+                    )
+                    .unwrap();
+                let packet = as_header(&raw, header_type);
+                let hash = if supplied {
+                    [0xC3; 32]
+                } else {
+                    packet_hash(&raw)
+                };
+                receiver.process_link_packet(
+                    &packet,
+                    supplied.then_some(&hash),
+                    TEST_TIME_MS,
+                    IFACE.0,
+                );
+                let output = receiver.process_events_and_actions();
+                assert!(!output
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, NodeEvent::MessageReceived { .. })));
+                assert_proof(&sender, &link_id, &output, &hash);
+
+                let first = crate::link::channel::Envelope::new(1, 0, b"gap payload".to_vec());
+                let raw = sender
+                    .link(&link_id)
+                    .unwrap()
+                    .build_data_packet_with_context(
+                        &first.pack(),
+                        PacketContext::Channel,
+                        &mut OsRng,
+                    )
+                    .unwrap();
+                let packet = as_header(&raw, header_type);
+                receiver.process_link_packet(&packet, None, TEST_TIME_MS, IFACE.0);
+                let output = receiver.process_events_and_actions();
+                assert!(output.events.iter().any(|event| matches!(event,
+                    NodeEvent::MessageReceived { data, sequence: 0, .. } if data == b"gap payload"
+                )));
+                let buffered = receiver
+                    .link_mut(&link_id)
+                    .unwrap()
+                    .channel_mut()
+                    .unwrap()
+                    .drain_received();
+                assert_eq!(buffered, alloc::vec![(later, hash)],
+                    "Channel::receive must retain the selected original hash with its buffered message");
+            }
+        }
+    }
+    #[test]
+    fn original_hash_or_canonical_parts_feed_packet_request_ids() {
+        for supplied in [false, true] {
+            for header_type in [HeaderType::Type1, HeaderType::Type2] {
+                let (mut sender, mut receiver, link_id) = linked_pair();
+                let mut data = Vec::new();
+                crate::msgpack::write_bin(&mut data, b"request payload");
+                let (sent_id, output) = sender
+                    .send_request(&link_id, "/hash", Some(&data), None)
+                    .unwrap();
+                let raw = packets(output).pop().expect("request packet");
+                let packet = as_header(&raw, header_type);
+                let hash = if supplied {
+                    [0xD4; 32]
+                } else {
+                    packet_hash(&raw)
+                };
+                let expected_id: [u8; 16] = hash[..16].try_into().unwrap();
+                if supplied {
+                    assert_ne!(expected_id, sent_id);
+                } else {
+                    assert_eq!(expected_id, sent_id);
+                }
+                receiver.process_link_packet(
+                    &packet,
+                    supplied.then_some(&hash),
+                    TEST_TIME_MS,
+                    IFACE.0,
+                );
+                let output = receiver.process_events_and_actions();
+                assert!(output.events.iter().any(|event| matches!(event,
+                    NodeEvent::RequestReceived { request_id, data: received, .. }
+                        if *request_id == expected_id && *received == data
+                )));
+            }
+        }
+    }
 }

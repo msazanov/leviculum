@@ -304,6 +304,12 @@ pub enum LinkCloseReason {
     /// The peer identified (LINKIDENTIFY) as a blackholed identity and the
     /// link was torn down (Codeberg #88; Python Link.py:1021-1023).
     Blackholed,
+    /// The interface the link was attached to was removed for good (an
+    /// operator removal, an expired auto-connect peer), so nothing could
+    /// carry the link's traffic any more. No close frame was sent: there is
+    /// no medium for it, and the peer finds out by its own stale timeout
+    /// (931, Codeberg #468).
+    InterfaceRemoved,
 }
 
 impl LinkCloseReason {
@@ -319,6 +325,7 @@ impl LinkCloseReason {
             LinkCloseReason::Stale => "stale",
             LinkCloseReason::ChannelExhausted => "channel-exhausted",
             LinkCloseReason::Blackholed => "blackholed",
+            LinkCloseReason::InterfaceRemoved => "interface-removed",
         }
     }
 }
@@ -2118,6 +2125,22 @@ impl Link {
         }
 
         LinkId::new(truncated_hash(&hashable))
+    }
+
+    /// Calculate the same link ID from a parsed request without repacking it.
+    ///
+    /// Signalling never participates in link identity: only the first
+    /// `LINK_REQUEST_BASE_SIZE` payload bytes join the canonical header.
+    /// Request validation remains in `new_incoming`, including mode and MTU.
+    pub(crate) fn calculate_link_id_from_packet(packet: &crate::packet::Packet) -> LinkId {
+        let data = packet.data.as_slice();
+        let hash = crate::packet::packet_hash_with_data(
+            packet,
+            &data[..data.len().min(LINK_REQUEST_BASE_SIZE)],
+        );
+        let mut truncated = [0u8; TRUNCATED_HASHBYTES];
+        truncated.copy_from_slice(&hash[..TRUNCATED_HASHBYTES]);
+        LinkId::new(truncated)
     }
 
     /// Set the link ID (called after calculating it from the sent packet)

@@ -357,6 +357,22 @@ READER_RC=$?
 check_eq "SIGTERM stops the reader cleanly" "0" "$READER_RC"
 check_contains "...and it says so in the file" "witness stopped" "$(cat "$WLOG")"
 
+# --- 3. --attach-now: the standing reader between runs ----------------------
+#
+# scripts/rig-cell.sh restarts the bench's readers after its cell, when no
+# scenario owns the port and nothing is going to vanish. A reader that waited
+# for a vanish there would record nothing until the board's next reset.
+SLOG="$WORK/standing.log"
+PATH="$WORK/bin:$PATH" python3 "$READER" \
+    --port "$PORT" --out "$SLOG" --label "1209:0001/FIXTURE" \
+    --poll 0.1 --capture 20 --acquire 2 --attach-now &
+STANDING_PID=$!
+awaited "--attach-now attaches to a present port without a vanish" "$SLOG" "# attached"
+send "say [INFO!] standing-reader-chatter"
+awaited "...and records what the board says" "$SLOG" "standing-reader-chatter"
+kill -TERM "$STANDING_PID" 2>/dev/null
+wait "$STANDING_PID"
+
 send quit
 exec 9>&-
 wait "$FIXTURE_PID" 2>/dev/null

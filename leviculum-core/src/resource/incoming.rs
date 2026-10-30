@@ -487,9 +487,16 @@ impl IncomingResource {
     /// resources to find the one a part belongs to.
     pub(crate) fn claims_part(&self, part_data: &[u8]) -> bool {
         self.status == ResourceStatus::Transferring
+            && part_data.len() <= self.sdu
             && self
                 .match_part(&map_hash(part_data, &self.random_hash))
-                .is_some()
+                .is_some_and(|index| self.part_fits(index, part_data.len()))
+    }
+
+    fn part_fits(&self, index: usize, bytes: usize) -> bool {
+        let consumed = (index as u64).saturating_mul(self.sdu as u64);
+        let remaining = self.transfer_size.saturating_sub(consumed);
+        bytes as u64 <= remaining.min(self.sdu as u64)
     }
 
     pub(crate) fn receive_part(
@@ -505,6 +512,9 @@ impl IncomingResource {
                 reason = "not_transferring",
                 status = ?self.status,
             );
+            return ResourcePartResult::InvalidPart;
+        }
+        if part_data.len() > self.sdu {
             return ResourcePartResult::InvalidPart;
         }
 
@@ -526,6 +536,12 @@ impl IncomingResource {
             );
             return ResourcePartResult::InvalidPart;
         };
+        // Each slot owns at most its negotiated part size, and the final
+        // slot at most the advertised remainder. Retained bytes cannot
+        // exceed the accepted transfer size, even before assembly.
+        if !self.part_fits(index, part_data.len()) {
+            return ResourcePartResult::InvalidPart;
+        }
 
         // Store the part
         self.parts[index] = Some(part_data.to_vec());
@@ -1182,6 +1198,67 @@ mod tests {
                 ..Default::default()
             },
             hashmap_data,
+        }
+    }
+
+    #[test]
+    fn part_lengths_obey_negotiated_sdu_and_declared_final_remainder() {
+        let random_hash = [0xBB; RESOURCE_RANDOM_HASH_SIZE];
+        for (rejected_index, rejected_len) in [(0usize, 465usize), (1, 137)] {
+            let first = vec![0x31; 464];
+            let last = vec![0x32; 136];
+            let rejected = vec![0x33; rejected_len];
+            let mut hashes = Vec::new();
+            for (index, part) in [&first, &last].into_iter().enumerate() {
+                let bytes = if index == rejected_index {
+                    &rejected
+                } else {
+                    part
+                };
+                hashes.extend_from_slice(&map_hash(bytes, &random_hash));
+            }
+            let mut adv = make_test_adv(2, hashes);
+            adv.transfer_size = 600;
+            let (mut incoming, _) = IncomingResource::from_advertisement(
+                &adv,
+                431,
+                464,
+                100,
+                8192,
+                WindowPolicy::Current,
+            )
+            .unwrap();
+            assert!(!incoming.claims_part(&rejected));
+            assert!(matches!(
+                incoming.receive_part(&rejected, 200, 100),
+                ResourcePartResult::InvalidPart
+            ));
+            assert_eq!(incoming.progress(), 0.0);
+            assert!(incoming.parts.iter().all(Option::is_none));
+
+            // A corrected hash map permits the legitimate retransmission.
+            let mut corrected = Vec::new();
+            corrected.extend_from_slice(&map_hash(&first, &random_hash));
+            corrected.extend_from_slice(&map_hash(&last, &random_hash));
+            let mut update = incoming.resource_hash.to_vec();
+            msgpack::write_fixarray_header(&mut update, 2);
+            msgpack::write_uint(&mut update, 0);
+            msgpack::write_bin(&mut update, &corrected);
+            incoming.handle_hashmap_update(300, &update).unwrap();
+            assert!(incoming.claims_part(&first));
+            assert!(!matches!(
+                incoming.receive_part(&first, 400, 100),
+                ResourcePartResult::InvalidPart
+            ));
+            assert!(incoming.claims_part(&last));
+            assert!(matches!(
+                incoming.receive_part(&last, 500, 100),
+                ResourcePartResult::Assembling
+            ));
+            assert_eq!(
+                incoming.parts.iter().flatten().map(Vec::len).sum::<usize>(),
+                600
+            );
         }
     }
 

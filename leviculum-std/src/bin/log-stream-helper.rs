@@ -1,7 +1,7 @@
 //! Helper binary for the stdout/stderr split test in
 //! `leviculum-std/tests/log_stream_split.rs`.
 //!
-//! Installs the production subscriber exactly as `lnmsg`, `lnsd` and
+//! Installs the production subscriber exactly as `loquax`, `lnsd` and
 //! `lnpnd` do (`event_log::install_global_subscriber`), then drives the
 //! real over-budget path: a node with a [`CoreProcessor`] whose
 //! `on_tick` sleeps past [`PROCESSOR_TICK_BUDGET`], so the driver's
@@ -12,9 +12,9 @@
 //!
 //! On stdout it prints exactly one line, `PAYLOAD`, standing in for the
 //! data every binary that installs this subscriber writes there —
-//! `lnmsg`'s message bodies, `lncp`'s progress, `lnprobe`'s reply. The
+//! `loquax`'s message bodies, `lncp`'s progress, `lnprobe`'s reply. The
 //! test asserts stdout is that line and nothing else, which is the
-//! assertion `lnmsg/tests/python_interop.rs` makes seven times over.
+//! assertion `loquax/tests/python_interop.rs` makes seven times over.
 //!
 //! Usage: `log-stream-helper <run-ms>` — start the node, wait `<run-ms>`
 //! for at least one tick (the driver's timer branch is at most ~1 s
@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse().ok())
         .expect("usage: log-stream-helper <run-ms>");
 
-    // `warn` is `lnmsg`'s default filter, i.e. the level at which the
+    // `warn` is `loquax`'s default filter, i.e. the level at which the
     // failing line actually reached a user.
     install_global_subscriber("warn");
 

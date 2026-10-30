@@ -14,8 +14,9 @@ mod common;
 use leviculum_core::resource::ResourceSource as _;
 use leviculum_lxmf::{
     constants::{DESTINATION_LENGTH, STAMP_SIZE, WORKBLOCK_EXPAND_ROUNDS_PN},
-    CooperativeStamper, GetOutcome, MemoryPropagationStore, MessageGetRequest, PropagationNode,
-    PropagationNodeConfig, PropagationStore as _, TransferLimit, TransientId, UploadOutcome,
+    CooperativeStamper, GetOutcome, MemoryPropagationStore, MessageGetRequest,
+    PropagationBodyStore as _, PropagationNode, PropagationNodeConfig, PropagationStore as _,
+    TransferLimit, TransientId, UploadOutcome,
 };
 
 fn hex_bytes(id: &str, field: &str) -> Vec<u8> {

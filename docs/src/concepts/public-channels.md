@@ -12,7 +12,7 @@ the existing Reticulum or LXMF infrastructure, why that is possible at
 all, and where the sharp edges are.
 
 Two crates are involved, neither of which exists yet: a propagation node
-server, and channel support in `lnmsg`. The lnmsg design record currently
+server, and channel support in `loquax`. The Loquax design record currently
 states that hosting a propagation node is out of scope. That changes here:
 the channel feature only works if we host nodes, because the retrieval
 side is ours.
@@ -29,7 +29,7 @@ announced, and without an announce there is no path table entry.
 `Transport.outbound` skips the path lookup for both types outright
 (`Transport.py:1121`), and any receiving node drops such a packet once
 `hops > 1` (`Transport.py:1354-1373`, mirrored in
-`leviculum-core/src/transport.rs:3716-3748`). The reach of a Reticulum
+`leviculum-core/src/transport.rs:3733-3765`). The reach of a Reticulum
 broadcast is exactly one hop plus locally attached clients.
 
 For PLAIN the manual gives the reason: "To be transportable over multiple
@@ -409,7 +409,7 @@ Our node advertises channel support under a namespaced key there:
 protocol version, which channel types it serves, directory size, and the
 minimum stamp cost it requires for channel posts. Because propagation
 node announces travel over the ordinary announce mechanism, every client
-in the mesh sees them. `lnmsg` collects them, filters on the capability
+in the mesh sees them. `loquax` collects them, filters on the capability
 key, and selects by `hops_to`. That is the automatic discovery the
 feature needs, and it costs nothing upstream.
 

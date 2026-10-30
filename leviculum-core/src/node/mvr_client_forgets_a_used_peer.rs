@@ -16,7 +16,7 @@
 //!
 //! So a peer this node had used minutes before lost its cached announce on the
 //! first sweep after its path expired. A shared-instance client — `lxmf-node`,
-//! `lnmsg`, `lnomad` — feels that first, for two reasons: it holds no path of
+//! `loquax`, `lnomad` — feels that first, for two reasons: it holds no path of
 //! its own beyond what the daemon installs, so a daemon reconnect or a peer
 //! loss drops the lot; and our sweep runs from `Transport::poll` on every
 //! tick, not on a 300 s jobs cadence, so "the path is momentarily gone" and

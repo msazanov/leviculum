@@ -22,11 +22,16 @@
 //! (`jl`, `jldiff`, the field-violation detector, and the `awk`/`grep`
 //! one-liners the format exists for) splits on whitespace, so a quoted value
 //! with a space is still two tokens to all of them.
+//!
+//! [`Scalar`] is public because emission sites outside this crate need the
+//! same rendering without `std`: `leviculum-std` re-exports it as
+//! `event_log::Scalar`, and the `loquax` core renders its user-chosen fields
+//! through it on the firmware target too.
 
 /// Display wrapper that renders any string as a single event-log token:
 /// every character that would break the whitespace `key=value` tokenisation
 /// becomes `_`.
-pub(crate) struct Scalar<'a>(pub &'a str);
+pub struct Scalar<'a>(pub &'a str);
 
 impl core::fmt::Display for Scalar<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

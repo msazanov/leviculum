@@ -880,6 +880,48 @@ impl BleTask {
                 // only the refusal arm needs it, and hoisting keeps the
                 // arm free of a second borrow.
                 let accept_listed = table.accept_only_len();
+                // A 16-byte write from an address with no live link is
+                // the identity handshake (`links::LinkTable::
+                // peripheral_frame`) — but the bytes themselves are an
+                // opaque truncated hash, unverifiable on receipt, and
+                // the reference accepts any 16 of them
+                // (`ble-reticulum@07d94130` `BLEInterface.py`,
+                // `_handle_identity_handshake`). What distinguishes a
+                // Columba central is the exchange around them: every
+                // reference central subscribes to the TX characteristic
+                // BEFORE writing its identity and aborts when the
+                // subscription fails (BLE_PROTOCOL_v2.2 §Handshake Flow
+                // steps 4 and 5; our own dial, `bluez.rs::
+                // layout_and_handshake`; Columba's `BleGattClient.kt`;
+                // the reference's `linux_bluetooth_driver.py`). A
+                // handshake on a connection nobody subscribed on is a
+                // stranger — on the bench a GATT prober's junk became a
+                // peer this way and was re-offered announces (996).
+                //
+                // BlueZ reports subscriptions without a device (one
+                // StartNotify for the first subscriber, no address), so
+                // the test is "any live notify session": an OR over
+                // centrals that fails OPEN beside a subscribed peer and
+                // is exact when the stranger is alone. A real central
+                // cannot lose the ordering race: its CCCD write is
+                // dispatched to us (`Ev::PeriphNotify` enqueued) before
+                // BlueZ answers it on the air, and the handshake write
+                // follows only after that answer plus the AcquireWrite
+                // round trip, through the same event channel.
+                if data.len() == 16
+                    && table.link_by_addr(&addr.0).is_none()
+                    && !notifiers.iter().any(|n| !n.is_stopped())
+                {
+                    tracing::warn!(
+                        event = "BLE_LINK_REFUSED",
+                        iface = %Scalar(&self.name),
+                        addr = %hex12(&addr.0),
+                        reason = "identity_invalid",
+                    );
+                    backoff_until.insert(addr.0, now + DUPLICATE_ADDR_TTL_MS);
+                    disconnect_quietly(adapter, addr.0).await;
+                    return;
+                }
                 match table.peripheral_frame(addr.0, mtu, &data, now) {
                     Inbound::Packet(packet) => {
                         let peer = table.link_by_addr(&addr.0).map(|l| l.identity);

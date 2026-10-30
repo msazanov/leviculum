@@ -44,6 +44,7 @@
 mod builder;
 mod event;
 mod link_management;
+pub mod remote_status;
 // Gated on `tracing`: the mvr captures structured tracing output to prove the
 // exact drop reason, so it needs the real `tracing`/`tracing-subscriber` crates
 // (absent under `--no-default-features`, e.g. the core-no-tracing CI gate).
@@ -118,6 +119,10 @@ mod mvr_ingress_link_exclusion;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_interface_gone_dispatch;
 #[cfg(all(test, feature = "tracing"))]
+mod mvr_interface_gone_final_teardown;
+#[cfg(all(test, feature = "tracing"))]
+mod mvr_interface_up_after_teardown;
+#[cfg(all(test, feature = "tracing"))]
 mod mvr_link_cap;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_link_data_echo_storm;
@@ -143,6 +148,8 @@ mod mvr_link_silent_exits;
 mod mvr_link_timing_reference;
 #[cfg(test)]
 mod mvr_link_up_reoffer;
+#[cfg(test)]
+mod mvr_linkproof_context_data_proof;
 #[cfg(test)]
 mod mvr_lnode_pathresolve;
 #[cfg(test)]
@@ -256,12 +263,39 @@ use crate::constants::{RATCHET_SIZE, TRUNCATED_HASHBYTES};
 use crate::destination::{Destination, DestinationHash, Direction, ProofStrategy};
 use crate::identity::Identity;
 use crate::link::{Link, LinkId};
-use crate::packet::packet_hash;
 use crate::traits::{Clock, Storage};
 use crate::transport::{Transport, TransportConfig, TransportEvent, TransportStats};
 use rand_core::CryptoRngCore;
 
-use crate::hex_fmt::{HexFmt, HexShort};
+use crate::hex_fmt::HexShort;
+
+/// Whether an interface that went down can come back under the same index
+/// (931, Codeberg #468). Passed to
+/// [`NodeCore::handle_interface_teardown`]; the driver classifies each of
+/// its teardown sites, and a site that cannot be sure says `Transient`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Teardown {
+    /// The interface may return under the same index (a TCP client that
+    /// re-dials, a detached bootstrap interface that is re-attached), and a
+    /// link attached to it carries on when it does. Own links are kept;
+    /// until then their sends are dropped as `no-such-interface`, and a link
+    /// whose interface never returns dies on its stale timeout.
+    Transient,
+    /// The index will not be used for this interface again. Every own link
+    /// attached to it is closed at once with
+    /// [`LinkCloseReason::InterfaceRemoved`](crate::link::LinkCloseReason::InterfaceRemoved).
+    Final,
+}
+
+impl Teardown {
+    /// The word the `IFACE_DOWN` event's `teardown` field carries.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Teardown::Transient => "transient",
+            Teardown::Final => "final",
+        }
+    }
+}
 
 /// Delay before the first management announce after startup.
 /// Python defers by `mgmt_announce_interval - 15` so first fires at ~15s.
@@ -2417,7 +2451,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     ) -> Result<(), crate::resource::ResourceError> {
         // Resolve a possibly-stale caller-visible id: the caller configures
         // the link straight off the `LinkEstablished` event
-        // (`leviculum-cli/src/cp.rs:806`, `leviculum-std/src/remote_status.rs:283`),
+        // (`leviculum-cli/src/cp.rs:809`, `leviculum-std/src/remote_status.rs:283`),
         // and after a #66 retry that id is the pre-re-key one.
         let link_id = &self.resolve_link_id(link_id);
         let link = self
@@ -3057,17 +3091,61 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.interface_peer_count(iface)
     }
 
+    /// Whether `iface` was torn down and not registered again (981); see
+    /// [`Transport::interface_torn_down`](crate::transport::Transport::interface_torn_down).
+    /// The driver asks before it acts on an interface event that may have
+    /// crossed the teardown in one of its channels (989).
+    pub fn interface_torn_down(&self, iface: usize) -> bool {
+        self.transport.interface_torn_down(iface)
+    }
+
     /// Notify core that an interface has gone offline (sans-I/O)
     ///
     /// The driver should call this when it detects that an interface is no
     /// longer available (e.g., TCP disconnect, serial port closed). Core
     /// removes routing entries referencing this interface and emits
     /// appropriate events.
+    ///
+    /// This is the [`Teardown::Transient`] teardown: own links attached to
+    /// the interface are kept, because it may come back under the same
+    /// index. A caller that knows the interface is gone for good uses
+    /// [`handle_interface_teardown`](Self::handle_interface_teardown) with
+    /// [`Teardown::Final`].
     pub fn handle_interface_down(
         &mut self,
         iface: crate::transport::InterfaceId,
     ) -> crate::transport::TickOutput {
+        self.handle_interface_teardown(iface, Teardown::Transient)
+    }
+
+    /// [`handle_interface_down`](Self::handle_interface_down) with the
+    /// teardown's class named (931, Codeberg #468).
+    ///
+    /// On [`Teardown::Final`] every own link attached to the interface is
+    /// closed at once: removed from the link table, `LinkClosed` with
+    /// [`LinkCloseReason::InterfaceRemoved`](crate::link::LinkCloseReason::InterfaceRemoved)
+    /// to the application, no close frame (there is no medium left for
+    /// it). Python keeps `Link.attached_interface` and lets
+    /// `Transport.outbound` skip a missing interface (Transport.py:1182-1191),
+    /// so its link lives on until its stale timeout. The deviation is local:
+    /// the peer sees what it sees from Python, silence and then its own
+    /// stale timeout, and only the local application learns earlier.
+    ///
+    /// On [`Teardown::Transient`] own links are kept, the behaviour
+    /// `mvr_interface_gone_dispatch` pins: an interface that returns under
+    /// the same index carries them on.
+    pub fn handle_interface_teardown(
+        &mut self,
+        iface: crate::transport::InterfaceId,
+        teardown: Teardown,
+    ) -> crate::transport::TickOutput {
         let iface_idx = iface.0;
+
+        #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
+        let links_closed = match teardown {
+            Teardown::Final => self.close_links_on_removed_interface(iface_idx),
+            Teardown::Transient => 0,
+        };
 
         // Remove path entries referencing this interface
         let lost_paths = self.transport.remove_paths_for_interface(iface_idx);
@@ -3086,15 +3164,20 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .transport
             .remove_targeted_announces_for_interface(iface_idx);
 
-        // Log before removing the name so the message still shows the human-readable name
+        // Log before removing the name so the line still shows the
+        // human-readable name. `idx` is the number a later
+        // `PKT_DROP reason=no-such-interface` names as `iface_out`.
         crate::tracing::debug!(
-            "Interface {} went down, removed {} paths, {} discovery windows ({} handed on, {} batched requesters), {} targeted announces",
-            self.transport.iface_name(iface_idx),
-            lost_paths.len(),
-            discovery.windows,
-            discovery.handed_on,
-            discovery.batched,
-            targeted
+            event = "IFACE_DOWN",
+            iface = %self.transport.iface_name(iface_idx),
+            idx = iface_idx,
+            teardown = teardown.as_str(),
+            links_closed = links_closed,
+            paths = lost_paths.len(),
+            discovery_windows = discovery.windows,
+            handed_on = discovery.handed_on,
+            batched = discovery.batched,
+            targeted = targeted,
         );
 
         for hash in &lost_paths {
@@ -3151,6 +3234,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // life refusing announces for a hold its predecessor reported.
         self.transport.set_interface_duty_hold(iface_idx, false);
         self.transport.remove_interface_name(iface_idx);
+        // Tombstone the index (981): a buffered interface-up notification
+        // sent before this teardown must not re-announce to it. Cleared by
+        // the next `set_interface_name`, which every registration path calls
+        // before reporting the interface up.
+        self.transport.mark_interface_torn_down(iface_idx);
         self.transport.remove_interface_mode(iface_idx);
         self.transport.remove_interface_kind(iface_idx);
         self.transport.remove_interface_hw_mtu(iface_idx);
@@ -3382,7 +3470,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// have a stale entry. Cached bytes are sufficient for client
     /// destinations because the peer on the recovered interface has never
     /// seen them (Block D).
+    ///
+    /// A notification for an index the core tore down and nothing registered
+    /// again announces nothing (981): it was sent before the teardown and
+    /// crossed it in a driver channel (the miauhaus soak's retired
+    /// auto-connect client, whose reconnect raced the 12 s detach poll), and
+    /// every announce it triggered was dropped at dispatch as
+    /// `no-such-interface` — one per local destination, same millisecond.
     pub fn handle_interface_up(&mut self, interface_index: usize) -> crate::transport::TickOutput {
+        if self.transport.interface_torn_down(interface_index) {
+            crate::tracing::debug!(event = "IFACE_UP_STALE", idx = interface_index,);
+            return self.process_events_and_actions();
+        }
         self.announce_local_destinations(interface_index, None);
         self.process_events_and_actions()
     }
@@ -3966,6 +4065,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.transport_link_table_entries()
     }
 
+    /// Count relayed links, not endpoint links, without allocating export rows.
+    pub fn transport_link_count(&self) -> usize {
+        self.transport.storage().link_entry_count()
+    }
+
     /// Return all announce-table entries (announces held for rebroadcast).
     pub fn announce_table_entries(&self) -> Vec<crate::transport::AnnounceTableExport> {
         self.transport.announce_table_entries()
@@ -4358,34 +4462,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         && self.links.contains_key(&LinkId::new(destination_hash)))
                 {
                     // Route to link packet handler
-                    let Some(raw) = self.repack_packet(&packet) else {
-                        // repack_packet logs the error; drop the packet
-                        return;
-                    };
-
-                    // Verify repack symmetry: if original wire hash is known,
-                    // check that repacking produces the same hashable bytes.
-                    if let Some(original_hash) = raw_hash {
-                        let repacked_hash = packet_hash(&raw);
-                        if original_hash != repacked_hash {
-                            crate::tracing::warn!(
-                                original = %HexFmt(&original_hash),
-                                repacked = %HexFmt(&repacked_hash),
-                                ptype = ?packet.flags.packet_type,
-                                ctx = ?packet.context,
-                                "REPACK HASH MISMATCH — proof chain will fail"
-                            );
-                        }
-                    }
-
                     let now_ms = self.transport.clock().now_ms();
-                    self.process_link_packet(
-                        &packet,
-                        &raw,
-                        raw_hash.as_ref(),
-                        now_ms,
-                        interface_index,
-                    );
+                    self.process_link_packet(&packet, raw_hash.as_ref(), now_ms, interface_index);
                 } else {
                     // Regular packet: decrypt per destination type (Single via
                     // identity/ratchets, Group via the shared token, Plain
@@ -6443,7 +6521,7 @@ mod tests {
         )));
     }
 
-    /// Regression (lnmsg propagated-upload interop, 2026-09-12): on a 1 ms-RTT
+    /// Regression (loquax propagated-upload interop, 2026-09-12): on a 1 ms-RTT
     /// link the literal Python formula gives a 6 ms receipt deadline, and a
     /// Python LXMF propagation node validates the upload's PoW stamp *before*
     /// proving — 10-15 ms. Exact enforcement failed the receipt, the LXMF

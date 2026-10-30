@@ -109,7 +109,7 @@ pub(crate) mod destination;
 pub mod discovery;
 pub mod embedded_storage;
 pub mod envelope;
-mod event_scalar;
+pub mod event_scalar;
 pub mod fixed_position_store;
 pub mod framing;
 /// Fuzzing-only entry points exposing crate-internal parsers to the detached
@@ -122,6 +122,7 @@ pub mod hex_fmt;
 pub mod identity;
 pub mod identity_store;
 pub mod ifac;
+pub mod interface_counters;
 pub mod known_destinations;
 pub mod link;
 pub mod media_profile_store;

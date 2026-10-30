@@ -93,7 +93,7 @@ mod tests {
     /// The point of the lookup: it answers with nothing in the environment.
     ///
     /// This runs in-process, so it cannot clear the environment the way `env -i`
-    /// does — the binary-level check lives in `lnmsg`'s CLI tests. What it does
+    /// does — the binary-level check lives in `loquax`'s CLI tests. What it does
     /// prove is that the call itself works on this host and returns a plausible
     /// name rather than an empty string.
     #[test]

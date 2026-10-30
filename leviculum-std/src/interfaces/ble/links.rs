@@ -31,9 +31,19 @@ use leviculum_ble_tx::{
     WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
-    fragment_packet, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, FRAGMENT_TYPE_CONTINUE,
-    FRAGMENT_TYPE_END, KEEPALIVE_INTERVAL_MS, MIN_MTU,
+    fragment_packet, payload_per_fragment, BleDefragmenter, BleReassemblyLimits, DefragResult,
+    FRAGMENT_HEADER_SIZE, FRAGMENT_TYPE_CONTINUE, FRAGMENT_TYPE_END, KEEPALIVE_INTERVAL_MS,
+    MIN_MTU,
 };
+
+// BLE signals no HW-MTU upgrade. Keep the full base packet and the largest
+// identity-signature-sized IFAC, independently of the negotiated ATT MTU.
+const REASSEMBLY_PACKET_BYTES: usize =
+    leviculum_core::constants::MTU + leviculum_core::constants::IDENTITY_KEY_SIZE;
+const REASSEMBLY_LIMITS: BleReassemblyLimits = BleReassemblyLimits::new(
+    REASSEMBLY_PACKET_BYTES,
+    REASSEMBLY_PACKET_BYTES.div_ceil(payload_per_fragment(MIN_MTU)) as u16,
+);
 
 /// A BLE address in display order (`AA:BB:CC:DD:EE:FF` → `[0xAA, …]`),
 /// the byte order `bluer::Address` carries.
@@ -65,7 +75,7 @@ pub(crate) const LOCAL_CAPS: u8 = 0x00;
 pub(crate) const DEFAULT_MAX_LINKS: usize = 4;
 
 /// Outgoing (central-role) links a board opens, the firmware's
-/// `CENTRAL_LINKS` (`leviculum-nrf/src/ble/mod.rs:122`): one. A board
+/// `CENTRAL_LINKS` (`leviculum-nrf/src/ble/mod.rs:120`): one. A board
 /// dials at most one neighbour at a time — which the dial queue's
 /// one-setup-in-flight rule (#49 part 3) already arranged in time; this
 /// is the same bound held in the table, where it survives a setup that
@@ -497,7 +507,7 @@ impl LinkTable {
     }
 
     /// Whether an outgoing slot is free, the scan path's and the dial
-    /// pump's gate (`ble/mod.rs:1070`, `:867`).
+    /// pump's gate (`ble/mod.rs:1151`, `:867`).
     ///
     /// Half of what was one occupancy predicate before #432. It reads
     /// the CENTRAL links only, so a node with a lively GATT server
@@ -739,7 +749,7 @@ impl LinkTable {
             addr,
             role,
             mtu: mtu.max(MIN_MTU),
-            defrag: BleDefragmenter::new(),
+            defrag: BleDefragmenter::new(REASSEMBLY_LIMITS),
             oo_tail: None,
             tails_dropped: 0,
             last_heard_ms: now_ms,
@@ -897,6 +907,7 @@ impl LinkTable {
         let parked = link.oo_tail.take();
         let mut parked_replayed = false;
         let before = link.defrag.abandoned_count() + link.tails_dropped;
+        let had_partial = link.defrag.pending_fragments() != 0;
         let mut result = link.defrag.process(data, now_ms);
         match &result {
             DefragResult::Error => {
@@ -910,7 +921,7 @@ impl LinkTable {
                 // carrier it is almost always the END of the very
                 // next frame's packet, delivered inverted (see
                 // [`Link::oo_tail`]).
-                if is_orphan_tail(data) {
+                if !had_partial && is_orphan_tail(data) {
                     link.oo_tail = Some(data.to_vec());
                     result = DefragResult::NeedMore;
                 }
@@ -1156,7 +1167,11 @@ fn is_orphan_tail(frame: &[u8]) -> bool {
     let ftype = frame[0];
     let seq = u16::from_be_bytes([frame[1], frame[2]]);
     let total = u16::from_be_bytes([frame[3], frame[4]]);
-    (ftype == FRAGMENT_TYPE_CONTINUE || ftype == FRAGMENT_TYPE_END) && seq >= 1 && seq < total
+    (ftype == FRAGMENT_TYPE_CONTINUE || ftype == FRAGMENT_TYPE_END)
+        && seq >= 1
+        && seq < total
+        && total <= REASSEMBLY_LIMITS.fragments()
+        && frame.len() - FRAGMENT_HEADER_SIZE <= REASSEMBLY_LIMITS.packet_bytes()
 }
 
 // ---------------------------------------------------------------------
@@ -2626,6 +2641,65 @@ mod tests {
     /// shape most of these tests were written against.
     fn table() -> LinkTable {
         LinkTable::new(OWN, DEFAULT_MAX_LINKS, BOARD_CENTRAL_LINKS)
+    }
+
+    #[test]
+    fn the_standard_profile_keeps_full_packets_at_minimum_and_large_att_mtus() {
+        let packet: Vec<u8> = (0..REASSEMBLY_PACKET_BYTES)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        for role in [Role::Central, Role::Peripheral] {
+            for mtu in [23, 185, 517] {
+                let mut t = table();
+                assert_eq!(t.admit(ID_A, ADDR_1, role, mtu, 0).0, Admission::Accept);
+                let fragments = fragment_packet(&packet, mtu);
+                let mut result = Inbound::NeedMore;
+                for fragment in &fragments {
+                    result = match role {
+                        Role::Central => t.central_frame(ADDR_1, fragment, 1),
+                        Role::Peripheral => t.peripheral_frame(ADDR_1, mtu, fragment, 1),
+                    };
+                }
+                let Inbound::Packet(received) = result else {
+                    panic!("a full base packet with IFAC must work in either role");
+                };
+                assert_eq!(received, packet);
+                assert_eq!(received.capacity(), packet.len());
+                assert!(t.link_census().all(|row| row.defrag_bytes == 0));
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_overflow_and_count_trains_do_not_become_parked_orphan_copies() {
+        let mut t = table();
+        assert_eq!(
+            t.admit(ID_A, ADDR_1, Role::Central, 517, 0).0,
+            Admission::Accept
+        );
+        let too_large = fragment_packet(&vec![0x73; REASSEMBLY_PACKET_BYTES + 1], 517);
+        assert_eq!(t.central_frame(ADDR_1, &too_large[0], 1), Inbound::NeedMore);
+        assert_eq!(t.central_frame(ADDR_1, &too_large[1], 2), Inbound::Error);
+        for count in [REASSEMBLY_LIMITS.fragments() + 1, u16::MAX] {
+            let tail = [
+                FRAGMENT_TYPE_END,
+                0,
+                1,
+                (count >> 8) as u8,
+                count as u8,
+                0x74,
+            ];
+            assert_eq!(t.central_frame(ADDR_1, &tail, 3), Inbound::Error);
+        }
+        assert!(t.link_census().all(|row| {
+            row.defrag_bytes == 0 && row.defrag_fragments == 0 && row.parked_tail_bytes == 0
+        }));
+        let valid = fragment_packet(&vec![0x75; REASSEMBLY_PACKET_BYTES], 23);
+        let mut result = Inbound::NeedMore;
+        for fragment in &valid {
+            result = t.central_frame(ADDR_1, fragment, 4);
+        }
+        assert_eq!(result, Inbound::Packet(vec![0x75; REASSEMBLY_PACKET_BYTES]));
     }
 
     /// lnsd paces every BLE link at the firmware's compiled default gap
@@ -4196,6 +4270,34 @@ mod tests {
         assert_eq!(last, Inbound::Packet(packet));
     }
 
+    /// The dial's socket primer (1004) as the BlueZ race can deliver
+    /// it: the AcquireWrite-triggering write is forwarded from a reused
+    /// receive buffer, so its CONTENT may be rewritten in flight while
+    /// its length holds. A one-byte frame of any value before the
+    /// identity is therefore a keepalive — never a handshake, never an
+    /// error — and the identity that follows still opens the link.
+    #[test]
+    fn a_corrupted_one_byte_primer_leaves_the_handshake_intact() {
+        let mut t = table();
+        // Not KEEPALIVE_BYTE: the byte the race happened to leave.
+        assert_eq!(
+            t.peripheral_frame(ADDR_1, 185, &[0xAB], 100),
+            Inbound::Keepalive
+        );
+        assert_eq!(t.link_count(), 0);
+        assert_eq!(
+            t.peripheral_frame(ADDR_1, 185, &ID_A, 200),
+            Inbound::HandshakeComplete {
+                identity: ID_A,
+                displaced: None
+            }
+        );
+        assert_eq!(
+            t.link_by_addr(&ADDR_1).map(|l| l.role),
+            Some(Role::Peripheral)
+        );
+    }
+
     /// The #372 question, answered for lnsd: the peripheral side holds
     /// two centrals CONCURRENTLY. Both handshake, both links are live at
     /// once, their interleaved fragment streams reassemble on separate
@@ -5547,7 +5649,7 @@ mod tests {
     }
 
     /// One dial in the room, gated exactly as the driver gates it: the
-    /// dialler needs an outgoing slot (`may_dial`, `ble/mod.rs:1070` and
+    /// dialler needs an outgoing slot (`may_dial`, `ble/mod.rs:1151` and
     /// the pump at `:856`) and the target must be on the air
     /// (`should_advertise` — a dark peer sends no connectable PDU, so a
     /// dial at it can only run out `bluez.rs`'s 20 s setup budget).
@@ -5663,7 +5765,7 @@ mod tests {
     /// The incoming cap, at the boundary: three dials land, the fourth
     /// is refused BY ROLE, and the node is on the air for exactly as
     /// long as it has room — the firmware's `PERIPH_LINKS` shape
-    /// (`leviculum-nrf/src/ble/mod.rs:115`) on a host.
+    /// (`leviculum-nrf/src/ble/mod.rs:113`) on a host.
     #[test]
     fn a_fourth_incoming_dial_is_refused_and_the_third_takes_the_node_dark() {
         const ADDR_4: Addr = [0xC0, 0x00, 0x00, 0x00, 0x00, 0x04];

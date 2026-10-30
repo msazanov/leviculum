@@ -55,7 +55,7 @@ wrong value, and it fails silently — see
   `rnprobe` is implemented in `leviculum-std/src/rpc/` (it speaks
   Python's `multiprocessing.connection` framing with pickle payloads,
   see `rpc/connection.rs` and `rpc/pickle.rs`). A client on that socket
-  — `lxmf-node`, `lnmsg`, `lnomad`, every `ln*` tool — keeps its own
+  — `lxmf-node`, `loquax`, `lnomad`, every `ln*` tool — keeps its own
   known-destination table rather than delegating it, so a peer it has
   used stays recallable for `KNOWN_DEST_USED_LINGER_MS`
   (`leviculum-core/src/constants.rs:176`) after the daemon stops
@@ -67,7 +67,7 @@ wrong value, and it fails silently — see
   on are parsed for compatibility — for example `shared_instance_type`
   and `shared_instance_socket` are read and honoured per RNS 1.3.x
   semantics so an existing `rnsd` config works unchanged
-  (`leviculum-std/src/config.rs:95-101`).
+  (`leviculum-std/src/config.rs:110-116`).
 
 This drop-in property is a deliberate design goal, not an accident.
 It is also what makes honest A/B testing possible: the test harness
@@ -118,13 +118,13 @@ grounds: an application pinned it, it was used within
 `UNUSED_DESTINATION_LINGER` — 6 minutes
 (`reference/Reticulum/RNS/Identity.py:349-352`, the two timeouts at
 `Transport.py:91-92`). We implement the first two and not the third
-(`leviculum-core/src/memory_storage.rs:1374`): our announce cache stores
+(`leviculum-core/src/memory_storage.rs:1378`): our announce cache stores
 the raw announce, not the moment we heard it, so there is no age to
 compare against. The third arm only ever protects a destination nothing
 has asked about, so dropping it a few minutes early costs a path request
 rather than a fact, and clause 3 of the rule is satisfied by the smaller
 resident set. `EmbeddedStorage` goes one further and implements only the
-first (`leviculum-core/src/embedded_storage.rs:1109`), because a board
+first (`leviculum-core/src/embedded_storage.rs:1113`), because a board
 tracks no use-state at all.
 
 ### Pinned deviation: ingress-control default on dial-out links
@@ -136,7 +136,7 @@ Leviculum defaults it **off** on dial-out point-to-point links —
 `TCPClientInterface`, `BackboneClientInterface`, `UDPInterface`, and an
 `I2PInterface` without `connectable` — and leaves it **on** everywhere
 else, including every listener
-(`ingress_control_default_for_type`, `leviculum-std/src/config.rs:1255`).
+(`ingress_control_default_for_type`, `leviculum-std/src/config.rs:1348`).
 
 Against the rule: the flag decides only whether *we* hold incoming
 announces, so no wire byte and no behaviour a peer observes changes
@@ -170,7 +170,7 @@ whichever is lower (`rnode::resolve_tx_power` and
 `lawful_erp_dbm`, applied in both interface builders and in the
 `SerialInterface` LNode path). The standalone LNode firmware's
 compiled profile carries the uncapped board maximum
-(`RadioConfig::eu_medium`, `leviculum-nrf/src/lora.rs:562-601`), which
+(`RadioConfig::eu_medium`, `leviculum-nrf/src/lora.rs:595-634`), which
 is the capped resolution's own result at that profile's 869.463 MHz.
 
 Against the rule: TX power is a local modem setting. It is never on the
@@ -318,13 +318,13 @@ The reference behaves this way on every forwarding path:
 Loop-freedom never came from interface suppression. It comes from
 transport_id addressing (only the addressed relay processes a Type2
 transport packet), the hop-count limit, and packet-hash dedup —
-`has_packet_hash` (`leviculum-core/src/transport.rs:4460`) drops a
+`has_packet_hash` (`leviculum-core/src/transport.rs:4477`) drops a
 repeated copy, `add_packet_hash`
-(`leviculum-core/src/transport.rs:4515`) records it.
+(`leviculum-core/src/transport.rs:4532`) records it.
 
 The forwarding decision lives in the media-agnostic core
 (`forward_on_interface_from`,
-`leviculum-core/src/transport.rs:9480`). Whether the relayed echo
+`leviculum-core/src/transport.rs:9500`). Whether the relayed echo
 needs TX spacing on a half-duplex channel is the interface's business
 — see [Interface Isolation](interface-isolation.md).
 

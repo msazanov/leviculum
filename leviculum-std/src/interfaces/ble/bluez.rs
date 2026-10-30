@@ -682,6 +682,42 @@ impl CentralTask {
         // in an unsubscribed gap.
         let notify_stream = tx_char.notify().await.map_err(transport)?;
 
+        // The socket primer (1004): one keepalive byte, written WITH
+        // response, so the write that triggers the peer's AcquireWrite
+        // is a frame whose bytes carry nothing. A BlueZ peripheral
+        // forwards the triggering write from a pointer into its
+        // per-connection ATT receive buffer only after the AcquireWrite
+        // D-Bus round trip (bluez-5.82 `src/gatt-database.c`,
+        // `pending_write_new` stores the pointer `acquire_write_reply`
+        // later sends; the buffer is `src/shared/att.c` `chan->buf`,
+        // reused for every inbound PDU) — so every PDU the peer
+        // receives inside that round trip rewrites the forwarded
+        // bytes. On the bench (tier-3 smoke, 2026-10-25) the PDU was
+        // the peer's answer to BlueZ's own reverse discovery, and the
+        // T114's identity arrived as GATT debris. Length survives the
+        // race (`iov_len` is fixed when the write arrives), content
+        // does not: a one-byte frame is a keepalive whatever its byte
+        // decays to — to us (`links::LinkTable::peripheral_frame`), to
+        // the firmware (`columba.rs::gatt_events`) and to the
+        // reference (`ble-reticulum@07d94130` `BLEInterface.py`
+        // filters pre-identity keepalives). The response comes back
+        // only after the socket is flushed (`acquire_write_reply`
+        // calls `gatt_db_attribute_write_result` after
+        // `sock_io_send`), so the identity below takes the live-socket
+        // path (`chrc_write_cb`) and arrives byte-exact.
+        rx_char
+            .write_ext(
+                &[leviculum_core::framing::ble::KEEPALIVE_BYTE],
+                &CharacteristicWriteRequest {
+                    op_type: WriteOp::Request,
+                    ..Default::default()
+                },
+            )
+            .await
+            // The peer answered the primer with an error: it will not
+            // take the handshake either (579).
+            .map_err(SetupError::with(DialFailure::NoHandshake))?;
+
         // The 16-byte identity handshake, written WITH response
         // (BLE_PROTOCOL_v2.2 §Identity Handshake: a Write Request).
         rx_char
@@ -1121,11 +1157,11 @@ mod tests {
         (delivered, abandoned)
     }
 
-    /// The handshake, then 400 packets of one to five fragments each.
+    /// The handshake, then 400 packets of one to four fragments each, inside `REASSEMBLY_LIMITS`.
     fn load_writes() -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
         let packets: Vec<Vec<u8>> = (0..400u16)
             .map(|i| {
-                let len = 40 + usize::from(i % 5) * 180;
+                let len = 40 + usize::from(i % 4) * 170;
                 let [hi, lo] = i.to_be_bytes();
                 (0..len).map(|j| hi ^ lo.wrapping_add(j as u8)).collect()
             })
@@ -1137,7 +1173,7 @@ mod tests {
         (packets, writes)
     }
 
-    /// #436, under load: a central writes 400 packets of up to five
+    /// #436, under load: a central writes 400 packets of up to four
     /// fragments back to back, the reader and the link table run on
     /// other threads, and the channel between them fills. Every packet
     /// arrives, in the order written, and the link reports no
@@ -1162,7 +1198,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_shuffled_packet_under_the_same_load_is_a_counted_abandon() {
         let (packets, mut writes) = load_writes();
-        // Packet 2 (len 400) is three fragments; reverse them.
+        // Packet 2 (len 380) is three fragments; reverse them.
         let first =
             1 + fragment_packet(&packets[0], MTU).len() + fragment_packet(&packets[1], MTU).len();
         assert_eq!(fragment_packet(&packets[2], MTU).len(), 3);

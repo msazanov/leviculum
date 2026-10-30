@@ -44,17 +44,42 @@ pub(super) fn cipher_proof_identifier(
             19
         };
         if raw.len() >= header_len + crate::crypto::link_gcm::OVERHEAD {
-            let token = &raw[header_len..];
-            let mut id = [0u8; 32];
-            // Receipt lookup truncates to 16 bytes: keep the entire GCM tag
-            // first, not a predictable counter plus a truncated tag.
-            id[..16].copy_from_slice(&token[token.len() - 16..]);
-            id[16..28].copy_from_slice(&token[..12]);
-            id[28..].copy_from_slice(b"GCM1");
-            return id;
+            return gcm_proof_id(&raw[header_len..]);
         }
     }
     proof_identifier(raw, binding)
+}
+
+/// Receive-side [`cipher_proof_identifier`]: the same value from the parsed packet, whose data is
+/// the token, so the raw bytes are not needed; `raw_hash` is the hash the transport already took.
+pub(super) fn link_proof_id(
+    packet: &Packet,
+    raw_hash: Option<&[u8; 32]>,
+    binding: ProofBinding,
+    cipher: crate::LinkCipher,
+) -> [u8; 32] {
+    if binding == ProofBinding::TokenTag {
+        let token = packet.data.as_slice();
+        if cipher == crate::LinkCipher::Gcm && token.len() >= crate::crypto::link_gcm::OVERHEAD {
+            return gcm_proof_id(token);
+        }
+        if let Some(tag) = crate::packet::token_tag(packet.context, token) {
+            return tag;
+        }
+    }
+    raw_hash.copied().unwrap_or_else(|| packet_hash_from_packet(packet))
+}
+
+/// A signed 32-byte identifier containing the nonce and full 128-bit GCM tag. The
+/// authenticated tag binds the ciphertext, AAD and nonce.
+fn gcm_proof_id(token: &[u8]) -> [u8; 32] {
+    let mut id = [0u8; 32];
+    // Receipt lookup truncates to 16 bytes: keep the entire GCM tag
+    // first, not a predictable counter plus a truncated tag.
+    id[..16].copy_from_slice(&token[token.len() - 16..]);
+    id[16..28].copy_from_slice(&token[..12]);
+    id[28..].copy_from_slice(b"GCM1");
+    id
 }
 
 impl ReceiptTracker {
@@ -329,9 +354,9 @@ mod proof_binding_tests {
             ProofBinding::TokenTag
         );
         assert_eq!(
-            ProofBindingPolicy::default().for_cipher(crate::LinkCipher::Cbc),
-            ProofBinding::TokenTag,
-            "generic API legacy default remains explicit TokenTag"
+            ProofBindingPolicy::default(),
+            ProofBindingPolicy::ByCipher,
+            "by default CBC Links prove exactly as vanilla Reticulum"
         );
     }
 
@@ -358,5 +383,21 @@ mod proof_binding_tests {
         let expected = packet_hash(&raw);
         assert_eq!(proof_identifier(&raw, ProofBinding::TokenTag), expected);
         assert_eq!(proof_identifier(&raw, ProofBinding::PacketHash), expected);
+    }
+
+    #[test]
+    fn receive_side_identifier_matches_the_sender_for_every_binding_and_cipher() {
+        use crate::packet::Packet;
+        let raw = token_packet();
+        let packet = Packet::unpack(&raw).unwrap();
+        for binding in [ProofBinding::TokenTag, ProofBinding::PacketHash] {
+            for cipher in [crate::LinkCipher::Cbc, crate::LinkCipher::Gcm] {
+                assert_eq!(
+                    super::link_proof_id(&packet, None, binding, cipher),
+                    super::cipher_proof_identifier(&raw, binding, cipher),
+                    "{binding:?}/{cipher:?}"
+                );
+            }
+        }
     }
 }

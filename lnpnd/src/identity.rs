@@ -2,7 +2,7 @@
 //!
 //! A propagation node's destination hash is what every client configures as
 //! its outbound node, so the identity is minted once and kept — and, like
-//! `lnmsg`'s address (`lnmsg/src/identity.rs`), an unreadable file is a
+//! `loquax`'s address (`loquax/src/identity.rs`), an unreadable file is a
 //! fatal error rather than a silent re-mint: a re-minted identity would
 //! strand every client pointing at the old hash.
 //!
@@ -100,6 +100,7 @@ pub fn load_or_create(path: &Path) -> Result<(Identity, Provenance), IdentityErr
         let bytes = std::fs::read(path).map_err(io_err)?;
         let identity = Identity::from_private_key_bytes(&bytes)
             .map_err(|_| IdentityError::Corrupt(path.to_path_buf()))?;
+        leviculum_std::narrow_secret_mode(path).map_err(io_err)?;
         Ok((identity, Provenance::Loaded))
     } else {
         if let Some(parent) = path.parent() {

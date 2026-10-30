@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 
+use crate::auto_layer::AutoMedia;
 use crate::config::{Config, InterfaceConfig, ReticulumConfig, SubinterfaceConfig};
 
 /// A section header and how deeply it nests: `[reticulum]` is depth 1,
@@ -72,6 +73,8 @@ fn section_header(trimmed: &str) -> Option<SectionHeader<'_>> {
 pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
     let mut reticulum = ReticulumConfig::default();
     let mut interfaces: HashMap<String, InterfaceConfig> = HashMap::new();
+    // Every key `no` unless the file's `[auto]` section says otherwise (#471).
+    let mut auto = AutoMedia::NONE;
 
     let mut current_section = String::new();
     let mut current_subsection: Option<String> = None;
@@ -171,6 +174,8 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
                     "reticulum" => apply_reticulum_key(&mut reticulum, key, value)
                         .map_err(|e| format!("config line {number}: {e}"))?,
                     "logging" => apply_logging_key(&mut reticulum, key, value),
+                    "auto" => apply_auto_key(&mut auto, key, value)
+                        .map_err(|e| format!("config line {number}: {e}"))?,
                     // A key in a section nobody reads. Python keeps it in the
                     // ConfigObj tree and rnsd never looks at it, so it is not
                     // an error here either -- but a header typed `[reticulm]`
@@ -185,7 +190,7 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
                     ),
                     other => tracing::warn!(
                         "config line {}: '{}' is in section '[{}]', which lnsd does not read, \
-                         and is ignored (did you mean [reticulum], [logging] or [interfaces]?)",
+                         and is ignored (did you mean [reticulum], [logging], [interfaces] or [auto]?)",
                         number,
                         key,
                         other,
@@ -352,6 +357,9 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
     Ok(Config {
         reticulum,
         interfaces: supported,
+        auto,
+        auto_layer: None,
+        origin: crate::config::InterfaceOrigin::Configured,
     })
 }
 
@@ -388,7 +396,7 @@ pub(crate) fn promote_discoverable_modes(interfaces: &mut HashMap<String, Interf
         };
         iface.mode = Some(mode.to_string());
         // Python logs this at NOTICE; our levels fold notice into info
-        // (lnsd.rs:314-316). The wording is the reference's, because the point
+        // (lnsd.rs:343-345). The wording is the reference's, because the point
         // is the same: the operator must be able to see in the log why the
         // mode is not what the config file says.
         tracing::info!(
@@ -701,6 +709,30 @@ fn apply_logging_key(config: &mut ReticulumConfig, key: &str, value: &str) {
         // than aborting the parse (matches the tolerant reticulum-key contract).
         config.loglevel = value.trim().parse().ok();
     }
+}
+
+/// Apply one `key = value` from the `[auto]` section (#471 step 2). rnsd
+/// never reads the section, so its values are ours to define: the four
+/// media as booleans. A value that is no boolean refuses the file, as it does
+/// in `[reticulum]`: a switch that keeps the automatic layer out must not be
+/// guessed. An unknown key is warned about and ignored.
+fn apply_auto_key(auto: &mut AutoMedia, key: &str, value: &str) -> Result<(), String> {
+    let slot = match key {
+        "lan" => &mut auto.lan,
+        "servers" => &mut auto.servers,
+        "bluetooth" => &mut auto.bluetooth,
+        "serial" => &mut auto.serial,
+        other => {
+            tracing::warn!(
+                "'{}' in [auto] is not a medium lnsd knows (lan, servers, bluetooth, serial) \
+                 and is ignored",
+                other
+            );
+            return Ok(());
+        }
+    };
+    *slot = parse_bool(key, value)?;
+    Ok(())
 }
 
 /// Lightweight scan for `[logging] loglevel`, used to pick the default log
@@ -3520,6 +3552,50 @@ mod tests {
         assert_eq!(iface.interface_type, "TCPClientInterface");
         assert_eq!(iface.target_host, Some("10.0.0.1".to_string()));
         assert_eq!(iface.target_port, Some(4242));
+    }
+
+    /// `[auto]` (#471 step 2): the four media read as booleans, absent ones
+    /// `no`, and a file without the section all `no`.
+    #[test]
+    fn the_auto_section_reads_its_four_media() {
+        let config = parse_ini("[auto]\n  lan = yes\n  bluetooth = No\n").expect("parses");
+        assert_eq!(
+            config.auto,
+            AutoMedia {
+                lan: true,
+                ..AutoMedia::NONE
+            }
+        );
+        assert!(config.interfaces.is_empty());
+
+        let config = parse_ini("[auto]\nlan = 1\nservers = true\nbluetooth = on\nserial = yes\n")
+            .expect("parses");
+        assert_eq!(
+            config.auto,
+            AutoMedia {
+                lan: true,
+                servers: true,
+                bluetooth: true,
+                serial: true,
+            }
+        );
+
+        let config = parse_ini("[reticulum]\nshare_instance = Yes\n").expect("parses");
+        assert_eq!(config.auto, AutoMedia::NONE);
+
+        // An unknown medium is warned about; it neither refuses nor sets.
+        let config = parse_ini("[auto]\nwifi = yes\n").expect("parses");
+        assert_eq!(config.auto, AutoMedia::NONE);
+    }
+
+    /// A switch that keeps the automatic layer out is not guessed.
+    #[test]
+    fn an_auto_value_that_is_no_boolean_refuses_the_file() {
+        let err = parse_ini("[auto]\nlan = maybe\n").expect_err("refused");
+        assert!(
+            err.contains("config line 2") && err.contains("lan"),
+            "{err}"
+        );
     }
 
     #[test]

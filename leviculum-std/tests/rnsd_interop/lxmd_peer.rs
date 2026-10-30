@@ -41,7 +41,9 @@ use leviculum_core::identity::Identity;
 use leviculum_core::{Destination, DestinationHash};
 use leviculum_lxmf::control::{ControlNodeStats, ControlResponse, CONTROL_ASPECTS, STATS_GET_PATH};
 use leviculum_lxmf::node::APP_NAME;
-use leviculum_lxmf::{MemoryPeerStore, PeeringConfig, PropagationNodeConfig, PropagationStore};
+use leviculum_lxmf::{
+    MemoryPeerStore, PeeringConfig, PropagationBodyStore, PropagationNodeConfig, PropagationStore,
+};
 use leviculum_std::driver::ReticulumNodeBuilder;
 use leviculum_std::process::spawn_supervised;
 use leviculum_std::ReticulumNode;
@@ -460,7 +462,7 @@ pub struct Lnpnd {
 impl Lnpnd {
     pub async fn start<S>(instance: &SharedInstance, store: S, options: LnpndOptions) -> Self
     where
-        S: PropagationStore + Send + 'static,
+        S: PropagationStore + PropagationBodyStore + lnpnd::engine::WriteBehind + Send + 'static,
     {
         let identity = leviculum_std::generate_identity();
         let (announce_delay_secs, announce_interval_secs) = match options.announce_delay_secs {

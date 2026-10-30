@@ -7,7 +7,7 @@
 //! armed `AcceptAll` only from the `LinkIdentified` event, so until an identify
 //! arrived the link kept `AcceptNone`, and `handle_resource_advertisement`
 //! discarded the advertisement with no event and no packet
-//! (`leviculum-core/src/node/link_management.rs:3025-3027`). The sender heard
+//! (`leviculum-core/src/node/link_management.rs:3065-3067`). The sender heard
 //! nothing at all and had to wait out its own advertisement retries.
 //!
 //! Python's `rncp` does not have that state. `client_link_established`
@@ -34,8 +34,8 @@ use leviculum_std::driver::{ReticulumNode, ReticulumNodeBuilder};
 use rand_core::OsRng;
 
 use crate::identify_loss_proxy::{
-    prepare_rncp_sender, python_rns_available, spawn_identify_dropping_proxy, spawn_rncp_sender,
-    ProxyLog, CTX_RESOURCE_ADV, CTX_RESOURCE_RCL,
+    prepare_rncp_sender, python_rns_available, spawn_identify_dropping_proxy, spawn_proxy,
+    spawn_rncp_listener, spawn_rncp_sender, ProxyLog, CTX_RESOURCE_ADV, CTX_RESOURCE_RCL,
 };
 
 static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -80,7 +80,7 @@ async fn spawn_lncp_listener(
     let storage = tmp.join("listener-storage");
     std::fs::create_dir_all(&storage).expect("create listener storage");
 
-    // The hash run_listen will register (cp.rs:375-384), computed here so the
+    // The hash run_listen will register (cp.rs:378-387), computed here so the
     // sender can be pointed at it before the loop starts.
     let dest_hash = *Destination::new(
         Some(identity.clone()),
@@ -145,7 +145,7 @@ async fn spawn_lncp_listener(
 /// (five advertisements went upstream and not one packet came back, and rncp
 /// gave up 5.7 s later on its own retry ladder — 36 s at the 1.3 s RTT of the
 /// LoRa PHY the hardware cell runs on). After it, an RCL inside one RTT of
-/// each advertisement.
+/// each advertisement that arrives behind the sender's RTT.
 ///
 /// The test watches the wire rather than waiting for the sender, because this
 /// sender cannot conclude: `Resource.REJECTED` and `Resource.NONE` are both
@@ -157,6 +157,90 @@ async fn spawn_lncp_listener(
 /// `lncp_identify_loss_interop_tests`.
 #[tokio::test]
 async fn lncp_listener_rejects_an_advertisement_whose_identify_was_lost() {
+    python_sender_against_our_listener(false).await;
+}
+
+/// The same exchange with the sender's advertisement ahead of its LRRTT on
+/// every run, which Python rncp produces on its own on some
+/// ([`crate::identify_loss_proxy::ProxyLog::answerable_advs_to_upstream`]):
+/// the land gate of 2026-10-25 for 20966383 saw `fb, 02, fe, 02` towards our
+/// listener and one RCL.
+#[tokio::test]
+async fn lncp_listener_answers_the_advertisement_after_an_overtaken_rtt() {
+    python_sender_against_our_listener(true).await;
+}
+
+/// Reference measurement for the overtaken RTT: Python `rncp -l` behind the
+/// same proxy, with the same forced order. It answers no advertisement that
+/// arrives ahead of the RTT and rejects the first one behind it, which is what
+/// the two tests above hold our listener to. It runs with them rather than as
+/// an ignored measurement, because their tolerance for the advertisement ahead
+/// of the RTT is only right while the reference behaves this way.
+#[tokio::test]
+async fn python_rncp_listener_ignores_an_advertisement_ahead_of_the_rtt() {
+    if !python_rns_available() {
+        eprintln!("skipping reference arm: python3 + vendored RNS unavailable");
+        return;
+    }
+
+    let test_id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp = crate::common::temp_storage("rncp_listener_overtaken_rtt", &format!("run{test_id}"));
+
+    let sender_identity = Identity::generate(&mut OsRng);
+    let sender_hash_hex = hex::encode(sender_identity.hash());
+
+    // port-handoff: the Python rncp listener reads it from its config file.
+    let python_port = crate::ports::free_port();
+    let (rncp, dest_hash) = spawn_rncp_listener(python_port, &sender_hash_hex, 5, tmp.path());
+
+    let log = Arc::new(Mutex::new(ProxyLog::default()));
+    let proxy_port = spawn_proxy(python_port, 1, true, Arc::clone(&log)).await;
+
+    let (sender_config_dir, sender_identity_path) =
+        prepare_rncp_sender(tmp.path(), &sender_identity, proxy_port);
+    let payload: Vec<u8> = (0..1024u32).map(|i| (i % 251) as u8).collect();
+    let file_path = tmp.path().join("identify-loss.bin");
+    std::fs::write(&file_path, &payload).expect("write payload");
+    let _sender = spawn_rncp_sender(
+        &sender_config_dir,
+        &sender_identity_path,
+        &file_path,
+        &hex::encode(dest_hash.as_bytes()),
+        90,
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !log
+        .lock()
+        .expect("proxy log")
+        .saw_to_downstream(CTX_RESOURCE_RCL)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the reference listener never rejected. {}\nrncp listener log: {}",
+            log.lock().expect("proxy log").evidence(),
+            rncp.log(),
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let log = log.lock().expect("proxy log");
+    let evidence = log.evidence();
+    eprintln!("REFERENCE {evidence}");
+    assert_eq!(
+        log.count_to_upstream(CTX_RESOURCE_ADV) - log.answerable_advs_to_upstream(),
+        1,
+        "the forced order must have put one advertisement ahead of the RTT. {evidence}"
+    );
+    assert_eq!(
+        log.count_to_downstream(CTX_RESOURCE_RCL),
+        log.answerable_advs_to_upstream(),
+        "the reference answers exactly the advertisements behind the RTT. {evidence}"
+    );
+}
+
+async fn python_sender_against_our_listener(hold_rtt_behind_adv: bool) {
     if !python_rns_available() {
         eprintln!(
             "skipping lncp listener identify-loss interop: python3 + vendored RNS unavailable"
@@ -179,7 +263,7 @@ async fn lncp_listener_rejects_an_advertisement_whose_identify_was_lost() {
     .await;
 
     let log = Arc::new(Mutex::new(ProxyLog::default()));
-    let proxy_port = spawn_identify_dropping_proxy(listener.port, 1, Arc::clone(&log)).await;
+    let proxy_port = spawn_proxy(listener.port, 1, hold_rtt_behind_adv, Arc::clone(&log)).await;
     let dest_hash_hex = hex::encode(listener.dest_hash.as_bytes());
 
     let (sender_config_dir, sender_identity_path) =
@@ -189,7 +273,7 @@ async fn lncp_listener_rejects_an_advertisement_whose_identify_was_lost() {
     let file_path = tmp.path().join("identify-loss.bin");
     std::fs::write(&file_path, &payload).expect("write payload");
 
-    // Our listener announces every 5 s (cp.rs:421-427); rncp's own path wait
+    // Our listener announces every 5 s (cp.rs:424-430); rncp's own path wait
     // (rncp.py:658-664) covers the gap.
     let mut sender = spawn_rncp_sender(
         &sender_config_dir,
@@ -226,40 +310,59 @@ async fn lncp_listener_rejects_an_advertisement_whose_identify_was_lost() {
     // should be advertised now, because the answer already arrived.
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    let (evidence, drops, adv_count, rcl_count, adv_to_rcl) = {
+    let (evidence, drops, adv_count, answerable, rcl_count, adv_to_rcl) = {
         let log = log.lock().expect("proxy log");
         (
             log.evidence(),
             log.dropped_identify,
             log.count_to_upstream(CTX_RESOURCE_ADV),
+            log.answerable_advs_to_upstream(),
             log.count_to_downstream(CTX_RESOURCE_RCL),
             log.adv_to_rcl(),
         )
     };
     let sender_exit = sender.exited();
-    let evidence = format!("{evidence} rncp exit={sender_exit:?}");
+    let evidence =
+        format!("{evidence} answerable advertisements={answerable} rncp exit={sender_exit:?}");
 
     assert_eq!(
         drops, 1,
         "the modelled loss must have fired exactly once. {evidence}"
     );
+    // Ahead of the RTT the link is still in its handshake, and no listener
+    // can answer there, the reference included
+    // (`python_rncp_listener_ignores_an_advertisement_ahead_of_the_rtt`).
+    // The sender's thread race puts at most its first one there.
+    let ahead_of_rtt = adv_count - answerable;
+    if hold_rtt_behind_adv {
+        assert_eq!(
+            ahead_of_rtt, 1,
+            "the proxy must have held the RTT behind the first advertisement. {evidence}"
+        );
+    } else {
+        assert!(
+            ahead_of_rtt <= 1,
+            "only the sender's first advertisement can overtake its RTT. {evidence}"
+        );
+    }
     let gap = adv_to_rcl.expect("the loop above only exits once an RCL was seen");
     assert!(
         gap < RCL_WITHIN,
-        "the rejection must come back within one RTT of the advertisement, not \
-         after the sender's retries; measured {gap:?}. {evidence}"
+        "the rejection must come back within one RTT of the first advertisement \
+         behind the RTT, not after the sender's retries; measured {gap:?}. {evidence}"
     );
     assert_eq!(
-        rcl_count, adv_count,
-        "every advertisement gets an answer, not just the first. {evidence}"
+        rcl_count, answerable,
+        "every advertisement behind the RTT gets an answer, not just the first. \
+         {evidence}"
     );
     assert!(
-        adv_count <= 2,
+        answerable <= 2,
         "the sender must not run its retry ladder out: it needed five \
-         advertisements before the fix. Two are possible without any fault of \
-         ours, because `__advertise_job` sends the advertisement before \
-         `register_outgoing_resource` (Resource.py:526-534), so a rejection \
-         that arrives inside that window finds no resource to reject. \
+         advertisements before the fix. Two behind the RTT are possible without \
+         any fault of ours, because `__advertise_job` sends the advertisement \
+         before `register_outgoing_resource` (Resource.py:526-534), so a \
+         rejection that arrives inside that window finds no resource to reject. \
          {evidence}"
     );
     assert!(
@@ -322,7 +425,7 @@ async fn our_sender_and_our_listener_recover_from_a_lost_identify() {
     let mut sender_events = sender.take_event_receiver().expect("event receiver");
     sender.start().await.expect("start sender node");
 
-    // The listener announces every 5 s (cp.rs:410-421) and there is no
+    // The listener announces every 5 s (cp.rs:413-424) and there is no
     // transport node to answer a path request, so the announce is the only
     // readiness signal.
     let deadline = Instant::now() + Duration::from_secs(60);

@@ -38,7 +38,7 @@ use crate::{
 /// [`PATH_REQUEST_WAIT_MS`](super::PATH_REQUEST_WAIT_MS), the reference's own
 /// wait between a path request and the next attempt (`LXMRouter.py:33`,
 /// `:1779`), and the window holds two of those waits so the repeat is given
-/// as long to be answered as the first was (leviculum#699: `lnmsg fetch` at
+/// as long to be answered as the first was (leviculum#699: `loquax fetch` at
 /// boot lost its only request to a daemon whose interface was still
 /// reconnecting). Wire-neutral: a repeated path request is an ordinary one.
 ///
@@ -49,12 +49,16 @@ use crate::{
 /// and the drain keeps asking every `PATH_REQUEST_WAIT_MS` until that budget
 /// ends, as the reference client re-requests on every attempt until its
 /// attempts run out (`LXMRouter.py:1776-1781`). leviculum#719: a 60 s
-/// `lnmsg fetch` gave up after this window with 46 s of its budget unused.
+/// `loquax fetch` gave up after this window with 46 s of its budget unused.
 pub const PROPAGATION_PATH_TIMEOUT_MS: u64 = 2 * super::PATH_REQUEST_WAIT_MS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PropagationClientConfig {
-    /// Do not tell the node to purge messages already present locally.
+    /// Never tell the node to purge: neither messages already present
+    /// locally nor the ones a sync just downloaded. The reference client
+    /// still acknowledges its downloads with this set
+    /// (`reference/LXMF/LXMF/LXMRouter.py:1623-1638`); ours does not, so
+    /// several devices on one identity each receive the message.
     pub retain_synced_on_node: bool,
     /// Maximum `/get` response payload requested from the remote node, in
     /// kilobytes. Python sends its `delivery_per_transfer_limit` here
@@ -647,7 +651,17 @@ impl PropagationRuntime {
             }
         }
 
-        if !haves.is_empty() {
+        // The acknowledgement purges the downloads on the node
+        // (`reference/LXMF/LXMF/LXMRouter.py:1508-1519`). The reference
+        // client sends it unconditionally (`:1623-1638`, "TODO: Add option
+        // to keep messages on node"), so its `retain_synced_on_node` only
+        // shapes the have-list (`:1581-1583`). Ours also withholds it here,
+        // so a second device on the same identity still finds the message.
+        // Wire-neutral: the node keeps an unacknowledged message until
+        // expiry, as for a client that drops before acknowledging, and this
+        // device does not fetch it again, since it is now in the router's
+        // store and the have-path of the next list filters it.
+        if !haves.is_empty() && !self.config.retain_synced_on_node {
             if let Some(link_id) = self.active_link() {
                 let acknowledgement = MessageGetRequest::acknowledge(haves).encode()?;
                 output.core.merge(self.transport.submit_mailbox_request(
@@ -1378,7 +1392,7 @@ impl LxmfRouter {
 
     /// Give the next drains a path budget of their own instead of the one
     /// the client was enabled with: the drain repeats its path request for
-    /// all of it. `lnmsg fetch` passes what is left of its `--timeout`.
+    /// all of it. `loquax fetch` passes what is left of its `--timeout`.
     pub fn set_propagation_path_timeout_ms(
         &mut self,
         path_timeout_ms: u64,

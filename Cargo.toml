@@ -3,6 +3,12 @@ resolver = "2"
 members = [
     "leviculum-core",
     "leviculum-micron",
+    "leviculum-mapfill",
+    "leviculum-map",
+    "leviculum-mapcut",
+    "leviculum-map-tool",
+    "leviculum-ui",
+    "leviculum-ui-ratatui",
     "lnomad",
     "lblogd",
     "leviculum-lxmf",
@@ -12,7 +18,11 @@ members = [
     "leviculum-cli",
     "leviculum-proxy",
     "lnflash",
-    "lnmsg",
+    "loquax",
+    # The Android app's JNI library (`loquax-android/`), built for Android by
+    # the make flow there. Not a default member, like leviculum-ffi: a cdylib
+    # the musl default drops.
+    "loquax-android",
     "lnpnd",
     "lndecode",
     "vectors-verify",
@@ -33,6 +43,12 @@ members = [
 default-members = [
     "leviculum-core",
     "leviculum-micron",
+    "leviculum-mapfill",
+    "leviculum-map",
+    "leviculum-mapcut",
+    "leviculum-map-tool",
+    "leviculum-ui",
+    "leviculum-ui-ratatui",
     "lnomad",
     "lblogd",
     "leviculum-lxmf-node",
@@ -40,7 +56,7 @@ default-members = [
     "leviculum-cli",
     "leviculum-proxy",
     "lnflash",
-    "lnmsg",
+    "loquax",
     "lnpnd",
     "lndecode",
     "vectors-verify",
@@ -56,7 +72,11 @@ default-members = [
 # `cargo test --workspace` on any machine require that fork. It carries its
 # own workspace, Cargo.lock, .cargo/config.toml and rust-toolchain.toml.
 # Build with: just build-esp32  (or `cargo build --release` inside it)
-exclude = ["leviculum-nrf", "leviculum-esp", "leviculum-lr11xx", "vendor/crossterm", "vendor/termbg"]
+#
+# leviculum-mapfill/measure and leviculum-mapfill/m9 are the map measurement's
+# host harness and M9 firmware (#474). Their own workspaces keep the harness's
+# protobuf decoder and the firmware's Xtensa toolchain out of this graph.
+exclude = ["leviculum-nrf", "leviculum-esp", "leviculum-lr11xx", "leviculum-mapfill/measure", "leviculum-mapfill/m9", "vendor/crossterm", "vendor/termbg"]
 
 # Vendored, minimally-patched crossterm 0.29.0. The patch exposes mouse side
 # buttons (X buttons 8/9) as MouseButton::Back / MouseButton::Forward, which

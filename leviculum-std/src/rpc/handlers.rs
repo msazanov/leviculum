@@ -48,7 +48,7 @@ pub(super) fn handle_request(
         // this node TERMINATES, as we did until this batch, put a different
         // number under the same operator-visible line depending on which
         // daemon rnstatus was pointed at.
-        RpcRequest::GetLinkCount => pickle_int(core.transport_link_table_entries().len() as i64),
+        RpcRequest::GetLinkCount => pickle_int(core.transport_link_count() as i64),
         // Deliberate deviation, wire- and semantics-preserving: upstream's
         // `Transport.active_link_count` iterates the link table's KEYS and
         // indexes `entry[IDX_LT_VALIDATED]` on the 16-byte link id, so it
@@ -56,12 +56,9 @@ pub(super) fn handle_request(
         // rather than entries that validated (1.5.2, Transport.py:3215-3216).
         // We answer the documented meaning; mirroring the accident would make
         // the operator's "(M active)" a function of hash bytes.
-        RpcRequest::GetActiveLinkCount => pickle_int(
-            core.transport_link_table_entries()
-                .iter()
-                .filter(|e| e.validated)
-                .count() as i64,
-        ),
+        RpcRequest::GetActiveLinkCount => {
+            pickle_int(core.storage().active_link_entry_count() as i64)
+        }
         RpcRequest::GetLinkTable => build_link_table(core, &inventory.lock_recover()),
 
         // The timing pair every path-request client sizes its wait window
@@ -453,6 +450,9 @@ struct StatRow {
     ifac_size_bits: Option<i64>,
     /// Reported name of the listener this interface was spawned by, if any.
     parent_name: Option<String>,
+    /// Where the interface's configuration came from (#471), the `origin`
+    /// key.
+    origin: crate::config::InterfaceOrigin,
     radio: Option<crate::interfaces::RadioStats>,
     /// Ceiling of the randomised delay this interface adds before it puts a
     /// frame on the air, in milliseconds; `None` for a medium that transmits
@@ -665,6 +665,11 @@ fn row_fields(row: &StatRow, epoch_base: f64) -> Value {
         (pickle_str_key("ifac_signature"), pickle_none()),
         (pickle_str_key("ifac_size"), opt_int(row.ifac_size_bits)),
         (pickle_str_key("ifac_netname"), pickle_none()),
+        // #471: `configured` or `default`, where the interface's section came
+        // from. Additive on the same terms as `tx_queue_drops` above: rnstatus
+        // reads keys by name and never enumerates them, so it passes unread;
+        // lnstatus prints it as the `Origin` line.
+        (pickle_str_key("origin"), pickle_str(row.origin.as_str())),
     ];
 
     // Python emits the parent keys only for an interface that HAS a parent
@@ -929,6 +934,7 @@ pub(crate) fn build_interface_stats(
             .map(|bps| bps as i64)
             .unwrap_or_else(|| default_bitrate(&itype));
 
+        let origin = inv.origin_of(&short, identity_of.and_then(|i| i.parent));
         rows.push(StatRow {
             sort_key: inv.sort_key(entry.id),
             name,
@@ -981,6 +987,7 @@ pub(crate) fn build_interface_stats(
                 .and_then(|i| i.parent)
                 .and_then(|p| inv.listeners().find(|(id, _)| *id == p))
                 .map(|(_, l)| l.identity.name.clone()),
+            origin,
             radio,
             tx_jitter_max_ms: entry.link_profile.and_then(|p| p.tx_jitter_max_ms),
             tx_hold_spread_max_ms: entry.link_profile.and_then(|p| p.tx_hold_spread_max_ms),
@@ -1030,6 +1037,7 @@ pub(crate) fn build_interface_stats(
             announce_queue: None,
             ifac_size_bits: listener.ifac_size_bits,
             parent_name: None,
+            origin: inv.origin_of(&listener.identity.short_name, None),
             radio: None,
             // A listener carries no packets, so it has no medium access of its
             // own to bound; the spawned connection is the row that would.
@@ -1089,6 +1097,15 @@ pub(crate) fn build_interface_stats(
         (pickle_str_key("ilqpressure"), pickle_float(0.0)),
         (pickle_str_key("txq"), pickle_none()),
     ];
+
+    // #471 step 2: the automatic layer's decision, as the `AUTO_LAYER` line
+    // states it without its `state=` key (`off reason=config lan=no ...`).
+    // Additive like the per-row `origin`: rnstatus reads top-level keys by
+    // name, so it passes unread; lnstatus prints it. Absent for a node built
+    // in code, which took no decision.
+    if let Some(layer) = inv.auto_layer() {
+        entries.push((pickle_str_key("auto_layer"), pickle_str(&layer.summary())));
+    }
 
     if transport_enabled {
         entries.push((
@@ -3337,6 +3354,52 @@ mod tests {
         );
     }
 
+    /// #471 step 2: the automatic layer's decision is a top-level key, the
+    /// `AUTO_LAYER` line after `state=`, served only by a node that took one.
+    #[test]
+    fn build_interface_stats_serves_the_auto_layer_decision() {
+        use crate::auto_layer::{AutoLayer, AutoMedia, AutoReason};
+        use crate::clock::SystemClock;
+        use crate::interfaces::inventory::InterfaceInventory;
+        use crate::interfaces::InterfaceStatsMap;
+        use leviculum_core::node::NodeCoreBuilder;
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+
+        let tmp = tempfile::Builder::new()
+            .prefix("rpc-auto-layer-")
+            .tempdir()
+            .unwrap();
+        let mut core: StdNodeCore = NodeCoreBuilder::new().build(
+            rand_core::OsRng,
+            SystemClock::new(),
+            crate::storage::Storage::new(&tmp).unwrap(),
+        );
+        let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::new()));
+        let inventory = InterfaceInventory::shared();
+        let auto_layer = |core: &mut StdNodeCore| -> Option<Value> {
+            let Value::Dict(top) =
+                build_interface_stats(core, std::time::Instant::now(), &stats, &inventory, 0)
+            else {
+                panic!("interface_stats must be a dict")
+            };
+            top.get(&HashableValue::String("auto_layer".into()))
+                .cloned()
+        };
+
+        assert_eq!(auto_layer(&mut core), None, "a node built in code");
+        inventory.lock_recover().set_auto_layer(Some(AutoLayer {
+            media: AutoMedia::SHIPPED,
+            reason: AutoReason::Default,
+        }));
+        assert_eq!(
+            auto_layer(&mut core),
+            Some(Value::String(
+                "on reason=default lan=yes servers=no bluetooth=no serial=no".into()
+            ))
+        );
+    }
+
     /// Codeberg #177: a listener carries no packets and therefore has no
     /// transport entry, but it must still be reported — under the reference
     /// name, aggregating its children, and pointed at by them.
@@ -3644,6 +3707,8 @@ mod tests {
             "ifac_signature",
             "ifac_size",
             "ifac_netname",
+            // Additive, no reference equivalent (#471, see row_fields).
+            "origin",
         ];
         // Conditional, and their condition is the row kind: Python emits the
         // parent pair only for an interface that HAS a parent
@@ -3848,7 +3913,7 @@ mod tests {
     // a peer/instance label that matches none of `interface_type`'s name
     // prefixes, so a LoRa radio is reported as the generic "Interface". That
     // is not only a wrong medium column in rnstatus: `itype` also picks the
-    // bitrate guess (handlers.rs:760-766), so the radio is advertised at 10 Mbps.
+    // bitrate guess (handlers.rs:765-771), so the radio is advertised at 10 Mbps.
     #[test]
     fn interface_type_comes_from_the_transport_not_the_name() {
         use crate::clock::SystemClock;

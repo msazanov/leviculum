@@ -11,10 +11,13 @@ description = "Reticulum firmware for nRF52840-based boards (Heltec Mesh Node T1
 # pure, host-testable crates (screen painter, SoftDevice policy) can
 # live next to the firmware.
 [workspace]
-members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy", "ble-tx", "queue-budget", "log-line", "tx-spacing", "rx-arming", "persist-ack", "boot-trace", "channel-access", "media-state", "announce-policy", "record-log", "pn-store", "store-spike", "qspi-bitbang", "battery-scale", "boot-count", "settle-budget", "drop-budget", "heap-budget", "node-name", "sync-batch", "upload-proof", "mute-lease", "qspi-selftest", "qspi-boot", "usb-policy", "time-floor", "motion", "feedback"]
+members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy", "ble-tx", "queue-budget", "log-line", "tx-spacing", "rx-arming", "persist-ack", "boot-trace", "channel-access", "media-state", "announce-policy", "record-log", "pn-store", "store-spike", "qspi-bitbang", "battery-scale", "boot-count", "settle-budget", "drop-budget", "heap-budget", "node-name", "sync-batch", "upload-proof", "mute-lease", "qspi-selftest", "qspi-boot", "usb-policy", "time-floor", "motion", "feedback", "serial-mux", "rtc-pcf8563", "firmware"]
 
 [dependencies]
 leviculum-core = { path = "../leviculum-core", default-features = false }
+# The orchestration stratum (#469): what moved out of `src/` into the crate
+# every chip family binds to. This crate implements its seams.
+leviculum-firmware = { path = "firmware" }
 # Board-independent status-screen painter (pure, host-testable golden
 # frames). Pulled by both display backends: the V2 SSD1306 path via
 # `display`, the T114 ST7789 path via `bsp-t114` directly.
@@ -218,8 +221,8 @@ embedded-hal-async = "1"
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
 
-# Heap allocator for alloc
-embedded-alloc = "0.7"
+# The heap allocator is the orchestration crate's (961,
+# `leviculum_firmware::heap`); this crate only hands it the pool.
 
 # Static initialization
 static_cell = "2"
@@ -246,6 +249,8 @@ sequential-storage = { version = "8.0.1", optional = true }
 # If the WisMesh Pocket V2's OLED probes as SH1106, the display task will
 # log a warning and stay idle — adding SH1106 support is a separate task.
 ssd1306 = { version = "0.10", default-features = false, features = ["graphics"], optional = true }
+# The SSD1306's error type, named by its `Panel` seam (`display.rs`, 980).
+display-interface = { version = "0.5", optional = true }
 embedded-graphics = { version = "0.8", optional = true }
 nmea0183 = { version = "0.6", default-features = false, optional = true }
 # Pure NMEA-UTC→unix conversion + seed-once policy, host-unit-tested next
@@ -270,8 +275,20 @@ leviculum-motion = { path = "motion", optional = true }
 # (PR #296 "Support larger discovery characteristics"). The crates.io
 # 0.1.0 publish is stale (nrf-softdevice issue #304); we pin to git HEAD
 # for compatibility with current embassy-nrf.
-nrf-softdevice = { git = "https://github.com/embassy-rs/nrf-softdevice", rev = "5949a5b", optional = true }
-nrf-softdevice-s140 = { git = "https://github.com/embassy-rs/nrf-softdevice", rev = "5949a5b", optional = true }
+#
+# The source is our fork, not upstream (#472): `Drop for Connection`
+# upstream unwraps `state.disconnect()` (connection.rs:409 at b0ac850),
+# and a Connection whose last handle drops while the peer tears the link
+# down panics the board. 1d813cb2 is 5949a5b plus that one fix, seven
+# lines in connection.rs, submitted upstream as PR #315. It sits on the
+# fork's branch `leviculum-5949a5b-drop-fix`; cargo allows only one of
+# `branch` and `rev`, so the rev pins and this comment names the branch.
+# A pin bump rebases 1d813cb onto the new rev until #315 is merged
+# (docs/src/firmware/embassy-pins.md). s140 is a path dependency inside
+# the same repository, so both lines name the same source and resolve to
+# one copy.
+nrf-softdevice = { git = "https://github.com/reallew/nrf-softdevice", rev = "1d813cb", optional = true }
+nrf-softdevice-s140 = { git = "https://github.com/reallew/nrf-softdevice", rev = "1d813cb", optional = true }
 
 # cortex-m-rt supplies the startup runtime, panic handler, and vector
 # table that the linker needs for a no_std no_main firmware image, even
@@ -366,6 +383,9 @@ bsp-rak4631 = ["softdevice", "radio-sx1262"]
 # impossible, and both references (Meshtastic, RNode firmware) drive it
 # blind. One t114 UF2 therefore serves panel-equipped and panel-less
 # boards alike; on the latter the SPI writes go nowhere, harmlessly.
+# The page on it is composed by the orchestration crate (980), so the
+# board forwards that crate's `display` capability; this crate's own
+# `display` feature is the Pocket's SSD1306 driver and stays off.
 #
 # It also pulls `gnss` unconditionally, for the same universal-build
 # reason: the Quectel L76K is soldered to every T114, not an optional
@@ -376,7 +396,7 @@ bsp-rak4631 = ["softdevice", "radio-sx1262"]
 # panel and the L76K: the 100/490 divider and its enable pin are on every
 # T114, not on an optional baseboard, so one UF2 serves every board and a
 # board whose reading is implausible says so at runtime (#380).
-bsp-t114 = ["softdevice", "radio-sx1262", "dep:leviculum-screen", "gnss", "battery"]
+bsp-t114 = ["softdevice", "radio-sx1262", "dep:leviculum-screen", "leviculum-firmware/display", "gnss", "battery"]
 # SenseCAP Solar Node P1-Pro (#233): XIAO nRF52840 Plus + Wio-SX1262 +
 # XIAO L76K on a carrier board. No display, so no `leviculum-screen`.
 #
@@ -420,14 +440,15 @@ bsp-t1000e = ["softdevice", "radio-lr11xx", "gnss", "battery", "motion"]
 radio-sx1262 = []
 radio-lr11xx = ["dep:leviculum-lr11xx"]
 
-display = ["dep:ssd1306", "dep:embedded-graphics", "dep:leviculum-screen"]
+display = ["dep:ssd1306", "dep:display-interface", "dep:embedded-graphics", "dep:leviculum-screen", "leviculum-firmware/display"]
 gnss = [
     "dep:nmea0183",
     "dep:leviculum-gnss-time",
     "dep:leviculum-gnss-presence",
     "dep:leviculum-gnss-init",
+    "leviculum-firmware/gnss",
 ]
-battery = []
+battery = ["leviculum-firmware/battery"]
 motion = ["dep:leviculum-motion"]
 rak-baseboard = ["display", "gnss", "battery"]
 # The `qspi-selftest` instrument's crate, and nothing else. Not a plain

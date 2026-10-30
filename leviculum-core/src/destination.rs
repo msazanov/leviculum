@@ -208,12 +208,11 @@ pub enum ProofBinding {
 
 /// How a node selects the proof binding for each Link.
 ///
-/// The generic builder keeps the historical node-wide TokenTag default via
-/// [`Explicit`](Self::Explicit). Applications that mix vanilla Reticulum and
-/// GCM Links should opt into [`ByCipher`](Self::ByCipher): standard CBC
-/// Links use PacketHash and explicitly negotiated GCM mode 7 uses
-/// TokenTag. `Explicit` remains available for deployments whose peers share a
-/// custom proof-binding configuration; do not use it for mixed vanilla links.
+/// The default is [`ByCipher`](Self::ByCipher): standard CBC Links use
+/// PacketHash exactly as vanilla Reticulum does, and only explicitly
+/// negotiated GCM mode 7 uses TokenTag. `Explicit` remains available for
+/// deployments whose peers share a custom proof-binding configuration; do not
+/// use it for mixed vanilla links.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProofBindingPolicy {
     /// Select PacketHash for CBC and TokenTag for GCM mode 7.
@@ -224,7 +223,7 @@ pub enum ProofBindingPolicy {
 
 impl Default for ProofBindingPolicy {
     fn default() -> Self {
-        Self::Explicit(ProofBinding::default())
+        Self::ByCipher
     }
 }
 

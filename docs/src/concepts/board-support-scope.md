@@ -38,11 +38,11 @@ announces itself or costs nothing when absent. That is a design
 constraint on peripheral handling, not a hope:
 
 - **Probe where the bus allows it.** The RAK baseboard display is found
-  by an I2C address probe (`ack_probe`, `leviculum-nrf/src/display.rs:56`);
+  by an I2C address probe (`ack_probe`, `leviculum-nrf/src/display.rs:54`);
   when nothing answers, the task logs and exits
-  (`DetectedKind::None`, `leviculum-nrf/src/display.rs:162-168`).
+  (`DetectedKind::None`, `leviculum-nrf/src/display.rs:160-166`).
 - **Fail into the harmless state.** The user button is pulled to its
-  released level (`leviculum-nrf/src/button.rs:72`), so an absent button
+  released level (`leviculum-nrf/src/button.rs:46`), so an absent button
   reads as not pressed rather than as noise.
 - **Park rather than spin.** The GNSS task awaits a UART that simply
   stays silent when no receiver is fitted.
@@ -170,8 +170,8 @@ drive them, and being liftable is the same property as being portable:
 - `rx-arming` reaches a radio only through two traits, `RxPort`
   (`leviculum-nrf/rx-arming/src/lib.rs:168`) and `RxWindowProbe`
   (`leviculum-nrf/rx-arming/src/lib.rs:708`). The driver implements both,
-  `RxPort` (`leviculum-nrf/src/sx1262.rs:1507`) and `RxWindowProbe`
-  (`leviculum-nrf/src/sx1262.rs:1537`), and a test fake implements
+  `RxPort` (`leviculum-nrf/src/sx1262.rs:1534`) and `RxWindowProbe`
+  (`leviculum-nrf/src/sx1262.rs:1564`), and a test fake implements
   `RxPort` (`leviculum-nrf/rx-arming/src/lib.rs:1972`) beside it. A second
   family writes a third implementation; it does not fork the crate.
 - `channel-access` touches no radio at all. The caller reports what its
@@ -198,7 +198,7 @@ and carrying a second implementation is a design decision, not a port.
 measurement.** It implements `RxPort` and `RxWindowProbe` unchanged
 (`leviculum-lr11xx/README.md:43-45`), and on a ThinkNode M9 its receive
 interrupt word read back `0x38`, preamble, header and `RxDone` latched
-and readable without a clear (`leviculum-lr11xx/README.md:259-265`,
+and readable without a clear (`leviculum-lr11xx/README.md:261-267`,
 section 10, "Verification status"). The port was the driver in full and
 the two crates untouched.
 
@@ -215,3 +215,8 @@ can still be written onto a board it does not fit.
 
 So the reach of a build and the precision of its identification have to
 be argued together. A family is only as wide as the narrowest of the two.
+
+## See also
+
+- [Firmware layers](firmware-layers.md), for the strata a build is cut
+  into, so that a new family adds a bind crate rather than a copy.

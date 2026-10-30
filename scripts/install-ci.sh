@@ -187,7 +187,9 @@ fi
 # btvirt reports it only at the scan-enable and advertise-enable instants, so
 # re-sightings measured the emulator's phase), then the local patch that
 # raises the controller ceiling to twenty-four (tag max-btdev-24, below),
-# builds emulator/btvirt,
+# then the local patch that keeps the event loop from freeing an fd its
+# current epoll batch still points at (tag deferred-fd-free: timer-fd churn
+# crashed btvirt), builds emulator/btvirt,
 # installs it, and writes the provenance sidecar the room prints as `origin=`. It is
 # idempotent and it warns rather than fails when a prerequisite (deb-src,
 # sudo, a compiler) is missing -- only the BLE bench needs any of this. A
@@ -341,9 +343,10 @@ echo "[install-ci] book renderer: mdbook 0.4.48 (scripts/build-docs-tarball.sh)"
 #     and publishes the nightly on the tier-2 nightly host, so the forge's
 #     build steps' tools live here now: both musl targets, cargo-deb for
 #     the packages, and cargo-zigbuild with a pip-installed ziglang as the
-#     arm64 cross linker (scripts/build-deb.sh). musl-gcc, which links the
-#     amd64 build, is the apt package musl-tools.
-rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+#     arm64 and armhf cross linker (scripts/build-deb.sh). musl-gcc, which
+#     links the amd64 build, is the apt package musl-tools.
+rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
+    armv7-unknown-linux-musleabihf
 cargo install --locked cargo-deb
 cargo install --locked cargo-zigbuild
 python3 -c 'import ziglang' 2>/dev/null ||
@@ -535,6 +538,55 @@ echo "[install-ci] nightly timer enabled; tier2 is on-demand"
 # 10. LoRa hardware probe (warning only)
 if ! ls /dev/ttyACM* >/dev/null 2>&1; then
     echo "[install-ci] WARNING: no /dev/ttyACM* devices found — LoRa tests will skip in nightly."
+fi
+
+# 10a. ESP32-S3 flasher probe (warning only, #473). The ThinkNode M9 is an
+#     ESP32-S3 behind a CH340K and is written through the ROM's serial
+#     loader, which needs espflash (own stubs, step 6c) or an esptool whose
+#     package carries the S3 stub (step 6d's venv does; Debian's 4.7.0 does
+#     not and dies on stub_flasher_32s3.json without --no-stub). Steps 6c
+#     and 6d install both, so this only fires when one of them failed or
+#     was skipped; lnflash's esp transport searches the same places
+#     (lnflash/src/esp.rs, find_flasher).
+ESP_STUB_CHECK='import esptool, os, sys
+want = {"stub_flasher_32s3.json", "esp32s3.json"}
+root = os.path.join(os.path.dirname(esptool.__file__), "targets", "stub_flasher")
+sys.exit(0 if any(want & set(f) for _, _, f in os.walk(root)) else 1)'
+ESP_VENV="${LEVICULUM_RNODE_TOOLS:-$HOME/.rnode-tools/venv}"
+if ESPFLASH_BIN=$(command -v espflash || ls "$HOME/.cargo/bin/espflash" 2>/dev/null) \
+    && "$ESPFLASH_BIN" --version >/dev/null 2>&1; then
+    echo "[install-ci] ESP32-S3 flasher: $("$ESPFLASH_BIN" --version) ($ESPFLASH_BIN)"
+elif [[ -x "$ESP_VENV/bin/esptool" ]] && "$ESP_VENV/bin/python" -c "$ESP_STUB_CHECK" 2>/dev/null; then
+    echo "[install-ci] ESP32-S3 flasher: esptool with the S3 stub ($ESP_VENV/bin/esptool)"
+elif command -v esptool >/dev/null 2>&1 && python3 -c "$ESP_STUB_CHECK" 2>/dev/null; then
+    echo "[install-ci] ESP32-S3 flasher: esptool with the S3 stub ($(command -v esptool))"
+else
+    echo "[install-ci] WARNING: no ESP32-S3 flasher with a stub — install espflash (step 6c) or"
+    echo "[install-ci]   the pinned esptool (scripts/install-esptool.sh). Until then only a"
+    echo "[install-ci]   stub-less esptool with --no-stub reaches the ThinkNode M9, slowly."
+fi
+
+# 10b. The automatic-layer host marker (#471, docs/src/concepts/zero-config.md).
+#     A host this script sets up is a rig or coder host: it runs the suites
+#     and the periculum cells, with Bluetooth adapters and boards on USB in
+#     reach. An lnsd started there without a config file (a test, a stray
+#     `lnsd` in a shell) would bring up the automatic layer and join the
+#     measurement room. /etc/leviculum/no-auto turns that layer off for every
+#     lnsd on the host; a cell that measures the layer sets
+#     LEVICULUM_NO_AUTO=0. It sits here, beside the hardware probe and outside
+#     the --vm-mode switch, because the marker belongs to the host the runners
+#     run on, whichever mode installed them. `sudo -n`: an idempotent
+#     installer never stops at a password prompt; without passwordless sudo
+#     it warns and names the command instead.
+AUTO_MARKER=/etc/leviculum/no-auto
+if [[ -e "$AUTO_MARKER" ]]; then
+    echo "[install-ci] automatic-layer marker present: $AUTO_MARKER"
+elif sudo -n mkdir -p "$(dirname "$AUTO_MARKER")" 2>/dev/null \
+    && sudo -n touch "$AUTO_MARKER" 2>/dev/null; then
+    echo "[install-ci] automatic-layer marker installed: $AUTO_MARKER"
+else
+    echo "[install-ci] WARNING: could not install $AUTO_MARKER (no passwordless sudo)."
+    echo "[install-ci] Hint: sudo mkdir -p /etc/leviculum && sudo touch $AUTO_MARKER"
 fi
 
 # 11. Worktree-scoped vm-mode marker.  Tier-runners check for this

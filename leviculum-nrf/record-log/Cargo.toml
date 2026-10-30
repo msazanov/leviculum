@@ -14,6 +14,13 @@ default = []
 # does, so the simulation and its `alloc` use stay out of the image.
 sim = []
 
+# The read-only mapped walk (`legacy`): every record of a region, oldest
+# first, one at a time. The PN store uses it for bounded ordered NOR offers;
+# leviculum-rp's one-time microSD import uses the same cursor. Page ordering
+# is the only allocating walk in this crate, so a build without this
+# feature carries neither that allocation nor our allocator dependency.
+mapped-read = []
+
 [dependencies]
 # Async NorFlash, because the only legal way to write the nRF52840's
 # internal flash with the SoftDevice enabled is `nrf_softdevice::Flash`,

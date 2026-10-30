@@ -253,13 +253,13 @@ recipes below keeps you safe. The release profile is size-optimized
 is kept in the `.elf` (`strip = "none"`, `debug = true`) for HardFault
 post-mortem analysis, but the UF2 only carries loadable sections, so the
 debug info does not bloat what lands on the device.
-(`leviculum-nrf/Cargo.toml:449-459`)
+(`leviculum-nrf/Cargo.toml:470-480`)
 
 ### The build/flash workflow
 
 The firmware crate `leviculum-nrf` is its own Cargo workspace, separate
 from the repo-root workspace, and is cross-compiled. The flash recipes
-therefore `cd leviculum-nrf` before invoking cargo. (`Justfile:2022-2023`)
+therefore `cd leviculum-nrf` before invoking cargo. (`Justfile:2089-2090`)
 
 A plain build (no flash) is:
 
@@ -299,7 +299,7 @@ The **WisMesh Pocket V2 (RAK4631)** running stock Meshtastic has no
 *first* flash needs either `just dfu-rak4631` (a Meshtastic admin
 command, below) or the manual needle double-tap in the hidden pinhole.
 Once our firmware is on the board, subsequent flashes use the touch path
-automatically. (`Justfile:2049-2051`, `Justfile:2113-2122`. See
+automatically. (`Justfile:2116-2118`, `Justfile:2180-2189`. See
 [Recovery](recovery.md) for the pinhole detail.)
 
 ## The flash recipes
@@ -319,7 +319,7 @@ against mixed firmware versions. Use this as your default for T114s.
 cd leviculum-nrf && cargo run --release --bin t114 --features bsp-t114
 ```
 
-(`Justfile:2024-2026`; rationale `leviculum-nrf/README.md:25`)
+(`Justfile:2091-2093`; rationale `leviculum-nrf/README.md:25`)
 
 ### `just flash-one PORT` — a single T114
 
@@ -337,7 +337,7 @@ Expands to:
 cd leviculum-nrf && LEVICULUM_FLASH_ONLY=<PORT> cargo run --release --bin t114 --features bsp-t114
 ```
 
-(`Justfile:2033-2038`; usage forms `leviculum-nrf/README.md:31-36`)
+(`Justfile:2100-2105`; usage forms `leviculum-nrf/README.md:31-36`)
 
 ### `just flash-rak4631` — every RAK4631 (bare module)
 
@@ -350,7 +350,7 @@ cd leviculum-nrf && LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
   cargo run --release --bin rak4631 --features bsp-rak4631
 ```
 
-(`Justfile:2052-2054`)
+(`Justfile:2119-2121`)
 
 ### `just flash-rak4631-one PORT` — a single RAK4631
 
@@ -369,7 +369,7 @@ cd leviculum-nrf && LEVICULUM_FLASH_ONLY=<PORT> LEVICULUM_USB_PID=0002 \
   cargo run --release --bin rak4631 --features bsp-rak4631
 ```
 
-(`Justfile:2056-2060`)
+(`Justfile:2123-2127`)
 
 ### `just flash-rak4631-pocket` — WisMesh Pocket V2, full baseboard
 
@@ -383,8 +383,8 @@ cd leviculum-nrf && LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
   cargo run --release --bin rak4631 --features bsp-rak4631,rak-baseboard
 ```
 
-(`Justfile:2062-2068`; `rak-baseboard` aggregate
-`leviculum-nrf/Cargo.toml:432`)
+(`Justfile:2129-2135`; `rak-baseboard` aggregate
+`leviculum-nrf/Cargo.toml:453`)
 
 ### `just dfu-rak4631 PORT` — DFU entry for stock Meshtastic
 
@@ -406,7 +406,7 @@ Runs:
 meshtastic --port /dev/ttyACM0 --enter-dfu
 ```
 
-(`Justfile:2113-2122`)
+(`Justfile:2180-2189`)
 
 ### SenseCAP T1000-E: serial DFU
 
@@ -467,6 +467,20 @@ sending anything. On this board it needs no root, because nothing is
 mounted. Our image is linked at `0x27000` (`leviculum-nrf/memory.x`),
 above the S140 7.x SoftDevice, so it boots on this unit without a
 SoftDevice step.
+
+### ESP32-S3 boards: the ROM's serial loader
+
+An ESP32-S3 (the Heltec V4, the ThinkNode M9) has no UF2 drive and no
+DFU bootloader; its images go in through the mask ROM's serial loader,
+which a USB-UART bridge reaches over DTR and RTS. Write it with
+`espflash`, which carries its own flasher stubs, or with `esptool`:
+Debian's `esptool` 4.7.0 lacks the ESP32-S3 stub and fails with
+`stub_flasher_32s3.json` not found, so give it `--no-stub` or use
+`espflash` or the pinned `esptool` that `scripts/install-esptool.sh`
+installs. On the M9 keep the line at 230400 baud; its CH340K loses bytes
+at 460800 and above. `lnflash` has the transport (`lnflash/src/esp.rs`)
+but no ESP32 board in its catalogue yet, so these boards are flashed by
+hand or by recipe for now.
 
 ## A note on disconnecting consumers
 

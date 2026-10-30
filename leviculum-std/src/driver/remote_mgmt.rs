@@ -112,7 +112,7 @@ impl RemoteMgmtResponder {
         );
         let mut items = vec![stats];
         if include_lstats {
-            items.push(Value::I64(core.transport_link_table_entries().len() as i64));
+            items.push(Value::I64(core.transport_link_count() as i64));
         }
         let response_value = Value::List(items);
 

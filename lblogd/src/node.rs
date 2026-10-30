@@ -586,10 +586,13 @@ fn load_or_generate_identity(path: &Path) -> Result<Identity, NodeError> {
     };
     if path.exists() {
         let bytes = std::fs::read(path).map_err(io_err)?;
-        Identity::from_private_key_bytes(&bytes).map_err(|e| NodeError::Identity {
-            path: path.display().to_string(),
-            message: format!("bad identity file: {e}"),
-        })
+        let identity =
+            Identity::from_private_key_bytes(&bytes).map_err(|e| NodeError::Identity {
+                path: path.display().to_string(),
+                message: format!("bad identity file: {e}"),
+            })?;
+        leviculum_std::narrow_secret_mode(path).map_err(io_err)?;
+        Ok(identity)
     } else {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(io_err)?;
@@ -599,7 +602,7 @@ fn load_or_generate_identity(path: &Path) -> Result<Identity, NodeError> {
             path: path.display().to_string(),
             message: format!("key export failed: {e}"),
         })?;
-        std::fs::write(path, pk).map_err(io_err)?;
+        leviculum_std::atomic_write_secret(path, &pk).map_err(io_err)?;
         Ok(id)
     }
 }
@@ -642,6 +645,23 @@ fn served_request_paths(snapshot: &Snapshot) -> BTreeSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 1119: the identity is a private key, so it is minted 0600 whatever
+    /// the umask, and one left wider by an older build is narrowed at load.
+    #[cfg(unix)]
+    #[test]
+    fn the_identity_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode =
+            |p: &std::path::Path| std::fs::metadata(p).expect("stat").permissions().mode() & 0o777;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("nested/identity");
+        load_or_generate_identity(&path).expect("mint");
+        assert_eq!(mode(&path), 0o600);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).expect("chmod");
+        load_or_generate_identity(&path).expect("load");
+        assert_eq!(mode(&path), 0o600);
+    }
 
     /// A snapshot that has exactly the given page paths; nothing else in it
     /// matters to `reconcile_paths`.

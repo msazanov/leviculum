@@ -163,10 +163,13 @@ const _: () = assert!(
     leviculum_core::transport::HELD_ANNOUNCE_ENTRY_BYTES
         == leviculum_heap_budget::HELD_ANNOUNCE_ENTRY_BYTES
 );
-const _: () = assert!(crate::iface_bytes::IFACE_COUNT == leviculum_heap_budget::BOARD_INTERFACES);
+const _: () = assert!(
+    leviculum_firmware::iface_bytes::IFACE_COUNT == leviculum_heap_budget::BOARD_INTERFACES
+);
 // The serial interface the budget counts out of the hold (#606) is the one
 // `iface_bytes` registers as the USB link.
-const _: () = assert!(!leviculum_heap_budget::BOARD_INGRESS_CONTROL[crate::iface_bytes::SERIAL]);
+const _: () =
+    assert!(!leviculum_heap_budget::BOARD_INGRESS_CONTROL[leviculum_firmware::iface_bytes::SERIAL]);
 
 /// Emit the boot `HEAP_BUDGET` line and refuse to run a configuration
 /// whose worst case does not fit the heap (#388 step 4).
@@ -180,8 +183,8 @@ const _: () = assert!(!leviculum_heap_budget::BOARD_INGRESS_CONTROL[crate::iface
 ///
 /// * `links` — [`max_endpoint_links`], the ENFORCED cap on the
 ///   Reticulum link table (`NodeCoreBuilder::max_links`, #388 pass 3);
-/// * `ble_links` — [`crate::ble::MAX_LINKS`], every claimable BLE
-///   session, budgeted at [`crate::ble::SESSION_BUDGET_BYTES`]
+/// * `ble_links` — [`leviculum_heap_budget::MAX_LINKS`], every claimable BLE
+///   session, budgeted at [`leviculum_heap_budget::SESSION_BUDGET_BYTES`]
 ///   (`ble_session=`) each on top of the carrier-independent
 ///   `per_link=` (one boxed `Link` + the link table's node share);
 /// * `role` — [`crate::pn::ROLE_BUDGET_BYTES`], the `pn_*` worst case
@@ -219,14 +222,14 @@ const _: () = assert!(!leviculum_heap_budget::BOARD_INGRESS_CONTROL[crate::iface
 ///
 /// `node_box` is passed by the binary (`size_of_val` of its concrete
 /// boxed `NodeCore`) and is inside `total=`. Asserted: `total ≤`
-/// [`crate::HEAP_SIZE`] and `links ≥ ble_links` — a violation panics at
+/// [`leviculum_heap_budget::HEAP_SIZE`] and `links ≥ ble_links` — a violation panics at
 /// boot, lands in the post-mortem, and names the arithmetic instead of
 /// failing as a 340-byte allocation three days into a field run.
 pub fn log_budget_and_assert(node_box: usize) {
     let links = max_endpoint_links(node_box);
-    let ble_links = crate::ble::MAX_LINKS;
+    let ble_links = leviculum_heap_budget::MAX_LINKS;
     let per_link = budget_per_link();
-    let ble_session = crate::ble::SESSION_BUDGET_BYTES;
+    let ble_session = leviculum_heap_budget::SESSION_BUDGET_BYTES;
     let role = crate::pn::ROLE_BUDGET_BYTES;
     let reserve = budget_reserve();
     let total = budget_total(node_box);
@@ -252,10 +255,10 @@ pub fn log_budget_and_assert(node_box: usize) {
         );
     }
     assert!(
-        total <= crate::HEAP_SIZE,
+        total <= leviculum_heap_budget::HEAP_SIZE,
         "HEAP_BUDGET total {total} exceeds the {} B heap: shrink a term \
          (node box, per-link, role, reserve) before shipping this configuration",
-        crate::HEAP_SIZE
+        leviculum_heap_budget::HEAP_SIZE
     );
     assert!(
         links >= ble_links,
@@ -271,7 +274,7 @@ pub fn log_budget_and_assert(node_box: usize) {
 /// other task on the executor.
 pub fn largest_free_block() -> usize {
     use alloc::alloc::{alloc, dealloc, Layout};
-    let (_, free) = crate::heap_stats();
+    let (_, free) = leviculum_firmware::heap::heap_stats();
     let mut lo = 0usize;
     let mut hi = free;
     while hi.saturating_sub(lo) > 64 {
@@ -300,24 +303,24 @@ where
     C: Clock,
     S: Storage,
 {
-    let (used, _free, _watermark) = crate::heap_watermark_sample();
+    let (used, _free, _watermark) = leviculum_firmware::heap::heap_watermark_sample();
     let largest = largest_free_block();
     // Re-read free after the probe: the probe cannot change it (every
     // claim is released), but the paired used/free of ONE instant is
     // what the line should carry.
-    let (used_now, free_now) = crate::heap_stats();
+    let (used_now, free_now) = leviculum_firmware::heap::heap_stats();
     let census = node.heap_census();
-    let ble = crate::ble::defrag_held_bytes();
+    let ble = leviculum_firmware::ble_link::defrag_held_bytes();
     // The BLE sessions' own holdings (#388 pass 2): the packets queued
     // on the per-link queues plus what sits in the two node-facing
     // channels. `links=`/`n_links=` above walk the RETICULUM link
     // table, which is empty while a BLE peer merely holds a GATT
     // connection — this owner is the one that grows with a second
     // phone, and before it that growth hid in `other=`.
-    let (ble_slots, ble_chan) = crate::ble::session_census();
+    let (ble_slots, ble_chan) = leviculum_firmware::ble_link::session_census();
     let ble_sessions = ble_slots.iter().sum::<usize>() + ble_chan;
     // The per-slot keys below spell out exactly MAX_LINKS values.
-    const _: () = assert!(crate::ble::MAX_LINKS == 4);
+    const _: () = assert!(leviculum_heap_budget::MAX_LINKS == 4);
     let pn = engine
         .map(crate::pn::Engine::heap_census)
         .unwrap_or_default();
@@ -387,8 +390,8 @@ where
 const _: () = assert!(
     core::mem::size_of::<
         NodeCore<
-            crate::rng::RawHwRng,
-            crate::clock::EmbassyClock,
+            leviculum_firmware::entropy::Entropy,
+            leviculum_firmware::clock::EmbassyClock,
             leviculum_core::embedded_storage::EmbeddedStorage,
         >,
     >() == leviculum_heap_budget::NODE_BOX_BYTES

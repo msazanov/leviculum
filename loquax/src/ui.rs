@@ -1,0 +1,9037 @@
+//! The screen of `loquax tui` as a model: what the reader sees and what a key
+//! does to it, with no terminal anywhere (`docs/src/concepts/loquax-ui.md`,
+//! sections 1 and 2; `loquax-architecture.md`, "the core must not know it has
+//! a terminal").
+//!
+//! The shape is lnomad's, TEA: [`UiModel`] is the state, [`update`] folds one
+//! [`UiEvent`] into it and returns the [`UiEffect`]s the shell is to run, and
+//! [`view`] turns the model into what each pane shows. The shell draws that
+//! and runs the effects; a test does neither and asserts on the model, the
+//! effects and the view directly.
+//!
+//! Three panes, focus follows the pane: conversations, messages, compose.
+//! What a key does is one table, [`crate::keys`]: lnomad's scroll rows in
+//! the two command panes, loquax's own rows beside them, each chord with the
+//! panes it applies in. The key handler, the help overlay, the footer, the
+//! palette's keys and the compose pane's hint all read it
+//! (`docs/src/concepts/loquax-keys-and-layout.md`, section 4). Compose takes
+//! plain typing; the palette (`:` or `Alt-x`) is layered on top over the
+//! shared names in [`leviculum_ui::commands`]. No modes.
+//!
+//! # What a delivery glyph claims
+//!
+//! A sent message carries a [`DeliveryState`] from the shared glyph table.
+//! The router's states map onto it in [`delivery_of`]. While the frontend's
+//! send runner is still working on a message, a giving-up state is held
+//! back: `--via auto` cancels or loses its direct leg and then uploads the
+//! same text to a mailbox, and a `✗` drawn for the leg would be a lie about
+//! the message. The `✗` appears when the runner reports it gave up
+//! ([`UiEvent::SendDone`] with an error).
+//!
+//! # The layout
+//!
+//! Signal's shape in cells (`loquax-keys-and-layout.md`, section 5): the list
+//! with two rows a conversation, most recent first; the open conversation as
+//! blocks, ours flush right and theirs flush left, with a date line between
+//! days and a `new` rule where the unread begins; a detail view per message
+//! with what this device saw happen to it. The model knows the screen's size
+//! ([`UiEvent::Resize`]) and the time of day ([`UiEvent::Clock`]), because
+//! where a block wraps and what a page is depend on the one, and every time on
+//! screen on the other; [`layout`] turns a conversation into rows.
+//!
+//! # The mouse
+//!
+//! Section 5's table, "What the mouse does": [`UiEvent::Mouse`] carries a
+//! click, a wheel turn, a drag or a move at a cell, and [`hit`] says what is
+//! drawn there from the same layout the view draws, so a click lands on what
+//! the reader sees. The two targets that transmit, `send` on the compose
+//! box's border and the mailbox state in the header, run the same commands
+//! as `Enter` and `F5`. A drag over the conversation selects text and its
+//! release copies it ([`UiEffect::Copy`], OSC 52 in the terminal). On the
+//! map a drag moves the view with the pointer and a click opens the pin it
+//! went down and came up on ([`map::MapPress`]); the wheel zooms about the
+//! pointer, and tilted sideways pans an eighth as `h` and `l` do.
+//!
+//! # History
+//!
+//! The conversations, their messages and ledgers, the pins and the names
+//! heard outlive the process in the shell's store ([`history`]): the model
+//! starts from what it hands back ([`UiModel::restore`]) and says after each
+//! fold what changed ([`UiModel::take_writes`]). The top of a conversation
+//! is the top of the store (`nothing earlier on this device`), or says how
+//! much more the store holds above what is loaded. A message is deleted from
+//! the device with `d` and `y`, a conversation from the palette, and the
+//! palette's `pin` puts a conversation above the list's rule.
+//!
+//! # What is not here
+//!
+//! QR codes are a later slice.
+//!
+//! # Names
+//!
+//! A peer is drawn as [`crate::names::Names::label`] says, everywhere: the
+//! petname or the announced name with the short hash, `≈` when another
+//! peer's name looks the same, the address while it has none. The header
+//! adds the trust state in words, and a changed name is a line in the
+//! conversation ([`Note`]). The palette's `rename` names the open
+//! conversation's peer, `block` and `unblock` set its block, and `blocked`
+//! lists the blocked conversations, which the list, the search, the map, the
+//! unread counts and the toasts otherwise leave out ([`contacts`]).
+//!
+//! # The search
+//!
+//! `/` or `Ctrl-s` turns the list pane into the search ([`search`]): its
+//! field on top, the results under it as the query is typed, the plain
+//! list while the field is empty. A result opens with `Enter` or a click,
+//! a message's at that message with the match marked in its block, and
+//! while the search is open `n`/`N` and `Ctrl-s`/`Ctrl-r` step the matches
+//! of the open conversation in place. `Esc` closes it and the list comes
+//! back; the conversation keeps what it showed.
+//!
+//! # The map
+//!
+//! The palette's `map`, `M` or `Alt-m` puts the map in the conversation
+//! pane's place ([`map`]): a pin per peer with a known position, fitted on
+//! open, zoomed with `+` and `-`, panned with the arrows or `h` `j` `k`
+//! `l`, refitted with `0`. `Tab` steps the pins, `Enter` or a click on one
+//! opens its conversation, `Esc` brings the conversation back. The list
+//! stays beside it. The shell draws the picture for the view the model
+//! makes; the model places the pins, so what a click hits is what is drawn.
+
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+
+use leviculum_lxmf::router::MessageState;
+use leviculum_ui::commands::{self, Command as PaletteCommand, PaletteEntry};
+use leviculum_ui::delivery::DeliveryState;
+use leviculum_ui::footer::{FooterItem, FooterRole};
+use leviculum_ui::help::HelpGroup;
+use leviculum_ui::input::{
+    InputBuffer, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
+use leviculum_ui::keymap::{scrolled, Ctx, ScrollCmd};
+use leviculum_ui::link::{classify_link, LinkKind};
+use leviculum_ui::theme::ThemeFlag;
+use leviculum_ui::toast::{Toast, ToastKind};
+use leviculum_ui::tokens::{tokens, Tokens};
+use leviculum_ui::{RLine, RStyle, Rect, StyledChar, Theme, Tier};
+
+use crate::address::to_hex;
+use crate::keys::{self, Action};
+use crate::names::{Contact, Heard, Names, Trust};
+use crate::outbox::OutboxEvent;
+use crate::send::Leg;
+use crate::sync::{Reason, Schedule, SyncEvent};
+use crate::telemetry::{self, Fix};
+use crate::when::{list_time, WallTime};
+use leviculum_lxmf::Field;
+
+use history::{Confirm, StoreRead, StoreWrite, StoredHit};
+
+pub mod chat;
+pub mod contacts;
+pub mod history;
+pub mod hit;
+pub mod layout;
+pub mod map;
+pub mod reactions;
+pub mod replies;
+pub mod search;
+
+/// How many ticks a toast stays up. The shell ticks every 250 ms, so three
+/// seconds.
+pub const TOAST_TICKS: u64 = 12;
+
+/// Shell ticks in a second, for the leg's elapsed time on a row.
+const TICKS_PER_SECOND: u64 = 4;
+
+/// Hex characters of an address a pane shows; the full address is in the
+/// title bar of the messages pane.
+const SHORT_HEX: usize = 16;
+
+/// The compose pane grows with its text up to this many rows, then scrolls.
+pub const COMPOSE_MAX_ROWS: usize = 5;
+
+/// The conversation list is never narrower than this, so a row keeps a name
+/// and a time beside each other (the 80 x 24 mockup's 26 cells).
+pub const LIST_MIN_WIDTH: u16 = 26;
+
+/// From this inner width on the header is the 120 x 40 mockup's: the full
+/// address in the title and a row for the mailbox under it.
+pub const WIDE_HEADER: usize = 76;
+
+/// The list pane's outer width on a screen `width` cells wide: three tenths,
+/// at least [`LIST_MIN_WIDTH`], at most half.
+pub fn list_width(width: u16) -> u16 {
+    (width * 3 / 10).max(LIST_MIN_WIDTH).min(width / 2)
+}
+
+/// Rows the wheel moves the conversation by, a notch at a time.
+pub const WHEEL_ROWS: usize = 3;
+
+/// Where the screen's parts are, in cells: the list left the full height
+/// above the footer, the conversation and the compose box beside it, the
+/// footer at the bottom. The renderer draws in these rectangles and the
+/// mouse hit-tests against them, so the two cannot disagree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Screen {
+    pub list: Rect,
+    pub messages: Rect,
+    pub compose: Rect,
+    pub footer: Rect,
+}
+
+impl Screen {
+    /// The parts of a `width` x `height` screen whose compose box shows
+    /// `compose_rows` rows.
+    pub fn of(width: u16, height: u16, compose_rows: usize) -> Self {
+        let body = height.saturating_sub(1);
+        let left = list_width(width).min(width);
+        let right = width - left;
+        let compose = (compose_rows as u16 + 2).min(body.saturating_sub(1));
+        Self {
+            list: Rect::new(0, 0, left, body),
+            messages: Rect::new(left, 0, right, body - compose),
+            compose: Rect::new(left, body - compose, right, compose),
+            footer: Rect::new(0, body, width, height.min(1)),
+        }
+    }
+
+    /// The whole screen.
+    pub fn area(&self) -> Rect {
+        Rect::new(0, 0, self.footer.width, self.footer.bottom())
+    }
+}
+
+/// The inner sizes of the two panes the model lays out, in cells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaneSizes {
+    /// The conversation list, inside its border.
+    pub list: (usize, usize),
+    /// The conversation, between its top border and the compose box.
+    pub messages: (usize, usize),
+}
+
+impl PaneSizes {
+    /// The panes of a `width` x `height` screen whose compose box shows
+    /// `compose_rows` rows: the list the full height above the footer, the
+    /// conversation and the compose box beside it, sharing one border.
+    pub fn for_screen(width: u16, height: u16, compose_rows: usize) -> Self {
+        let body = usize::from(height.saturating_sub(1));
+        let left = list_width(width);
+        let right = usize::from(width - left);
+        Self {
+            list: (usize::from(left).saturating_sub(2), body.saturating_sub(2)),
+            messages: (
+                right.saturating_sub(2),
+                body.saturating_sub(compose_rows + 2).saturating_sub(1),
+            ),
+        }
+    }
+}
+
+/// A pane, and where the focus is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pane {
+    /// The conversation list.
+    Conversations,
+    /// The selected conversation's messages.
+    Messages,
+    /// The compose line.
+    Compose,
+    /// The search's field, at the top of the list pane while a search is
+    /// open; the list under it is its results.
+    Search,
+    /// The map, in the conversation pane's place while it is open.
+    Map,
+}
+
+impl Pane {
+    /// The pane `Tab` goes to: the three in turn, the field before the
+    /// list while a search is open.
+    fn next(self, searching: bool) -> Self {
+        match (self, searching) {
+            (Self::Map, _) => Self::Map,
+            (Self::Search, _) => Self::Conversations,
+            (Self::Conversations, _) => Self::Messages,
+            (Self::Messages, _) => Self::Compose,
+            (Self::Compose, true) => Self::Search,
+            (Self::Compose, false) => Self::Conversations,
+        }
+    }
+
+    fn prev(self, searching: bool) -> Self {
+        match (self, searching) {
+            (Self::Map, _) => Self::Map,
+            (Self::Search, _) => Self::Compose,
+            (Self::Conversations, true) => Self::Search,
+            (Self::Conversations, false) => Self::Compose,
+            (Self::Messages, _) => Self::Conversations,
+            (Self::Compose, _) => Self::Messages,
+        }
+    }
+}
+
+/// What a received message's signature says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Signature {
+    /// It holds against the sender's key.
+    Verified,
+    /// The sender's key is not known (yet): `SOURCE_UNKNOWN` in the
+    /// reference. It turns into one of the other two when the key arrives
+    /// ([`OutboxEvent::Verified`]).
+    Unverified,
+    /// It does not hold against the sender's key: the message is not what
+    /// the sender signed, or not from the sender at all.
+    Invalid,
+}
+
+/// One message in a conversation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Message {
+    /// Whether we wrote it.
+    pub outbound: bool,
+    /// The body, as text (lossy for bytes that are not UTF-8).
+    pub body: String,
+    /// The router's id: a received message's, or the id the router gave the
+    /// latest leg of a sent one. `None` until the router queued it.
+    pub id: Option<[u8; 32]>,
+    /// Where a sent message stands; `None` for a received one.
+    pub delivery: Option<DeliveryState>,
+    /// What a received message's signature says; ours are
+    /// [`Signature::Verified`].
+    pub signature: Signature,
+    /// The leg the send runner is on and the tick it began, while the runner
+    /// still works on the message: the row says `direct 12 s` or `via
+    /// mailbox 40 s` beside the spinner, so a wait has a reason on screen.
+    pub leg: Option<(Leg, u64)>,
+    /// The runner ended with the message on a link to the peer and no proof
+    /// ([`UiEvent::SendUnproven`]). It stays `◇` from then on: only a proof
+    /// (`✓`) or a refusal (`✗`) moves it, not the router's retries on new
+    /// links nor its giving up on them, since the peer may well have it.
+    pub unproven: bool,
+    /// When this device wrote or received it; `None` before the shell said
+    /// the time.
+    pub at: Option<WallTime>,
+    /// The body's bytes, as they went or came.
+    pub size: usize,
+    /// What this device saw happen to it, oldest first, across restarts:
+    /// the detail view.
+    pub ledger: Vec<LedgerEntry>,
+    /// The leg the runner last reported, kept after it ends so a late proof
+    /// still names the way the message went.
+    pub last_leg: Option<Leg>,
+    /// The model's activity count when it was written or arrived: the
+    /// search lists messages most recent first by it.
+    pub activity: u64,
+    /// The LXMF fields it came with, raw: telemetry is read from them on
+    /// screen ([`crate::telemetry`]) and the store keeps them whole.
+    pub fields: Vec<Field>,
+}
+
+impl Message {
+    fn ours(body: String, at: Option<WallTime>) -> Self {
+        Self {
+            outbound: true,
+            size: body.len(),
+            body,
+            id: None,
+            delivery: Some(DeliveryState::Queued),
+            signature: Signature::Verified,
+            leg: None,
+            unproven: false,
+            at,
+            ledger: vec![LedgerEntry::new(at, "queued")],
+            last_leg: None,
+            activity: 0,
+            fields: Vec::new(),
+        }
+    }
+
+    /// A telemetry report: no text, a telemetry field. It is drawn as one
+    /// `◎ position` line instead of an empty block.
+    pub fn is_report(&self) -> bool {
+        !self.outbound && self.body.trim().is_empty() && telemetry::has_telemetry(&self.fields)
+    }
+
+    fn note(&mut self, at: Option<WallTime>, what: &str) {
+        if self.ledger.last().map(|e| e.what.as_str()) != Some(what) {
+            self.ledger.push(LedgerEntry::new(at, what));
+        }
+    }
+}
+
+/// One line of a message's ledger.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LedgerEntry {
+    pub at: Option<WallTime>,
+    pub what: String,
+}
+
+impl LedgerEntry {
+    fn new(at: Option<WallTime>, what: &str) -> Self {
+        Self {
+            at,
+            what: what.to_string(),
+        }
+    }
+}
+
+/// Where the unread begins in a conversation, and how many arrived unread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NewRule {
+    /// The first unread message's index.
+    pub at: usize,
+    pub count: usize,
+}
+
+/// One correspondent and the messages with them the screen loaded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Conversation {
+    /// Their LXMF address.
+    pub peer: [u8; 16],
+    /// Oldest first.
+    pub messages: Vec<Message>,
+    /// Received messages not yet looked at: the list's badge.
+    pub unread: usize,
+    /// The `new` rule: set by the first message that arrives unread, kept
+    /// until the conversation is left.
+    pub new_rule: Option<NewRule>,
+    /// The model's activity count at the last message, for the list's order:
+    /// most recent first, a conversation without messages by its place.
+    pub activity: u64,
+    /// What the conversation says between its messages: the peer's name
+    /// changes, each once.
+    pub notes: Vec<Note>,
+    /// Pinned above the list's rule (the palette's `pin`), kept in the
+    /// store.
+    pub pinned: bool,
+    /// How many older messages the store holds than the screen loaded: the
+    /// top of the pane says so, and reaching it loads the next page.
+    pub earlier: usize,
+}
+
+/// A line the conversation says between its messages, centred.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Note {
+    /// The message it stands before; the conversation's length for after the
+    /// last.
+    pub before: usize,
+    pub text: String,
+}
+
+impl Conversation {
+    fn new(peer: [u8; 16]) -> Self {
+        Self {
+            peer,
+            messages: Vec::new(),
+            unread: 0,
+            new_rule: None,
+            activity: 0,
+            notes: Vec::new(),
+            pinned: false,
+            earlier: 0,
+        }
+    }
+
+    /// Note one more unread message, the newest.
+    fn mark_new(&mut self) {
+        let at = self.messages.len().saturating_sub(1);
+        self.new_rule.get_or_insert(NewRule { at, count: 0 }).count += 1;
+    }
+}
+
+/// The mailbox as the header says it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MailboxShown {
+    /// The selected node, once a run or the stored record named one.
+    pub node: Option<[u8; 16]>,
+    /// Named with `--pn`, not adopted.
+    pub by_user: bool,
+    /// When this session's last fetch finished.
+    pub synced: Option<WallTime>,
+}
+
+/// The open command palette.
+#[derive(Clone, Debug, Default)]
+pub struct Palette<B> {
+    /// What the reader typed.
+    pub query: B,
+    /// The highlighted row among the matches.
+    pub selected: usize,
+    /// What the palette asks for instead of a command, its text the answer
+    /// (`rename`).
+    pub ask: Option<contacts::Ask>,
+    /// The palette lists the ways of drawing the map instead of the
+    /// commands (`map drawing`, 1093), its query filtering them.
+    pub drawings: bool,
+}
+
+impl<B: InputBuffer> Palette<B> {
+    /// The rows the query matches, in table order; none while the palette
+    /// asks.
+    pub fn matches(&self) -> Vec<&'static PaletteEntry> {
+        match (self.ask, self.drawings) {
+            (None, false) => commands::filter(self.query.value()),
+            _ => Vec::new(),
+        }
+    }
+
+    /// While the palette lists the map's drawings: the indexes in
+    /// `drawings` the query matches, in their order.
+    pub fn drawing_matches(&self, drawings: &[map::Drawing]) -> Vec<usize> {
+        drawings
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| commands::fuzzy_match(self.query.value(), &d.name))
+            .map(|(i, _)| i)
+            .collect()
+    }
+}
+
+/// [`UiModel::selected`] while no conversation is open: every one there is
+/// is blocked, or in the `blocked` view none is.
+pub const NONE_OPEN: usize = usize::MAX;
+
+/// The whole screen's state. `B` is the text field: `tui_input::Input` in
+/// the terminal, whatever a board brings on a board.
+#[derive(Clone, Debug)]
+pub struct UiModel<B> {
+    /// Conversations, in the order they appeared.
+    pub conversations: Vec<Conversation>,
+    /// The open conversation's index, one the list shows, or [`NONE_OPEN`].
+    pub selected: usize,
+    /// The message the messages pane's cursor is on, in the selected
+    /// conversation.
+    pub message_cursor: usize,
+    /// The compose line.
+    pub compose: B,
+    /// Where keys go.
+    pub focus: Pane,
+    /// Notes floated over the content, newest last.
+    pub toasts: Vec<Toast>,
+    /// The palette, when open.
+    pub palette: Option<Palette<B>>,
+    /// Whether the help overlay is up.
+    pub help: bool,
+    /// The help's first row on screen, back to the top whenever it opens.
+    pub help_scroll: usize,
+    /// Our own address, once the engine is ready.
+    pub address: Option<[u8; 16]>,
+    /// Draw the delivery glyphs' ASCII fallback.
+    pub ascii: bool,
+    /// The tick counter: spinner frames and toast ages.
+    pub tick: u64,
+    /// Whether the reader asked to leave.
+    pub quit: bool,
+    /// Sent messages whose runner has not finished, as (conversation,
+    /// message) indices, in the order the shell runs them.
+    pub sending: VecDeque<(usize, usize)>,
+    /// Whether a fetch is running.
+    pub fetching: bool,
+    /// What started the running fetch, or the last one.
+    pub fetch_reason: Option<Reason>,
+    /// When the running fetch, or the last one, began, on `elapsed_ms`.
+    pub fetch_since_ms: u64,
+    /// How many fetches ended, either way, for a key script's `until
+    /// synced`.
+    pub fetches_done: usize,
+    /// The mailbox's own schedule (`crate::sync`): the terminal's. A model
+    /// without one syncs only when asked, as a key script's does unless it
+    /// names `--sync-interval`, so no frame shows a fetch the script did not
+    /// ask for.
+    pub sync: Option<Schedule>,
+    /// The shell's monotonic clock in milliseconds, the schedule's
+    /// ([`UiEvent::Elapsed`]).
+    pub elapsed_ms: u64,
+    /// Whether the terminal speaks the keyboard enhancement protocol, so
+    /// `Shift-Enter` and `Ctrl-Enter` arrive as themselves: the hint and the
+    /// footer offer them then.
+    pub enhanced: bool,
+    /// `Enter` in compose sends (the default). Off, it breaks the line and
+    /// the modifier chord sends: `Ctrl-Enter` with enhancement, `Alt-Enter`
+    /// without.
+    pub send_on_enter: bool,
+    /// The time of day, as the shell last said it.
+    pub now: Option<WallTime>,
+    /// The screen, in cells: what [`PaneSizes`] are made from.
+    pub screen: (u16, u16),
+    /// The conversation's first row on screen when the reader scrolled up;
+    /// `None` keeps the newest at the bottom.
+    pub scroll_top: Option<usize>,
+    /// The message whose detail view is up, as (conversation, message).
+    pub detail: Option<(usize, usize)>,
+    /// The detail view's first row on screen, back to the top whenever one
+    /// opens.
+    pub detail_scroll: usize,
+    /// The mailbox, for the header.
+    pub mailbox: MailboxShown,
+    /// Counts messages in and out, for the list's order.
+    pub activity: u64,
+    /// Whether the mouse is captured (`--no-mouse` and the palette's `mouse`
+    /// turn it off, and the terminal's own selection works again).
+    pub mouse: bool,
+    /// The footer button under the pointer, a footer slot's index.
+    pub footer_hover: Option<usize>,
+    /// What a drag over the conversation selected.
+    pub selection: Option<Selection>,
+    /// The button press a drag or a release belongs to.
+    pub press: Option<Press>,
+    /// The colour tier the screen is drawn in: monochrome until the shell
+    /// says another, which is what every test frame shows.
+    pub tier: Tier,
+    /// Light or dark: which half of the token table the tier draws from. The
+    /// palette's `theme` turns it.
+    pub theme: Theme,
+    /// The search, when open: the list pane is its field and results.
+    pub search: Option<search::Search<B>>,
+    /// The names this session heard and the reader's contacts: how every
+    /// pane names a peer ([`crate::names`]).
+    pub names: Names,
+    /// The palette's `blocked` view: the list holds the blocked
+    /// conversations instead of the others.
+    pub show_blocked: bool,
+    /// Messages a fold changed, by conversation and key, for the store
+    /// ([`UiModel::take_writes`]).
+    changed: BTreeSet<([u8; 16], u64)>,
+    /// Conversations whose own state (pin, unread) a fold changed.
+    changed_peers: BTreeSet<[u8; 16]>,
+    /// Deletions for the store, in the order they were made.
+    forgotten: Vec<StoreWrite>,
+    /// Whether this device is a client of a home node: what the reader
+    /// reads and deletes here is marked for the home's other devices, and a
+    /// send is followed by a pull.
+    pub home_client: bool,
+    /// The list is a screen of its own, as on a phone: a message arriving
+    /// while no conversation is open leaves it closed and unread, where the
+    /// terminal, which shows the list beside the conversation, opens it.
+    pub list_apart: bool,
+    /// Marks for the home node, in the order they were made
+    /// ([`UiModel::take_marks`]).
+    marks: Vec<crate::home::wire::Mark>,
+    /// Petnames for the home node, in the order they were set
+    /// ([`UiModel::take_petnames`]).
+    petnames: Vec<([u8; 16], Option<String>)>,
+    /// A pull a send or a wake asked for while one was running, with its
+    /// reason: started when that one ends, since it may have begun before
+    /// the home node had the message.
+    pull_owed: Option<Reason>,
+    /// A delete waiting for its `y`, and the question on screen.
+    pub confirm: Option<(Confirm, Toast)>,
+    /// A stored search result to open once its page has loaded.
+    reveal_pending: Option<([u8; 16], u64)>,
+    /// Each peer's latest position, by [`Fix::newer_than`]: the header's.
+    pub positions: BTreeMap<[u8; 16], Fix>,
+    /// Positions received since the store last wrote, in arrival order.
+    fixes_received: Vec<Fix>,
+    /// The map, when open: it takes the conversation pane.
+    pub map: Option<map::MapState>,
+    /// What the shell draws the map with ([`UiEvent::MapSetup`]).
+    pub map_setup: map::MapSetup,
+    /// The left button held down on the map, a click or a drag.
+    pub map_press: Option<map::MapPress>,
+    /// Whether going to a place loads its region by itself (`map_autoload`,
+    /// on in the shell's config by default; off here until the shell says).
+    pub map_autoload: bool,
+    /// The config's `map_theme`, which each frontend resolves against the
+    /// theme it draws in (`picture::map_theme`); `None` for unset.
+    pub map_theme: Option<ThemeFlag>,
+    /// The word the map's title carries while a region loads.
+    pub map_loading: Option<String>,
+    /// The glyph test pattern is over the map (`g`, 1093).
+    pub map_glyph_test: bool,
+    /// The tick until which the map's title names the way it is drawn,
+    /// after the drawing changed.
+    pub map_named_until: Option<u64>,
+    /// Regions to ask the shell for, handed out as [`UiEffect::LoadMap`]
+    /// at the end of the fold.
+    map_wants: Vec<map::MapWant>,
+}
+
+/// Text a drag selected in the open conversation, from where the button went
+/// down to where it is, each as a laid-out row and a column of the pane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Selection {
+    pub anchor: (usize, usize),
+    pub head: (usize, usize),
+}
+
+/// A left button held down over the conversation: what it went down on,
+/// and whether it has moved since, which makes the release a copy and not a
+/// click.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Press {
+    pub target: hit::Target,
+    pub moved: bool,
+}
+
+impl<B: InputBuffer + Default> UiModel<B> {
+    /// An empty screen with these correspondents already listed (`loquax tui
+    /// --to`), focus on the conversation list.
+    pub fn new(peers: &[[u8; 16]]) -> Self {
+        let mut model = Self {
+            conversations: Vec::new(),
+            selected: 0,
+            message_cursor: 0,
+            compose: B::default(),
+            focus: Pane::Conversations,
+            toasts: Vec::new(),
+            palette: None,
+            help: false,
+            help_scroll: 0,
+            address: None,
+            ascii: false,
+            tick: 0,
+            quit: false,
+            sending: VecDeque::new(),
+            fetching: false,
+            fetch_reason: None,
+            fetch_since_ms: 0,
+            fetches_done: 0,
+            sync: None,
+            elapsed_ms: 0,
+            enhanced: false,
+            send_on_enter: true,
+            now: None,
+            screen: (80, 24),
+            scroll_top: None,
+            detail: None,
+            detail_scroll: 0,
+            mailbox: MailboxShown::default(),
+            activity: 0,
+            mouse: true,
+            footer_hover: None,
+            selection: None,
+            press: None,
+            tier: Tier::Mono,
+            theme: Theme::Dark,
+            search: None,
+            names: Names::default(),
+            show_blocked: false,
+            changed: BTreeSet::new(),
+            changed_peers: BTreeSet::new(),
+            forgotten: Vec::new(),
+            home_client: false,
+            list_apart: false,
+            marks: Vec::new(),
+            petnames: Vec::new(),
+            pull_owed: None,
+            confirm: None,
+            reveal_pending: None,
+            positions: BTreeMap::new(),
+            fixes_received: Vec::new(),
+            map: None,
+            map_setup: map::MapSetup::default(),
+            map_press: None,
+            map_autoload: false,
+            map_theme: None,
+            map_loading: None,
+            map_glyph_test: false,
+            map_named_until: None,
+            map_wants: Vec::new(),
+        };
+        for peer in peers {
+            model.conversation(*peer);
+        }
+        model
+    }
+}
+
+impl<B> UiModel<B> {
+    /// The keymap's context: the terminal's keyboard protocol and the
+    /// `send_on_enter` switch.
+    pub fn ctx(&self) -> Ctx {
+        let mut ctx = Ctx::NONE;
+        if self.enhanced {
+            ctx = ctx.with(Ctx::ENHANCED);
+        }
+        if !self.send_on_enter {
+            ctx = ctx.with(keys::ENTER_BREAKS);
+        }
+        if self.search.is_some() {
+            ctx = ctx.with(keys::SEARCHING);
+        }
+        ctx
+    }
+
+    /// What the open search looks for, when it looks for anything: the
+    /// list shows results and the conversation marks the matches.
+    pub fn query(&self) -> Option<&str>
+    where
+        B: InputBuffer,
+    {
+        self.search
+            .as_ref()
+            .map(|s| s.query.value())
+            .filter(|q| !q.is_empty())
+    }
+
+    /// The open search's results, in the list's order.
+    pub fn hits(&self) -> Vec<search::Hit>
+    where
+        B: InputBuffer,
+    {
+        let Some(query) = self.query() else {
+            return Vec::new();
+        };
+        let stored = self.search.as_ref().map_or(&[][..], |s| &s.stored[..]);
+        search::hits(
+            &self.conversations,
+            &self.names,
+            &self.order(),
+            query,
+            stored,
+        )
+    }
+
+    /// The colour tokens of the tier and theme.
+    pub fn tokens(&self) -> &'static Tokens {
+        tokens(self.tier, self.theme)
+    }
+
+    /// The selected conversation's messages.
+    pub fn messages_of_selected(&self) -> &[Message] {
+        self.conversations
+            .get(self.selected)
+            .map(|c| c.messages.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// The index of `peer`'s conversation, made if new.
+    fn conversation(&mut self, peer: [u8; 16]) -> usize {
+        match self.conversations.iter().position(|c| c.peer == peer) {
+            Some(index) => index,
+            None => {
+                self.conversations.push(Conversation::new(peer));
+                self.conversations.len() - 1
+            }
+        }
+    }
+
+    fn toast(&mut self, kind: ToastKind, text: String) {
+        self.toasts.push(Toast {
+            kind,
+            text,
+            shown_at: self.tick,
+        });
+    }
+
+    /// The toast to draw now, if any is still young enough.
+    pub fn current_toast(&self) -> Option<&Toast> {
+        // A question stays up until it is answered.
+        if let Some((_, question)) = &self.confirm {
+            return Some(question);
+        }
+        self.toasts
+            .last()
+            .filter(|t| self.tick.saturating_sub(t.shown_at) < TOAST_TICKS)
+    }
+
+    /// Open conversation `index`. The one left loses its `new` rule; the
+    /// one opened keeps its own until it is left in turn, and shows its
+    /// newest message at the bottom.
+    fn select(&mut self, index: usize) {
+        if index != self.selected {
+            if let Some(left) = self.conversations.get_mut(self.selected) {
+                left.new_rule = None;
+            }
+        }
+        self.selected = index;
+        self.scroll_top = None;
+        self.selection = None;
+        self.read_out(index);
+        if let Some(conversation) = self.conversations.get(index) {
+            self.message_cursor = conversation.messages.len().saturating_sub(1);
+        }
+    }
+
+    /// Conversation `index` was looked at: its unread are read, here and,
+    /// on a client of a home node, on the home's other devices.
+    pub(crate) fn read_out(&mut self, index: usize) {
+        let Some(conversation) = self.conversations.get_mut(index) else {
+            return;
+        };
+        if conversation.unread == 0 {
+            return;
+        }
+        let unread = core::mem::take(&mut conversation.unread);
+        self.changed_peers.insert(conversation.peer);
+        if !self.home_client {
+            return;
+        }
+        let ids: Vec<[u8; 32]> = conversation
+            .messages
+            .iter()
+            .rev()
+            .filter(|message| !message.outbound)
+            .take(unread)
+            .filter_map(|message| message.id)
+            .collect();
+        self.mark_out(crate::home::wire::MarkFlag::Read, ids);
+    }
+
+    /// Queue marks for the home node, split to the most one carries.
+    pub(crate) fn mark_out(&mut self, flag: crate::home::wire::MarkFlag, ids: Vec<[u8; 32]>) {
+        for chunk in ids.chunks(crate::home::wire::MARK_IDS_MAX) {
+            self.marks.push(crate::home::wire::Mark {
+                flag,
+                ids: chunk.to_vec(),
+            });
+        }
+    }
+
+    /// The marks a fold made, for the shell to hand the home node.
+    pub fn take_marks(&mut self) -> Vec<crate::home::wire::Mark> {
+        core::mem::take(&mut self.marks)
+    }
+
+    /// The conversations in the list's order: the pinned first, then the
+    /// rest, each by their last message, most recent first; those without
+    /// one after, in the order they came. Only those the list shows
+    /// ([`UiModel::shows`]): a blocked peer's outside the `blocked` view.
+    pub fn order(&self) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..self.conversations.len())
+            .filter(|&i| self.shows(&self.conversations[i].peer))
+            .collect();
+        order.sort_by_key(|&i| {
+            let c = &self.conversations[i];
+            (core::cmp::Reverse(c.pinned), core::cmp::Reverse(c.activity))
+        });
+        order
+    }
+
+    fn bump(&mut self) -> u64 {
+        self.activity += 1;
+        self.activity
+    }
+
+    /// The rows the compose box shows.
+    pub fn compose_rows(&self) -> usize
+    where
+        B: InputBuffer,
+    {
+        self.compose
+            .value()
+            .split('\n')
+            .count()
+            .clamp(1, COMPOSE_MAX_ROWS)
+    }
+
+    /// The panes' inner sizes on this screen.
+    pub fn sizes(&self) -> PaneSizes
+    where
+        B: InputBuffer,
+    {
+        PaneSizes::for_screen(self.screen.0, self.screen.1, self.compose_rows())
+    }
+
+    /// The header's rows inside the conversation pane: none, or the mailbox
+    /// row and a rule on a wide one.
+    fn header_rows(&self) -> usize
+    where
+        B: InputBuffer,
+    {
+        match self.sizes().messages.0 >= WIDE_HEADER {
+            true => 2,
+            false => 0,
+        }
+    }
+
+    /// The rows of the conversation pane that carry messages.
+    pub fn message_rows(&self) -> usize
+    where
+        B: InputBuffer,
+    {
+        self.sizes().messages.1.saturating_sub(self.header_rows())
+    }
+
+    /// The open conversation laid out at the pane's width.
+    fn laid(&self) -> layout::Laid
+    where
+        B: InputBuffer,
+    {
+        let selected = (self.focus == Pane::Messages).then_some(self.message_cursor);
+        match self.conversations.get(self.selected) {
+            Some(conversation) => layout::conversation(
+                conversation,
+                self.sizes().messages.0,
+                &layout::Draw {
+                    now: self.now,
+                    tick: self.tick,
+                    ascii: self.ascii,
+                    selected,
+                    tokens: self.tokens(),
+                    mark: self.query(),
+                },
+            ),
+            None => layout::Laid::empty(self.sizes().messages.0, self.tokens()),
+        }
+    }
+
+    /// The first row on screen of `total` laid-out rows.
+    fn top_of(&self, total: usize) -> usize
+    where
+        B: InputBuffer,
+    {
+        let bottom = total.saturating_sub(self.message_rows());
+        self.scroll_top.unwrap_or(bottom).min(bottom)
+    }
+}
+
+/// What the model is told.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UiEvent {
+    /// A key, routed to the focused pane, or to the palette or help on top.
+    Key(KeyEvent),
+    /// A palette command run directly, as a GUI menu would.
+    Run(PaletteCommand),
+    /// The shell's 250 ms tick: the spinner's frame, the toasts' age.
+    Tick,
+    /// The time of day: before the first frame and on every tick in the
+    /// terminal, whenever a key script says so.
+    Clock(WallTime),
+    /// The shell's monotonic clock, in milliseconds from an origin of its
+    /// choosing: the mailbox schedule runs on it, and a sync it finds due
+    /// starts here.
+    Elapsed(u64),
+    /// The machine woke from suspend (`crate::sync::resumed`).
+    Resumed,
+    /// On a client of a home node: the home node said its archive grew
+    /// past this device's cursor ([`crate::home::watch`]), so a pull starts,
+    /// or follows the one running.
+    HomeWake,
+    /// The screen's size in cells.
+    Resize { width: u16, height: u16 },
+    /// A click, a wheel turn, a drag or a move, at a screen cell.
+    Mouse(MouseEvent),
+    /// The mailbox the stored record or a run selected.
+    MailboxChosen { node: [u8; 16], by_user: bool },
+    /// One event from the message engine.
+    Engine(OutboxEvent),
+    /// The oldest running send finished; the error text when it failed.
+    SendDone(Result<(), String>),
+    /// The oldest running send ended with its message on a link to the peer
+    /// and no delivery proof (`SendError::Unproven`): shown `◇`, sent and
+    /// not proven, with the runner's text in a toast.
+    SendUnproven(String),
+    /// The oldest running send moved onto this leg.
+    SendLeg(Leg),
+    /// The fetch finished: how many messages were new, or why it failed.
+    FetchDone(Result<usize, String>),
+    /// A line a runner or the stamp worker said along the way (the auto
+    /// fallback's "trying a propagation node", a mailbox adoption), the
+    /// lines the CLI writes to stderr.
+    Notice(String),
+    /// The store's answer to [`StoreRead::Earlier`]: older messages of
+    /// `peer`'s conversation, oldest first, and how many it holds before
+    /// them still.
+    Earlier {
+        peer: [u8; 16],
+        messages: Vec<Message>,
+        earlier: usize,
+    },
+    /// The store's answer to [`StoreRead::Search`].
+    StoredHits { query: String, hits: Vec<StoredHit> },
+    /// How the shell draws the map: the cell's pixels and the zooms its
+    /// regions reach.
+    MapSetup(map::MapSetup),
+    /// A region load asked with [`UiEffect::LoadMap`] moved on.
+    MapLoad(MapLoad),
+    /// Open `peer`'s conversation, listed if new, as a tap on it does in a
+    /// frontend without keys (the Android app): its unread are read, and on
+    /// a client of a home node marked read for the home's other devices.
+    Open { peer: [u8; 16] },
+    /// Leave the open conversation for the list, as the system's back
+    /// button does on a phone: none is open, so what arrives stays unread.
+    Close,
+    /// Send `body` to `peer` in their conversation, opened first, as the
+    /// compose pane's `Enter` does with its text.
+    Write { peer: [u8; 16], body: String },
+    /// React with `content` to the message `target` in `peer`'s
+    /// conversation, as the picker's choice does ([`reactions`]).
+    React {
+        peer: [u8; 16],
+        target: [u8; 32],
+        content: String,
+    },
+    /// Send `body` to `peer` as a reply to the message `target`
+    /// ([`replies`]).
+    Reply {
+        peer: [u8; 16],
+        target: [u8; 32],
+        body: String,
+    },
+    /// Send a copy of the message `key` (its [`Message::activity`]) of
+    /// `from`'s conversation to `to` ([`replies`]).
+    Forward {
+        from: [u8; 16],
+        key: u64,
+        to: [u8; 16],
+    },
+    /// Delete the messages `keys` of `peer`'s conversation without asking,
+    /// as `y` after `d` does for one: a frontend that asked already.
+    Delete { peer: [u8; 16], keys: Vec<u64> },
+    /// Make `name` the reader's name for `peer`, the empty one clearing it,
+    /// as the palette's `rename` does with what was typed: a frontend with
+    /// a dialog of its own (1139).
+    Rename { peer: [u8; 16], name: String },
+}
+
+/// How a region load goes, as the shell reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MapLoad {
+    /// It started: the title says so.
+    Started(map::MapWant),
+    /// It landed, and [`UiEvent::MapSetup`] has the region already.
+    Done(map::MapWant),
+    /// It failed. `toast` is the line to show, `None` where the shell said
+    /// it once already (no internet, a box backing off).
+    Failed {
+        want: map::MapWant,
+        toast: Option<String>,
+    },
+}
+
+/// What the shell is asked to do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UiEffect {
+    /// Send `body` to `to` the way `loquax send --via auto` does. The shell
+    /// runs sends one at a time in this order and reports each with
+    /// [`UiEvent::SendDone`]. `fields` go with it as they are: a reaction's
+    /// ([`reactions`]).
+    Send {
+        to: [u8; 16],
+        body: String,
+        fields: Vec<Field>,
+    },
+    /// Drain the mailbox, as `loquax fetch` does; reported with
+    /// [`UiEvent::FetchDone`].
+    Fetch,
+    /// Leave.
+    Quit,
+    /// Draw the whole screen again from scratch (`Ctrl-l`).
+    Redraw,
+    /// Put this text on the clipboard (OSC 52 in the terminal).
+    Copy(String),
+    /// Make the contacts file say this about its peer, its other lines kept
+    /// ([`crate::names::save_contact`]).
+    Contact(Contact),
+    /// Hand this URL to the system's handler for it: an `http`, `https` or
+    /// `mailto` link in a body, which [`classify_link`] let through.
+    Open(String),
+    /// Capture the mouse, or let the terminal have it.
+    Mouse(bool),
+    /// A line worth keeping after the screen is gone: the shell prints it
+    /// once the terminal is restored. A toast is cut to the screen's width,
+    /// and a failure's full text is often longer.
+    Notice(String),
+    /// Ask the store for what the screen has not loaded.
+    Store(StoreRead),
+    /// A line for the shell's log (`tui.log`), not for the screen: a
+    /// telemetry blob that did not decode, kept raw with its message.
+    Log(String),
+    /// Load this region into the maps directory, reported with
+    /// [`UiEvent::MapLoad`] (1089).
+    LoadMap(map::MapWant),
+    /// Draw the map the `n`th way of [`map::MapSetup::drawings`]; the shell
+    /// answers with a new [`UiEvent::MapSetup`] (1093).
+    MapDrawing(usize),
+    /// Import contacts and history from the messengers found in their
+    /// default places (`crate::import`), never the identity, which needs a
+    /// typed yes outside the screen; the shell answers with notices.
+    Import,
+}
+
+/// Fold one event into the model.
+pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec<UiEffect> {
+    let mut effects = fold(model, event);
+    effects.extend(model.map_wants.drain(..).map(UiEffect::LoadMap));
+    // Whatever hid the open conversation, a block, the `blocked` view or a
+    // restore, another the list shows takes its place.
+    model.settle();
+    // A reaction has no block for the cursor to stand on.
+    model.off_reactions();
+    // The map holds the conversation's place: the focus going to the
+    // conversation or compose takes it away, and without it there is no
+    // map to focus.
+    match (model.map.is_some(), model.focus) {
+        (true, Pane::Messages | Pane::Compose) => model.map = None,
+        (false, Pane::Map) => model.focus = Pane::Messages,
+        _ => {}
+    }
+    effects
+}
+
+fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec<UiEffect> {
+    match event {
+        UiEvent::MapSetup(setup) => {
+            if let Some(state) = model.map.as_mut() {
+                state.zoom = state.zoom.clamp(setup.zooms.0, setup.zooms.1);
+            }
+            // The drawing changed under the reader: the title names it a
+            // moment. The first setup changes nothing the reader chose.
+            let old = &model.map_setup;
+            if !old.drawings.is_empty() && old.drawing != setup.drawing {
+                model.map_named_until = Some(model.tick + MAP_NAMED_TICKS);
+            }
+            model.map_setup = setup;
+            Vec::new()
+        }
+        UiEvent::MapLoad(load) => {
+            map_load(model, load);
+            Vec::new()
+        }
+        UiEvent::Key(key) if key.kind == KeyEventKind::Release => Vec::new(),
+        UiEvent::Key(key) => on_key(model, key),
+        UiEvent::Run(command) => run(model, command),
+        UiEvent::Tick => {
+            model.tick = model.tick.wrapping_add(1);
+            let tick = model.tick;
+            model
+                .toasts
+                .retain(|t| tick.saturating_sub(t.shown_at) < TOAST_TICKS);
+            Vec::new()
+        }
+        UiEvent::Clock(now) => {
+            model.now = Some(now);
+            Vec::new()
+        }
+        UiEvent::Elapsed(ms) => {
+            model.elapsed_ms = ms;
+            auto_sync(model)
+        }
+        UiEvent::Resumed => schedule(model, SyncEvent::Resume),
+        UiEvent::HomeWake => pull_for(model, Reason::Wake),
+        UiEvent::Resize { width, height } => {
+            model.screen = (width, height);
+            model.selection = None;
+            model.press = None;
+            // A taller screen brings the overlays' bottoms nearer.
+            model.help_scroll = model.help_scroll.min(help_bounds(model).1);
+            model.detail_scroll = model.detail_scroll.min(detail_bounds(model).1);
+            Vec::new()
+        }
+        UiEvent::Mouse(mouse) => on_mouse(model, mouse),
+        UiEvent::MailboxChosen { node, by_user } => {
+            model.mailbox.node = Some(node);
+            model.mailbox.by_user = by_user;
+            Vec::new()
+        }
+        UiEvent::Engine(event) => on_engine(model, event),
+        UiEvent::Rename { peer, name } => model.rename(peer, &name),
+        UiEvent::Notice(line) => {
+            model.toast(ToastKind::Info, line);
+            Vec::new()
+        }
+        UiEvent::SendDone(result) => on_send_done(model, result),
+        UiEvent::Earlier {
+            peer,
+            messages,
+            earlier,
+        } => {
+            model.on_earlier(peer, messages, earlier);
+            Vec::new()
+        }
+        UiEvent::StoredHits { query, hits } => {
+            model.on_stored_hits(&query, hits);
+            Vec::new()
+        }
+        UiEvent::SendUnproven(detail) => on_send_unproven(model, detail),
+        UiEvent::SendLeg(leg) => {
+            let (tick, now) = (model.tick, model.now);
+            if let Some(&(c, m)) = model.sending.front() {
+                if let Some(message) = model.message_mut(c, m) {
+                    message.leg = Some((leg, tick));
+                    message.last_leg = Some(leg);
+                    message.note(now, &format!("trying {}", leg_words(leg)));
+                }
+            }
+            Vec::new()
+        }
+        UiEvent::FetchDone(result) => on_fetch_done(model, result),
+        UiEvent::Open { peer } => {
+            let index = model.conversation(peer);
+            model.select(index);
+            Vec::new()
+        }
+        UiEvent::Close => {
+            if let Some(left) = model.conversations.get_mut(model.selected) {
+                left.new_rule = None;
+            }
+            model.selected = NONE_OPEN;
+            model.scroll_top = None;
+            model.selection = None;
+            model.message_cursor = 0;
+            Vec::new()
+        }
+        UiEvent::Write { peer, body } => {
+            let index = model.conversation(peer);
+            model.select(index);
+            send_body(model, body)
+        }
+        UiEvent::React {
+            peer,
+            target,
+            content,
+        } => model.react(peer, target, &content),
+        UiEvent::Reply { peer, target, body } => model.reply_to(peer, target, body),
+        UiEvent::Forward { from, key, to } => model.forward(from, key, to),
+        UiEvent::Delete { peer, keys } => {
+            model.delete_messages(peer, &keys);
+            Vec::new()
+        }
+    }
+}
+
+/// The fetch ended. One the reader asked for says how it went either way;
+/// one the schedule started says only what the reader must know: new
+/// messages, and the first failure in a row, not every retry's.
+fn on_fetch_done<B>(model: &mut UiModel<B>, result: Result<usize, String>) -> Vec<UiEffect> {
+    model.fetching = false;
+    model.fetches_done += 1;
+    let now = model.elapsed_ms;
+    let failures = model.sync.as_mut().map_or(1, |sync| {
+        sync.on(
+            match &result {
+                Ok(new) => SyncEvent::Done { new: *new },
+                Err(_) => SyncEvent::Failed,
+            },
+            now,
+        );
+        sync.failures()
+    });
+    if result.is_ok() {
+        model.mailbox.synced = model.now;
+    }
+    let asked = model.fetch_reason.is_none_or(|r| r == Reason::Key);
+    let mut effects = Vec::new();
+    match result {
+        Ok(0) if asked => model.toast(ToastKind::Info, "no new messages".to_string()),
+        Ok(0) => {}
+        Ok(new) => model.toast(ToastKind::Info, format!("{new} new message(s)")),
+        Err(detail) if asked || failures == 1 => {
+            model.toast(ToastKind::Error, format!("fetch failed: {detail}"));
+            effects.push(UiEffect::Notice(format!("fetch: {detail}")));
+        }
+        Err(_) => {}
+    }
+    if let Some(reason) = model.pull_owed.take() {
+        effects.extend(start_pull(model, reason));
+    }
+    effects
+}
+
+/// On a client of a home node, a send is followed by a pull, so the bubble
+/// takes the home node's word (sent, then whatever followed) without
+/// waiting for the schedule. A pull already running may have asked before
+/// the home node had the message, so another follows it.
+fn pull_after_send<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
+    pull_for(model, Reason::Sent)
+}
+
+/// A pull on a client, for `reason`: now, or behind the one running.
+fn pull_for<B>(model: &mut UiModel<B>, reason: Reason) -> Vec<UiEffect> {
+    if !model.home_client {
+        return Vec::new();
+    }
+    if model.fetching {
+        model.pull_owed = Some(model.pull_owed.unwrap_or(reason));
+        return Vec::new();
+    }
+    start_pull(model, reason)
+}
+
+fn start_pull<B>(model: &mut UiModel<B>, reason: Reason) -> Vec<UiEffect> {
+    let now = model.elapsed_ms;
+    if let Some(sync) = model.sync.as_mut() {
+        sync.begin(now);
+    }
+    model.fetching = true;
+    model.fetch_reason = Some(reason);
+    model.fetch_since_ms = now;
+    vec![UiEffect::Fetch]
+}
+
+/// Tell the schedule, and start the sync it then finds due.
+fn schedule<B>(model: &mut UiModel<B>, event: SyncEvent) -> Vec<UiEffect> {
+    let now = model.elapsed_ms;
+    match model.sync.as_mut() {
+        Some(sync) => {
+            sync.on(event, now);
+            auto_sync(model)
+        }
+        None => Vec::new(),
+    }
+}
+
+/// The sync the schedule finds due now, started; one at a time.
+fn auto_sync<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
+    let now = model.elapsed_ms;
+    if model.fetching {
+        return Vec::new();
+    }
+    let Some(sync) = model.sync.as_mut() else {
+        return Vec::new();
+    };
+    let Some(reason) = sync.due(now) else {
+        return Vec::new();
+    };
+    sync.begin(now);
+    model.fetching = true;
+    model.fetch_reason = Some(reason);
+    model.fetch_since_ms = now;
+    vec![UiEffect::Fetch]
+}
+
+fn on_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) -> Vec<UiEffect> {
+    if model.confirm.is_some() {
+        let yes = key.code == KeyCode::Char('y')
+            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT);
+        model.answer(yes);
+        return Vec::new();
+    }
+    let ctx = model.ctx();
+    if model.help || model.palette.is_some() || model.detail.is_some() {
+        // Only `Ctrl-q`, `Ctrl-c` and backing out reach past an overlay.
+        match keys::resolve(&key, keys::OVERLAY, ctx) {
+            Some(Action::Run(PaletteCommand::Quit)) => return run(model, PaletteCommand::Quit),
+            Some(Action::QuitHint) => return quit_hint(model),
+            Some(Action::Back) => {
+                model.help = false;
+                model.palette = None;
+                model.detail = None;
+                return Vec::new();
+            }
+            _ => {}
+        }
+        return overlay_key(model, key);
+    }
+    let pane = model.focus;
+    // A selection lasts until the next key: the copy row copies it.
+    let selection = model.selection.take();
+    match keys::resolve(&key, keys::panes_of(pane), ctx) {
+        Some(Action::Copy) => copy(model, selection),
+        Some(action) => act(model, action, key),
+        None => {
+            match pane {
+                Pane::Compose => {
+                    model.compose.edit(&key);
+                }
+                Pane::Search => {
+                    let more = model.store_has_more();
+                    if let Some(search) = model.search.as_mut() {
+                        // Every keystroke runs the matcher again: the
+                        // results are derived, only the cursor resets. What
+                        // the screen has not loaded the store searches.
+                        if search.query.edit(&key) {
+                            search.selected = 0;
+                            search.stored.clear();
+                            let query = search.query.value();
+                            if more && !query.is_empty() {
+                                return vec![UiEffect::Store(StoreRead::Search(query.to_string()))];
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            Vec::new()
+        }
+    }
+}
+
+/// A key while the help, the palette or a detail view is up. The help and
+/// the detail view scroll by the conversation's scroll keys.
+fn overlay_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) -> Vec<UiEffect> {
+    if model.help {
+        if matches!(
+            key.code,
+            KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Enter
+        ) {
+            model.help = false;
+        } else if let Some(cmd) = keys::overlay_scroll(&key, model.ctx()) {
+            scroll_overlay(model, cmd);
+        }
+        return Vec::new();
+    }
+    if model.detail.is_some() {
+        if matches!(key.code, KeyCode::Char('q') | KeyCode::Enter) {
+            model.detail = None;
+        } else if let Some(cmd) = keys::overlay_scroll(&key, model.ctx()) {
+            scroll_overlay(model, cmd);
+        }
+        return Vec::new();
+    }
+    let Some(palette) = model.palette.as_mut() else {
+        return Vec::new();
+    };
+    match key.code {
+        KeyCode::Enter => {
+            if let Some(ask) = palette.ask {
+                let typed = palette.query.value().to_string();
+                model.palette = None;
+                return model.answer_ask(ask, typed);
+            }
+            if palette.drawings {
+                let chosen = palette
+                    .drawing_matches(&model.map_setup.drawings)
+                    .get(palette.selected)
+                    .copied();
+                model.palette = None;
+                return chosen.map(UiEffect::MapDrawing).into_iter().collect();
+            }
+            let chosen = palette.matches().get(palette.selected).map(|e| e.command);
+            model.palette = None;
+            if let Some(command) = chosen {
+                return run(model, command);
+            }
+        }
+        KeyCode::Down => {
+            let rows = match palette.drawings {
+                true => palette.drawing_matches(&model.map_setup.drawings).len(),
+                false => palette.matches().len(),
+            };
+            palette.selected = (palette.selected + 1).min(rows.saturating_sub(1));
+        }
+        KeyCode::Up => palette.selected = palette.selected.saturating_sub(1),
+        // The picker: a digit on an empty line is that quick reaction.
+        KeyCode::Char(digit @ '1'..='6')
+            if palette.query.value().is_empty()
+                && matches!(palette.ask, Some(contacts::Ask::React { .. })) =>
+        {
+            if let Some(contacts::Ask::React { peer, target }) = palette.ask {
+                model.palette = None;
+                let quick = reactions::QUICK[usize::from(digit as u8 - b'1')];
+                return model.react(peer, target, quick);
+            }
+        }
+        _ => {
+            if palette.query.edit(&key) {
+                palette.selected = 0;
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Scroll the help, or else the detail view, by the shared scroll rule.
+fn scroll_overlay<B: InputBuffer>(model: &mut UiModel<B>, cmd: ScrollCmd) {
+    if model.help {
+        let (viewport, max) = help_bounds(model);
+        model.help_scroll = scrolled(model.help_scroll, cmd, viewport, max);
+    } else if model.detail.is_some() {
+        let (viewport, max) = detail_bounds(model);
+        model.detail_scroll = scrolled(model.detail_scroll, cmd, viewport, max);
+    }
+}
+
+/// The help's rows on screen at once and its largest first row, on the
+/// model's screen: the bounds its renderer slices by.
+fn help_bounds<B: InputBuffer>(model: &UiModel<B>) -> (usize, usize) {
+    let (width, height) = model.screen;
+    leviculum_ui::help::scroll_bounds(&help_groups(), Rect::new(0, 0, width, height))
+}
+
+/// The open detail view's rows on screen at once and its largest first row,
+/// from [`detail_layout`] on the model's screen; nothing when none is open.
+fn detail_bounds<B: InputBuffer>(model: &UiModel<B>) -> (usize, usize) {
+    let Some(detail) = model.detail.and_then(|(c, m)| detail_view(model, c, m)) else {
+        return (0, 0);
+    };
+    let (width, height) = model.screen;
+    detail_scroll_bounds(&detail, Rect::new(0, 0, width, height))
+}
+
+/// A detail view's scroll bounds over `screen`: the rows inside its border
+/// and the largest valid first row.
+pub fn detail_scroll_bounds(detail: &DetailView, screen: Rect) -> (usize, usize) {
+    let (area, rows) = detail_layout(detail, screen);
+    let viewport = usize::from(area.height.saturating_sub(2));
+    (viewport, rows.len().saturating_sub(viewport))
+}
+
+/// Run what a key resolved to.
+fn act<B: InputBuffer + Default>(
+    model: &mut UiModel<B>,
+    action: Action,
+    key: KeyEvent,
+) -> Vec<UiEffect> {
+    match action {
+        Action::Run(command) => return run(model, command),
+        Action::Scroll(cmd) => {
+            scroll(model, model.focus, cmd);
+            if model.focus == Pane::Messages {
+                return model.earlier_wanted();
+            }
+        }
+        Action::ScrollMessages(cmd) => {
+            scroll(model, Pane::Messages, cmd);
+            return model.earlier_wanted();
+        }
+        Action::Newline => model.compose.newline(),
+        Action::Edit => {
+            model.compose.edit(&key);
+        }
+        // `Ctrl-c` in compose: a reflex that would throw a half-written
+        // message away (loquax-ui.md, section 1, "What must not be copied"),
+        // so it clears the line into the field's kill buffer, back with
+        // `Ctrl-y`.
+        Action::ClearDraft => {
+            model
+                .compose
+                .edit(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        }
+        Action::Back => {
+            model.focus = match model.focus {
+                Pane::Compose => Pane::Messages,
+                _ => Pane::Conversations,
+            };
+        }
+        Action::NextPane => {
+            model.focus = match model.focus.next(model.search.is_some()) {
+                // The map is in the conversation's place in the cycle.
+                Pane::Messages if model.map.is_some() => Pane::Map,
+                next => next,
+            };
+        }
+        Action::PreviousPane => model.focus = model.focus.prev(model.search.is_some()),
+        Action::Palette => model.palette = Some(Palette::default()),
+        Action::QuitHint => return quit_hint(model),
+        Action::Copy => return copy(model, None),
+        Action::OpenResult => return open_result(model),
+        Action::Match(forward) => match model.focus {
+            Pane::Messages => step_match(model, forward),
+            _ => step_result(model, if forward { 1 } else { -1 }),
+        },
+        Action::CloseSearch => close_search(model),
+        Action::Map(cmd) => return map_key(model, cmd),
+        Action::OpenMessage => return open_message(model),
+        Action::PeerOnMap => peer_on_map(model),
+    }
+    Vec::new()
+}
+
+/// `Enter` on a message: one that carries a position, a report or a text
+/// with a telemetry field, opens the map at the fix its line names, any
+/// other message (and a report without a position) its detail view, which
+/// `v` opens for every message. A folded run of reports is drawn as its latest, which is
+/// where the cursor stands, so its line opens the latest fix of the run.
+fn open_message<B: InputBuffer>(model: &mut UiModel<B>) -> Vec<UiEffect> {
+    match model.message_fix(model.selected, model.message_cursor) {
+        Some(fix) => {
+            open_map_at(model, &fix);
+            Vec::new()
+        }
+        None => details(model),
+    }
+}
+
+/// `L`, `Alt-l` or a click on the header's position: the open
+/// conversation's peer on the map, at its latest fix.
+fn peer_on_map<B: InputBuffer>(model: &mut UiModel<B>) {
+    let Some(peer) = model.conversations.get(model.selected).map(|c| c.peer) else {
+        model.toast(ToastKind::Info, "no conversation open".to_string());
+        return;
+    };
+    match model.positions.get(&peer).cloned() {
+        Some(fix) => open_map_at(model, &fix),
+        None => {
+            let who = model.names.label(&peer);
+            model.toast(ToastKind::Info, format!("no position from {who}"));
+        }
+    }
+}
+
+/// The map in the conversation's place, centred on `fix` at the deepest
+/// zoom of the region under it ([`map::fit_at`]), its peer's pin selected.
+/// `Esc` brings the conversation back with the cursor where it was.
+fn open_map_at<B: InputBuffer>(model: &mut UiModel<B>, fix: &Fix) {
+    let at = leviculum_map::mercator::project(leviculum_map::mercator::LatLon::from_e6(
+        fix.location.latitude_e6,
+        fix.location.longitude_e6,
+    ));
+    let (centre, zoom) = map::fit_at(at, model.map_area(), &model.map_setup);
+    model.map = Some(map::MapState {
+        centre,
+        zoom,
+        selected: Some(fix.peer),
+    });
+    model.map_press = None;
+    model.focus = Pane::Map;
+    model.selection = None;
+    // Going to a place loads its region (1089): the map is shown at once
+    // over what is there, and fitted again when the region lands.
+    if model.map_autoload {
+        model
+            .map_wants
+            .extend(map::want_place(at, &model.map_setup.regions));
+    }
+}
+
+/// A region load moved on: the title's word, a toast for a failure, and a
+/// place's map fitted again to the region that landed under it, unless the
+/// reader moved it meanwhile.
+fn map_load<B: InputBuffer>(model: &mut UiModel<B>, load: MapLoad) {
+    match load {
+        MapLoad::Started(_) => model.map_loading = Some(MAP_LOADING.to_string()),
+        MapLoad::Done(want) => {
+            model.map_loading = None;
+            let area = model.map_area();
+            let setup = model.map_setup.clone();
+            if let Some(state) = model.map.as_mut() {
+                if want.reason == map::LoadReason::View || state.centre != want.centre {
+                    return;
+                }
+                let (centre, zoom) = map::fit_at(want.centre, area, &setup);
+                state.centre = centre;
+                state.zoom = zoom;
+            }
+        }
+        MapLoad::Failed { toast, .. } => {
+            model.map_loading = None;
+            if let Some(line) = toast {
+                model.toast(ToastKind::Error, line);
+            }
+        }
+    }
+}
+
+/// The palette's `map`: the map in the conversation's place, every pin in
+/// view, the first in `Tab` order selected.
+fn open_map<B: InputBuffer>(model: &mut UiModel<B>) {
+    let pins = model.map_pins();
+    let (centre, zoom) = map::fit(&pins, model.map_area(), &model.map_setup);
+    model.map = Some(map::MapState {
+        centre,
+        zoom,
+        selected: pins.first().map(|p| p.peer),
+    });
+    model.focus = Pane::Map;
+    model.selection = None;
+    // Pins where no region is: their places load (1089).
+    if model.map_autoload {
+        let wants = map::want_pins(&pins, &model.map_setup.regions);
+        model.map_wants.extend(wants);
+    }
+}
+
+/// The palette's `load map area`, `d` on the map: the visible area's
+/// region, asked whether autoload is on or not, since the reader asked.
+fn load_map_area<B: InputBuffer>(model: &mut UiModel<B>) {
+    let area = model.map_area();
+    let Some(state) = model.map.as_ref() else {
+        model.toast(ToastKind::Info, "open the map first".to_string());
+        return;
+    };
+    let view = map::viewport(state, area, &model.map_setup);
+    match map::want_view(&view, &model.map_setup.regions) {
+        Some(want) => model.map_wants.push(want),
+        None => model.toast(ToastKind::Info, MAP_LOADED_ALREADY.to_string()),
+    }
+}
+
+/// Move the map's view by eighths of its width and height, east and south
+/// positive: the arrows, `h` `j` `k` `l` and the tilted wheel.
+fn pan_map(state: &mut map::MapState, area: Rect, setup: &map::MapSetup, dx: i8, dy: i8) {
+    let mut view = map::viewport(state, area, setup);
+    let (w, h) = view.size();
+    let step = |n: i8, of: u32| i32::from(n) * (of / 8).max(1) as i32;
+    view.pan(step(dx, w), step(dy, h));
+    state.centre = view.centre;
+    map::settle(state, area, setup);
+}
+
+/// A key on the open map.
+fn map_key<B: InputBuffer>(model: &mut UiModel<B>, cmd: keys::MapCmd) -> Vec<UiEffect> {
+    use keys::MapCmd;
+    let setup = model.map_setup.clone();
+    let area = model.map_area();
+    let pins = model.map_pins();
+    let Some(state) = model.map.as_mut() else {
+        return Vec::new();
+    };
+    match cmd {
+        MapCmd::ZoomIn => state.zoom = state.zoom.saturating_add(1).min(setup.zooms.1),
+        MapCmd::ZoomOut => {
+            state.zoom = state.zoom.saturating_sub(1).max(setup.zooms.0);
+            map::settle(state, area, &setup);
+        }
+        MapCmd::Pan(dx, dy) => pan_map(state, area, &setup, dx, dy),
+        MapCmd::Fit => {
+            let (centre, zoom) = map::fit(&pins, area, &setup);
+            state.centre = centre;
+            state.zoom = zoom;
+        }
+        MapCmd::Step(forward) => {
+            let at = pins.iter().position(|p| Some(p.peer) == state.selected);
+            let n = pins.len();
+            let next = match (at, forward) {
+                _ if n == 0 => None,
+                (None, _) => Some(0),
+                (Some(i), true) => Some((i + 1) % n),
+                (Some(i), false) => Some((i + n - 1) % n),
+            };
+            if let Some(pin) = next.and_then(|i| pins.get(i)) {
+                state.selected = Some(pin.peer);
+                // A pin out of view is brought to the centre.
+                if !map::viewport(state, area, &setup).contains(pin.at) {
+                    state.centre = pin.at;
+                }
+            }
+        }
+        MapCmd::Open => {
+            if let Some(peer) = state.selected {
+                return open_pin(model, peer);
+            }
+        }
+        MapCmd::Close => {
+            model.map = None;
+            model.map_press = None;
+            model.map_glyph_test = false;
+            model.focus = Pane::Messages;
+        }
+        MapCmd::Drawing(forward) => {
+            let n = setup.drawings.len();
+            if n > 0 {
+                let next = match forward {
+                    true => (setup.drawing + 1) % n,
+                    false => (setup.drawing + n - 1) % n,
+                };
+                return vec![UiEffect::MapDrawing(next)];
+            }
+        }
+        MapCmd::GlyphTest => model.map_glyph_test = !model.map_glyph_test,
+    }
+    Vec::new()
+}
+
+/// A pin chosen by `Enter` or a click: that peer's conversation, opened.
+fn open_pin<B: InputBuffer>(model: &mut UiModel<B>, peer: [u8; 16]) -> Vec<UiEffect> {
+    if Some(peer) == model.address {
+        model.toast(ToastKind::Info, "that pin is you".to_string());
+        return Vec::new();
+    }
+    let index = model.conversation(peer);
+    model.select(index);
+    model.map = None;
+    model.focus = Pane::Messages;
+    Vec::new()
+}
+
+/// `/`, `Ctrl-s` or a click on `/ search`: the search opens with the cursor
+/// in its field, or the cursor goes back to the open one's.
+fn open_search<B: InputBuffer + Default>(model: &mut UiModel<B>) {
+    if model.search.is_none() {
+        model.search = Some(search::Search::default());
+    }
+    model.focus = Pane::Search;
+}
+
+/// `Esc` in the field or the results: the list comes back with the focus,
+/// and the conversation keeps what it shows.
+fn close_search<B>(model: &mut UiModel<B>) {
+    model.search = None;
+    model.focus = Pane::Conversations;
+}
+
+/// Open the selected result: a conversation at its newest message, a
+/// message's conversation at that message, its block selected and the match
+/// marked in it. The search stays open, so `n` goes on from there. With an
+/// empty field the list is the plain one, and its selected conversation
+/// opens.
+fn open_result<B: InputBuffer>(model: &mut UiModel<B>) -> Vec<UiEffect> {
+    let hits = model.hits();
+    if model.query().is_none() {
+        model.focus = Pane::Messages;
+        return Vec::new();
+    }
+    let selected = model.search.as_ref().map_or(0, |s| s.selected);
+    match hits.get(selected) {
+        Some(&search::Hit::Conversation(index)) => {
+            if index != model.selected {
+                model.select(index);
+            }
+            model.focus = Pane::Messages;
+        }
+        Some(&search::Hit::Message {
+            conversation,
+            message,
+        }) => {
+            if conversation != model.selected {
+                model.select(conversation);
+            }
+            model.focus = Pane::Messages;
+            reveal(model, message);
+        }
+        Some(&search::Hit::Stored(index)) => {
+            let found = model.search.as_ref().and_then(|s| s.stored.get(index));
+            if let Some(hit) = found.cloned() {
+                return model.open_stored(&hit);
+            }
+        }
+        None => model.toast(ToastKind::Info, search::NO_MATCHES.to_string()),
+    }
+    Vec::new()
+}
+
+/// Move the results' cursor by `by` rows of results, held to the list.
+fn step_result<B: InputBuffer>(model: &mut UiModel<B>, by: isize) {
+    let count = model.hits().len();
+    if let Some(search) = model.search.as_mut() {
+        let last = count.saturating_sub(1);
+        search.selected = search.selected.saturating_add_signed(by).min(last);
+    }
+}
+
+/// `n` or `N` in the open conversation: the cursor onto the next or the
+/// previous message that matches, the view scrolled to it, round to the
+/// other end past the last.
+fn step_match<B: InputBuffer>(model: &mut UiModel<B>, forward: bool) {
+    let Some(query) = model.query() else {
+        return;
+    };
+    let stops = match model.conversations.get(model.selected) {
+        Some(conversation) => search::matching_messages(conversation, query),
+        None => Vec::new(),
+    };
+    let at = model.message_cursor;
+    let next = match forward {
+        true => stops.iter().find(|&&m| m > at).or(stops.first()),
+        false => stops.iter().rev().find(|&&m| m < at).or(stops.last()),
+    };
+    match next.copied() {
+        Some(message) => {
+            let wrapped = match forward {
+                true => message <= at,
+                false => message >= at,
+            };
+            if wrapped && stops.len() > 1 {
+                let end = if forward { "first" } else { "last" };
+                model.toast(ToastKind::Info, format!("round to the {end} match"));
+            }
+            reveal(model, message);
+        }
+        None => model.toast(ToastKind::Info, "no match in this conversation".to_string()),
+    }
+}
+
+/// The cursor onto message `index` of the open conversation, the view
+/// scrolled just far enough to show its block, its start where it is taller
+/// than the pane; back at the newest with the bottom in view, the pane
+/// follows the newest again.
+fn reveal<B: InputBuffer>(model: &mut UiModel<B>, index: usize) {
+    let last = model.messages_of_selected().len().saturating_sub(1);
+    let index = index.min(last);
+    model.message_cursor = index;
+    let laid = model.laid();
+    let rows = model.message_rows().max(1);
+    let total = laid.rows.len();
+    let bottom = total.saturating_sub(rows);
+    let mut top = model.top_of(total);
+    if let Some(span) = laid.spans.get(index) {
+        if span.end > top + rows {
+            top = span.end - rows;
+        }
+        if span.start < top {
+            top = span.start;
+        }
+    }
+    model.scroll_top = match index == last && top >= bottom {
+        true => None,
+        false => Some(top),
+    };
+}
+
+/// `y` or `Alt-w`, and the release of a drag: the selection's text, or the
+/// message under the cursor whole, onto the clipboard.
+fn copy<B: InputBuffer>(model: &mut UiModel<B>, selection: Option<Selection>) -> Vec<UiEffect> {
+    let text = match selection {
+        Some(selection) => hit::selected_text(&model.laid(), &selection),
+        None => model
+            .messages_of_selected()
+            .get(model.message_cursor)
+            .map(|m| m.body.clone())
+            .unwrap_or_default(),
+    };
+    if text.is_empty() {
+        model.toast(ToastKind::Info, "nothing to copy".to_string());
+        return Vec::new();
+    }
+    model.toast(
+        ToastKind::Info,
+        format!("copied {} chars", text.chars().count()),
+    );
+    vec![UiEffect::Copy(text)]
+}
+
+/// One mouse event (section 5, "What the mouse does").
+fn on_mouse<B: InputBuffer + Default>(model: &mut UiModel<B>, mouse: MouseEvent) -> Vec<UiEffect> {
+    if !model.mouse {
+        return Vec::new();
+    }
+    let (col, row) = (mouse.column, mouse.row);
+    match mouse.kind {
+        MouseEventKind::Moved => {
+            model.footer_hover = hit::footer_slot_at(model, col, row);
+            Vec::new()
+        }
+        MouseEventKind::Down(MouseButton::Left) => click(model, col, row),
+        MouseEventKind::Drag(MouseButton::Left) => {
+            drag(model, col, row);
+            Vec::new()
+        }
+        MouseEventKind::Up(MouseButton::Left) => release(model, col, row),
+        MouseEventKind::ScrollDown => wheel(model, col, row, true),
+        MouseEventKind::ScrollUp => wheel(model, col, row, false),
+        MouseEventKind::ScrollRight => tilt(model, col, row, true),
+        MouseEventKind::ScrollLeft => tilt(model, col, row, false),
+        _ => Vec::new(),
+    }
+}
+
+/// The left button went down at a cell.
+fn click<B: InputBuffer + Default>(model: &mut UiModel<B>, col: u16, row: u16) -> Vec<UiEffect> {
+    use hit::Target;
+    model.selection = None;
+    model.press = None;
+    model.map_press = None;
+    let target = hit::target_at(model, col, row);
+    match target {
+        Target::Nothing | Target::InsideOverlay => {}
+        Target::OutsideOverlay => {
+            model.help = false;
+            model.palette = None;
+            model.detail = None;
+        }
+        Target::Footer(act) => return footer_click(model, act),
+        // On the map a press is a click or a drag, which the release tells
+        // apart: a pin opens only on a release where it went down.
+        Target::Pane(Pane::Map) | Target::Pin(_) => {
+            model.focus = Pane::Map;
+            if let Some(state) = model.map {
+                let pin = match target {
+                    Target::Pin(peer) => Some(peer),
+                    _ => None,
+                };
+                model.map_press = Some(map::MapPress::new((col, row), state.centre, pin));
+            }
+        }
+        Target::Pane(pane) => model.focus = pane,
+        Target::Conversation(index) => {
+            model.focus = Pane::Conversations;
+            if index != model.selected {
+                model.select(index);
+            }
+        }
+        Target::Badge(index) => open_at_new(model, index),
+        Target::SearchHint | Target::SearchField => open_search(model),
+        Target::Result(index) => {
+            if let Some(search) = model.search.as_mut() {
+                search.selected = index;
+            }
+            open_result(model);
+        }
+        Target::Block { message, .. } => {
+            model.focus = Pane::Messages;
+            point_at(model, message);
+            model.press = Some(Press {
+                target,
+                moved: false,
+            });
+        }
+        Target::Mailbox => return run(model, PaletteCommand::Fetch),
+        Target::Position => peer_on_map(model),
+        Target::Compose { at } => {
+            model.focus = Pane::Compose;
+            model.compose.set_cursor(at);
+        }
+        Target::Send => {
+            model.focus = Pane::Compose;
+            return run(model, PaletteCommand::Send);
+        }
+    }
+    Vec::new()
+}
+
+/// What a footer button runs when clicked: its row's action, the same the
+/// key runs.
+fn footer_click<B: InputBuffer + Default>(
+    model: &mut UiModel<B>,
+    button: FooterAct,
+) -> Vec<UiEffect> {
+    match button {
+        FooterAct::Row(Some(action)) => act(
+            model,
+            action,
+            KeyEvent::new(KeyCode::Null, KeyModifiers::NONE),
+        ),
+        FooterAct::Row(None) => Vec::new(),
+        FooterAct::PaletteRun => {
+            overlay_key(model, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        }
+        FooterAct::PaletteClose => {
+            model.palette = None;
+            Vec::new()
+        }
+    }
+}
+
+/// The badge: the conversation opened at its `new` rule, the first unread
+/// message under the cursor and the rule at the top of the view.
+fn open_at_new<B: InputBuffer>(model: &mut UiModel<B>, index: usize) {
+    let rule = model.conversations.get(index).and_then(|c| c.new_rule);
+    model.select(index);
+    model.focus = Pane::Messages;
+    let Some(rule) = rule else {
+        return;
+    };
+    let laid = model.laid();
+    let bottom = laid.rows.len().saturating_sub(model.message_rows());
+    // The span's first row that is drawn: the rule, not the blank above it.
+    let top = laid.spans.get(rule.at).map_or(bottom, |span| {
+        (span.start..span.end)
+            .find(|&row| !laid.rows[row].cells.is_empty())
+            .unwrap_or(span.start)
+    });
+    model.message_cursor = rule.at;
+    model.scroll_top = (top < bottom).then_some(top);
+}
+
+/// The cursor onto message `index`, the view where it is: a click selects
+/// what the reader sees, it does not scroll to it.
+fn point_at<B: InputBuffer>(model: &mut UiModel<B>, index: usize) {
+    let total = model.laid().rows.len();
+    let bottom = total.saturating_sub(model.message_rows());
+    let top = model.top_of(total);
+    let last = model.messages_of_selected().len().saturating_sub(1);
+    model.message_cursor = index;
+    model.scroll_top = match index == last && top >= bottom {
+        true => None,
+        false => Some(top),
+    };
+}
+
+/// The pointer moved with the left button held: a press on the map moves
+/// it with the pointer, a press on the conversation selects from where it
+/// went down to here.
+fn drag<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16) {
+    if model.map_press.is_some() {
+        map_drag(model, col, row);
+        return;
+    }
+    let Some(press) = model.press.as_mut() else {
+        return;
+    };
+    let hit::Target::Block { cell: anchor, .. } = press.target else {
+        return;
+    };
+    let Some(head) = hit::pane_cell(model, col, row) else {
+        return;
+    };
+    if head != anchor {
+        if let Some(press) = model.press.as_mut() {
+            press.moved = true;
+        }
+    }
+    if model.press.as_ref().is_some_and(|p| p.moved) {
+        model.selection = Some(Selection { anchor, head });
+    }
+}
+
+/// The map follows the pointer: the view at the press, moved by how far
+/// the pointer is from where the button went down. Nothing moves until the
+/// press is a drag ([`map::DRAG_CELLS`]).
+fn map_drag<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16) {
+    let setup = model.map_setup.clone();
+    let area = model.map_area();
+    let (Some(press), Some(state)) = (model.map_press.as_mut(), model.map.as_mut()) else {
+        return;
+    };
+    press.reach(col, row);
+    state.centre = press.centre_at(col, row, state, &setup);
+    map::settle(state, area, &setup);
+}
+
+/// The left button came up: on the map a drag ends where the pointer is
+/// and a click on a pin opens it; in the conversation a drag copies what
+/// it selected, a click on a mark opens the detail view, one on a link
+/// follows it and one on a position report opens the map at its fix.
+fn release<B: InputBuffer + Default>(model: &mut UiModel<B>, col: u16, row: u16) -> Vec<UiEffect> {
+    if model.map_press.is_some() {
+        // A terminal may report the release in a cell no motion reached.
+        map_drag(model, col, row);
+        let press = model.map_press.take();
+        return match press {
+            Some(press) if !press.dragging && model.map.is_some() => match press.pin {
+                Some(peer) => open_pin(model, peer),
+                None => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+    }
+    let Some(press) = model.press.take() else {
+        return Vec::new();
+    };
+    let hit::Target::Block {
+        message,
+        mark,
+        link,
+        ..
+    } = press.target
+    else {
+        return Vec::new();
+    };
+    if press.moved {
+        // The selection stays drawn, and `y` copies it again.
+        let selection = model.selection;
+        return copy(model, selection);
+    }
+    if mark {
+        model.detail = Some((model.selected, message));
+        model.detail_scroll = 0;
+        return Vec::new();
+    }
+    if let Some(target) = link.and_then(|link| model.laid().links.get(link).cloned()) {
+        return follow(model, &target);
+    }
+    // A click on a message with a position opens the map at its fix, as
+    // `Enter`.
+    if let Some(fix) = model.message_fix(model.selected, message) {
+        open_map_at(model, &fix);
+    }
+    Vec::new()
+}
+
+/// A link in a body, followed as lnomad follows one ([`classify_link`]): a
+/// web or mail URL goes to the system's handler, an `lxmf@` address opens
+/// its conversation for writing, a NomadNet page is copied for a browser.
+fn follow<B: InputBuffer + Default>(model: &mut UiModel<B>, target: &str) -> Vec<UiEffect> {
+    match classify_link(target) {
+        LinkKind::External(url) => {
+            model.toast(ToastKind::Info, format!("opening {url}"));
+            vec![UiEffect::Open(url)]
+        }
+        LinkKind::Lxmf(hash) => match crate::address::parse(&hash) {
+            Ok(peer) => {
+                let index = model.conversation(peer);
+                model.select(index);
+                model.focus = Pane::Compose;
+                model.toast(
+                    ToastKind::Info,
+                    format!("writing to {}", model.names.label(&peer)),
+                );
+                Vec::new()
+            }
+            Err(_) => Vec::new(),
+        },
+        LinkKind::Rns => {
+            model.toast(
+                ToastKind::Info,
+                "page link copied: open it in lnomad".to_string(),
+            );
+            vec![UiEffect::Copy(target.to_string())]
+        }
+        LinkKind::Unsafe(scheme) => {
+            model.toast(ToastKind::Error, format!("won't open {scheme}: link"));
+            Vec::new()
+        }
+    }
+}
+
+/// The wheel scrolls the pane under the pointer, whichever has the focus:
+/// the list a conversation a notch, the conversation [`WHEEL_ROWS`] rows
+/// without moving its cursor, the compose box a line of the body.
+fn wheel<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16, down: bool) -> Vec<UiEffect> {
+    // Over the help or a detail view the wheel scrolls it, wherever the
+    // pointer is: the help leaves no outside, and a detail view is the only
+    // thing to scroll while it is up.
+    if model.palette.is_none() && (model.help || model.detail.is_some()) {
+        let cmd = match down {
+            true => ScrollCmd::LineDown,
+            false => ScrollCmd::LineUp,
+        };
+        for _ in 0..WHEEL_ROWS {
+            scroll_overlay(model, cmd);
+        }
+        return Vec::new();
+    }
+    if model.help || model.palette.is_some() || model.detail.is_some() {
+        return Vec::new();
+    }
+    match hit::pane_at(model, col, row) {
+        Some(Pane::Conversations | Pane::Search) => scroll_list(
+            model,
+            match down {
+                true => ScrollCmd::LineDown,
+                false => ScrollCmd::LineUp,
+            },
+        ),
+        Some(Pane::Messages) => {
+            let total = model.laid().rows.len();
+            let bottom = total.saturating_sub(model.message_rows());
+            let top = model.top_of(total);
+            let top = match down {
+                true => (top + WHEEL_ROWS).min(bottom),
+                false => top.saturating_sub(WHEEL_ROWS),
+            };
+            model.scroll_top = (top < bottom).then_some(top);
+            return model.earlier_wanted();
+        }
+        Some(Pane::Compose) => {
+            let code = match down {
+                true => KeyCode::Down,
+                false => KeyCode::Up,
+            };
+            model.compose.edit(&KeyEvent::new(code, KeyModifiers::NONE));
+        }
+        // The wheel zooms the map about the pointer, toward the reader as
+        // it rolls back.
+        Some(Pane::Map) => {
+            let (setup, area) = (model.map_setup.clone(), model.map_area());
+            if let Some(state) = model.map.as_mut() {
+                let zoom = match down {
+                    true => state.zoom.saturating_sub(1).max(setup.zooms.0),
+                    false => state.zoom.saturating_add(1).min(setup.zooms.1),
+                };
+                map::zoom_at(state, area, &setup, col, row, zoom);
+            }
+        }
+        None => {}
+    }
+    Vec::new()
+}
+
+/// The wheel tilted, or a touch screen's sideways swipe sent as one: over
+/// the map it pans an eighth of the view, as `h` and `l` do. Nothing else
+/// scrolls sideways, and an overlay takes it for nothing.
+fn tilt<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16, right: bool) -> Vec<UiEffect> {
+    if model.help || model.palette.is_some() || model.detail.is_some() {
+        return Vec::new();
+    }
+    if hit::pane_at(model, col, row) == Some(Pane::Map) {
+        let (setup, area) = (model.map_setup.clone(), model.map_area());
+        if let Some(state) = model.map.as_mut() {
+            pan_map(state, area, &setup, if right { 1 } else { -1 }, 0);
+        }
+    }
+    Vec::new()
+}
+
+/// `Ctrl-c` quits nowhere: outside compose it says what does.
+fn quit_hint<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
+    let quit = keys::row_named("quit")
+        .and_then(|row| {
+            row.chords()
+                .find(|c| c.in_force(keys::OVERLAY, Ctx::NONE))
+                .map(|c| c.label())
+        })
+        .unwrap_or("q");
+    model.toast(ToastKind::Info, format!("{quit} quits"));
+    Vec::new()
+}
+
+/// Move the cursor of the conversation list or the messages.
+fn scroll<B: InputBuffer>(model: &mut UiModel<B>, pane: Pane, cmd: ScrollCmd) {
+    match pane {
+        Pane::Conversations | Pane::Search => scroll_list(model, cmd),
+        Pane::Messages | Pane::Compose => scroll_messages(model, cmd),
+        Pane::Map => {}
+    }
+}
+
+/// The results of an open search move by result, a page being the results
+/// a list pane shows.
+fn scroll_results<B: InputBuffer>(model: &mut UiModel<B>, cmd: ScrollCmd) {
+    let count = model.hits().len() as isize;
+    let page = layout::entries_shown(model.sizes().list.1.saturating_sub(search::FIELD_ROWS)).max(1)
+        as isize;
+    let by = match cmd {
+        ScrollCmd::LineDown => 1,
+        ScrollCmd::LineUp => -1,
+        ScrollCmd::PageDown => page,
+        ScrollCmd::PageUp => -page,
+        ScrollCmd::HalfPageDown => (page / 2).max(1),
+        ScrollCmd::HalfPageUp => -(page / 2).max(1),
+        ScrollCmd::Top => -count,
+        ScrollCmd::Bottom => count,
+    };
+    step_result(model, by);
+}
+
+/// The list moves in its own order, a page being the conversations it
+/// shows.
+fn scroll_list<B: InputBuffer>(model: &mut UiModel<B>, cmd: ScrollCmd) {
+    if model.query().is_some() {
+        return scroll_results(model, cmd);
+    }
+    let order = model.order();
+    let Some(at) = order.iter().position(|&i| i == model.selected) else {
+        return;
+    };
+    let last = order.len() - 1;
+    let page = layout::entries_shown(model.sizes().list.1).max(1);
+    let to = match cmd {
+        ScrollCmd::LineDown => at + 1,
+        ScrollCmd::LineUp => at.saturating_sub(1),
+        ScrollCmd::PageDown => at + page,
+        ScrollCmd::PageUp => at.saturating_sub(page),
+        ScrollCmd::HalfPageDown => at + (page / 2).max(1),
+        ScrollCmd::HalfPageUp => at.saturating_sub((page / 2).max(1)),
+        ScrollCmd::Top => 0,
+        ScrollCmd::Bottom => last,
+    }
+    .min(last);
+    if order[to] != model.selected {
+        model.select(order[to]);
+    }
+}
+
+/// The cursor moves a message at a time, a page a pane's height of rows, and
+/// the view follows it just far enough to show its block. Back on the newest
+/// message with the bottom in view, the pane follows the newest again.
+fn scroll_messages<B: InputBuffer>(model: &mut UiModel<B>, cmd: ScrollCmd) {
+    let count = model.messages_of_selected().len();
+    if count == 0 {
+        return;
+    }
+    let laid = model.laid();
+    let rows = model.message_rows().max(1);
+    let total = laid.rows.len();
+    let bottom = total.saturating_sub(rows);
+    let mut top = model.top_of(total);
+    let last = count - 1;
+    let at = model.message_cursor.min(last);
+    let step = match cmd {
+        ScrollCmd::HalfPageDown | ScrollCmd::HalfPageUp => (rows / 2).max(1),
+        _ => rows,
+    };
+    let cursor = match cmd {
+        ScrollCmd::LineDown => (at + 1).min(last),
+        ScrollCmd::LineUp => at.saturating_sub(1),
+        ScrollCmd::Top => 0,
+        ScrollCmd::Bottom => last,
+        ScrollCmd::PageDown | ScrollCmd::HalfPageDown => {
+            top = (top + step).min(bottom);
+            // The lowest block that starts in the new view.
+            laid.spans
+                .iter()
+                .rposition(|span| span.start < top + rows)
+                .unwrap_or(at)
+                .max(at)
+        }
+        ScrollCmd::PageUp | ScrollCmd::HalfPageUp => {
+            top = top.saturating_sub(step);
+            // The highest block that ends in the new view.
+            laid.spans
+                .iter()
+                .position(|span| span.end > top)
+                .unwrap_or(0)
+                .min(at)
+        }
+    };
+    // A report folded into the next one has no rows: the cursor goes on
+    // past it the way it moved, or back where nothing is drawn that way.
+    let forward = !matches!(
+        cmd,
+        ScrollCmd::LineUp | ScrollCmd::PageUp | ScrollCmd::HalfPageUp | ScrollCmd::Bottom
+    );
+    let cursor = drawn_near(&laid.spans, cursor, forward);
+    if let Some(span) = laid.spans.get(cursor) {
+        if span.end > top + rows {
+            top = span.end - rows;
+        }
+        // A block taller than the pane shows its start.
+        if span.start < top {
+            top = span.start;
+        }
+    }
+    model.message_cursor = cursor;
+    // The newest drawn message: reactions after it have no rows.
+    let newest = laid.spans[cursor.min(laid.spans.len())..]
+        .iter()
+        .skip(1)
+        .all(|span| span.start == span.end);
+    model.scroll_top = match (cursor == last || newest) && top >= bottom {
+        true => None,
+        false => Some(top),
+    };
+}
+
+/// The message nearest `at` that has rows on screen, looking `forward`
+/// first and the other way after.
+fn drawn_near(spans: &[layout::Span], at: usize, forward: bool) -> usize {
+    let drawn = |i: &usize| spans.get(*i).is_some_and(|s| s.start < s.end);
+    if spans.get(at).is_none() || drawn(&at) {
+        return at;
+    }
+    let after = (at + 1..spans.len()).find(drawn);
+    let before = (0..at).rev().find(drawn);
+    match forward {
+        true => after.or(before),
+        false => before.or(after),
+    }
+    .unwrap_or(at)
+}
+
+/// Select the conversation `step` away in the list's order, or the next one
+/// with unread messages that way.
+fn step_conversation<B>(model: &mut UiModel<B>, forward: bool, unread_only: bool) {
+    let order = model.order();
+    let count = order.len();
+    let Some(at) = order.iter().position(|&i| i == model.selected) else {
+        return;
+    };
+    if !unread_only {
+        let to = match forward {
+            true => (at + 1).min(count - 1),
+            false => at.saturating_sub(1),
+        };
+        if order[to] != model.selected {
+            model.select(order[to]);
+        }
+        return;
+    }
+    let found = (1..count)
+        .map(|step| match forward {
+            true => order[(at + step) % count],
+            false => order[(at + count - step) % count],
+        })
+        .find(|&i| model.conversations[i].unread > 0);
+    match found {
+        Some(index) => model.select(index),
+        None => model.toast(ToastKind::Info, "no unread conversation".to_string()),
+    }
+}
+
+/// The words a leg is said in.
+fn leg_words(leg: Leg) -> &'static str {
+    match leg {
+        Leg::Direct => "direct",
+        Leg::Propagated => "via propagation node",
+    }
+}
+
+/// What a message's ledger says when it reaches a state.
+fn ledger_words(state: DeliveryState) -> &'static str {
+    match state {
+        DeliveryState::Delivered => "delivered: proof received",
+        DeliveryState::Rejected => "rejected by the peer",
+        DeliveryState::Failed => "failed",
+        other => state_words(other),
+    }
+}
+
+/// The words a delivery state is said in.
+fn state_words(state: DeliveryState) -> &'static str {
+    match state {
+        DeliveryState::Queued => "queued",
+        DeliveryState::Stamping => "stamping",
+        DeliveryState::InFlight => "in flight",
+        DeliveryState::Sent => "sent, no proof yet",
+        DeliveryState::InMailbox => "waiting at a propagation node",
+        DeliveryState::Delivered => "delivered",
+        DeliveryState::Rejected => "rejected",
+        DeliveryState::Failed => "not sent",
+    }
+}
+
+/// `Enter` on a message: its detail view, with what this device saw
+/// happen to it (loquax-keys-and-layout.md, section 7, slice 2).
+fn details<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
+    if model
+        .messages_of_selected()
+        .get(model.message_cursor)
+        .is_none()
+    {
+        model.toast(ToastKind::Info, "no message here".to_string());
+        return Vec::new();
+    }
+    model.detail = Some((model.selected, model.message_cursor));
+    model.detail_scroll = 0;
+    Vec::new()
+}
+
+/// Run one palette command.
+fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand) -> Vec<UiEffect> {
+    match command {
+        PaletteCommand::Send => send(model),
+        PaletteCommand::Fetch => {
+            if model.fetching {
+                model.toast(ToastKind::Info, "a fetch is already running".to_string());
+                return Vec::new();
+            }
+            let now = model.elapsed_ms;
+            if let Some(sync) = model.sync.as_mut() {
+                sync.on(SyncEvent::Key, now);
+                sync.begin(now);
+            }
+            model.fetching = true;
+            model.fetch_reason = Some(Reason::Key);
+            model.fetch_since_ms = now;
+            model.toast(ToastKind::Info, "checking the propagation node".to_string());
+            vec![UiEffect::Fetch]
+        }
+        PaletteCommand::Quit => {
+            model.quit = true;
+            vec![UiEffect::Quit]
+        }
+        PaletteCommand::Help => {
+            model.help = true;
+            model.help_scroll = 0;
+            Vec::new()
+        }
+        PaletteCommand::FocusConversations => focus(model, Pane::Conversations),
+        PaletteCommand::FocusMessages => focus(model, Pane::Messages),
+        PaletteCommand::FocusCompose => focus(model, Pane::Compose),
+        PaletteCommand::NextConversation => {
+            step_conversation(model, true, false);
+            Vec::new()
+        }
+        PaletteCommand::PreviousConversation => {
+            step_conversation(model, false, false);
+            Vec::new()
+        }
+        PaletteCommand::NextUnread => {
+            step_conversation(model, true, true);
+            Vec::new()
+        }
+        PaletteCommand::PreviousUnread => {
+            step_conversation(model, false, true);
+            Vec::new()
+        }
+        PaletteCommand::Details => details(model),
+        PaletteCommand::Redraw => vec![UiEffect::Redraw],
+        PaletteCommand::SendOnEnter => {
+            model.send_on_enter = !model.send_on_enter;
+            let hint = keys::compose_hint(model.ctx());
+            model.toast(ToastKind::Info, hint);
+            Vec::new()
+        }
+        PaletteCommand::Mouse => {
+            model.mouse = !model.mouse;
+            model.footer_hover = None;
+            model.press = None;
+            model.selection = None;
+            let text = match model.mouse {
+                true => "mouse on: click, wheel and drag",
+                false => "mouse off: the terminal selects text",
+            };
+            model.toast(ToastKind::Info, text.to_string());
+            vec![UiEffect::Mouse(model.mouse)]
+        }
+        PaletteCommand::Search => {
+            open_search(model);
+            Vec::new()
+        }
+        PaletteCommand::DeleteMessage => {
+            model.ask_delete_message();
+            Vec::new()
+        }
+        PaletteCommand::DeleteConversation => {
+            model.ask_delete_conversation();
+            Vec::new()
+        }
+        PaletteCommand::Pin => {
+            model.toggle_pin();
+            Vec::new()
+        }
+        PaletteCommand::LoadMapArea => {
+            load_map_area(model);
+            Vec::new()
+        }
+        PaletteCommand::Map => {
+            open_map(model);
+            Vec::new()
+        }
+        PaletteCommand::MapDrawing => {
+            if model.map_setup.drawings.is_empty() {
+                model.toast(ToastKind::Info, "the map is drawn one way here".to_string());
+            } else {
+                model.palette = Some(Palette {
+                    selected: model.map_setup.drawing,
+                    drawings: true,
+                    ..Palette::default()
+                });
+            }
+            Vec::new()
+        }
+        PaletteCommand::Rename => {
+            model.ask_rename();
+            Vec::new()
+        }
+        PaletteCommand::React => {
+            model.ask_react();
+            Vec::new()
+        }
+        PaletteCommand::Block => model.set_blocked(true),
+        PaletteCommand::Unblock => model.set_blocked(false),
+        PaletteCommand::Blocked => {
+            model.toggle_blocked_view();
+            Vec::new()
+        }
+        PaletteCommand::Import => {
+            model.toast(
+                ToastKind::Info,
+                "importing from the other messengers' default places".to_string(),
+            );
+            vec![UiEffect::Import]
+        }
+        PaletteCommand::Theme => {
+            model.theme = model.theme.toggle();
+            let name = match model.theme {
+                Theme::Dark => "dark",
+                Theme::Light => "light",
+            };
+            model.toast(ToastKind::Info, format!("theme {name}"));
+            Vec::new()
+        }
+    }
+}
+
+fn focus<B>(model: &mut UiModel<B>, pane: Pane) -> Vec<UiEffect> {
+    model.focus = pane;
+    Vec::new()
+}
+
+fn send<B: InputBuffer + Default>(model: &mut UiModel<B>) -> Vec<UiEffect> {
+    if model.compose.value().trim().is_empty() {
+        return Vec::new();
+    }
+    if model.conversations.get(model.selected).is_none() {
+        model.toast(
+            ToastKind::Error,
+            "no conversation to send to: start loquax tui --to <address>".to_string(),
+        );
+        return Vec::new();
+    }
+    let body = model.compose.take();
+    send_body(model, body)
+}
+
+/// Send `body` in the open conversation: the compose pane's text, or a
+/// frontend's ([`UiEvent::Write`]). Blank text sends nothing.
+fn send_body<B>(model: &mut UiModel<B>, body: String) -> Vec<UiEffect> {
+    if body.trim().is_empty() {
+        return Vec::new();
+    }
+    let Some(conversation) = model.conversations.get_mut(model.selected) else {
+        return Vec::new();
+    };
+    conversation
+        .messages
+        .push(Message::ours(body.clone(), model.now));
+    let to = conversation.peer;
+    let index = conversation.messages.len() - 1;
+    let activity = model.bump();
+    model.conversations[model.selected].activity = activity;
+    model.conversations[model.selected].messages[index].activity = activity;
+    model.touch(model.selected, index);
+    // Signal's rule: what you send is where the view goes.
+    model.message_cursor = index;
+    model.scroll_top = None;
+    model.sending.push_back((model.selected, index));
+    let now = model.elapsed_ms;
+    if let Some(sync) = model.sync.as_mut() {
+        sync.on(SyncEvent::Sent, now);
+    }
+    vec![UiEffect::Send {
+        to,
+        body,
+        fields: Vec::new(),
+    }]
+}
+
+/// The glyph-table state a router state is shown as.
+///
+/// | router state | shown as |
+/// |---|---|
+/// | `Generating`, `Outbound` | `Queued` ○ |
+/// | `Sending` | `InFlight` (spinner) |
+/// | `Sent` | `Sent` ◇ |
+/// | `AwaitingCollection` | `InMailbox` ⌂ |
+/// | `Delivered` | `Delivered` ✓ |
+/// | `Rejected` | `Rejected` ✗ |
+/// | `Failed`, `Cancelled` | `Failed` ✗ (dim) |
+///
+/// `Stamping` has no router state: the engine mines off the core and says
+/// nothing until the message moves on, so slice one never draws it.
+pub fn delivery_of(state: MessageState) -> DeliveryState {
+    match state {
+        MessageState::Generating | MessageState::Outbound => DeliveryState::Queued,
+        MessageState::Sending => DeliveryState::InFlight,
+        MessageState::Sent => DeliveryState::Sent,
+        MessageState::AwaitingCollection => DeliveryState::InMailbox,
+        MessageState::Delivered => DeliveryState::Delivered,
+        MessageState::Rejected => DeliveryState::Rejected,
+        MessageState::Failed | MessageState::Cancelled => DeliveryState::Failed,
+    }
+}
+
+fn gives_up(state: DeliveryState) -> bool {
+    matches!(state, DeliveryState::Rejected | DeliveryState::Failed)
+}
+
+fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
+    match event {
+        OutboxEvent::Ready { address } => {
+            model.address = Some(address);
+            return schedule(model, SyncEvent::Start);
+        }
+        // Free evidence that the mailbox is reachable now.
+        OutboxEvent::NodeAnnounced { destination } => {
+            if model.mailbox.node == Some(destination) {
+                return schedule(model, SyncEvent::Announce);
+            }
+        }
+        OutboxEvent::Broken { detail } => {
+            model.toast(ToastKind::Error, format!("engine: {detail}"));
+            return vec![UiEffect::Notice(format!("the message engine: {detail}"))];
+        }
+        // The router named the message the running send handed it: the
+        // oldest unfinished one, because the shell runs sends in order. A
+        // fallback leg names it again with the new id.
+        OutboxEvent::Queued { message_id } => {
+            let now = model.now;
+            if let Some(&(c, m)) = model.sending.front() {
+                if let Some(message) = model.message_mut(c, m) {
+                    message.id = Some(message_id);
+                    message.delivery = Some(DeliveryState::Queued);
+                    let id = to_hex(&message_id[..4]);
+                    message.note(now, &format!("queued by the router as {id}"));
+                }
+            }
+        }
+        OutboxEvent::State { message_id, state } => apply_state(model, message_id, state),
+        OutboxEvent::HomeSent {
+            message_id,
+            destination,
+            body,
+            fields,
+        } => home_sent(model, message_id, destination, body, fields),
+        OutboxEvent::HomePetname {
+            destination,
+            petname,
+        } => return model.home_petname(destination, petname),
+        OutboxEvent::HomeMarked { mark } => match mark.flag {
+            crate::home::wire::MarkFlag::Read => {
+                for id in &mark.ids {
+                    model.read_through(id);
+                }
+            }
+            crate::home::wire::MarkFlag::Deleted => {
+                for id in &mark.ids {
+                    model.forget_by_id(id);
+                }
+            }
+        },
+        OutboxEvent::Left {
+            message_id,
+            last: Some(state),
+        } => apply_state(model, message_id, state),
+        // Our own announce, echoed back, names nobody.
+        OutboxEvent::Announced { destination, .. } if model.address == Some(destination) => {}
+        OutboxEvent::Announced { destination, name } => {
+            // Said once, in the conversation, where the reader has one with
+            // the peer: a peer nobody wrote to has nothing to compare with.
+            if let Heard::Changed { was, now } = model.names.heard(destination, name.as_deref()) {
+                if let Some(conversation) = model
+                    .conversations
+                    .iter_mut()
+                    .find(|c| c.peer == destination)
+                {
+                    conversation.notes.push(Note {
+                        before: conversation.messages.len(),
+                        text: format!("was {was}, now announces {now}"),
+                    });
+                }
+            }
+        }
+        OutboxEvent::Received {
+            message_id,
+            source,
+            body,
+            fields,
+            verified,
+            ..
+        } => {
+            let blocked = model.names.trust(&source) == Trust::Blocked;
+            let shown = model.shows(&source);
+            let index = model.conversation(source);
+            // A message to a screen with no conversation open opens its
+            // own, where the list shows it.
+            if shown && !model.list_apart && model.conversations.get(model.selected).is_none() {
+                model.selected = index;
+            }
+            let open = index == model.selected && shown;
+            let follow = model.scroll_top.is_none();
+            if model.conversations[index]
+                .messages
+                .iter()
+                .any(|m| !m.outbound && m.id == Some(message_id))
+            {
+                return Vec::new();
+            }
+            let at = model.now;
+            let activity = model.bump();
+            let conversation = &mut model.conversations[index];
+            conversation.activity = activity;
+            conversation.messages.push(Message {
+                outbound: false,
+                size: body.len(),
+                body: String::from_utf8_lossy(&body).into_owned(),
+                id: Some(message_id),
+                delivery: None,
+                signature: match verified {
+                    true => Signature::Verified,
+                    false => Signature::Unverified,
+                },
+                leg: None,
+                unproven: false,
+                at,
+                ledger: vec![LedgerEntry::new(
+                    at,
+                    match verified {
+                        true => "received, signature verified",
+                        false => "received, signature NOT verified",
+                    },
+                )],
+                last_leg: None,
+                activity,
+                fields,
+            });
+            let peer = conversation.peer;
+            let reaction = conversation
+                .messages
+                .last()
+                .filter(|m| m.is_reaction())
+                .and_then(Message::reaction);
+            model.changed.insert((peer, activity));
+            let effects = take_telemetry(model, index, message_id);
+            // A reaction: kept and stored, drawn under its target, and the
+            // reader told; it is no unread message and moves no cursor.
+            if let Some((_, content)) = reaction {
+                if !blocked {
+                    let from = model.names.label(&source);
+                    model.toast(ToastKind::Info, format!("{from} reacted {content}"));
+                }
+                return effects;
+            }
+            // Blocked: kept and stored, and nothing more: no unread, no
+            // `new` rule, no toast. Its position is kept too; the map leaves
+            // it out.
+            if blocked {
+                if open && follow {
+                    model.message_cursor = model.conversations[index].messages.len() - 1;
+                }
+                return effects;
+            }
+            if open && model.home_client {
+                // Read where it arrived, so read on the home's other devices.
+                model.mark_out(crate::home::wire::MarkFlag::Read, vec![message_id]);
+            }
+            if !open {
+                model.changed_peers.insert(peer);
+                let conversation = &mut model.conversations[index];
+                conversation.unread += 1;
+                conversation.mark_new();
+            } else if follow {
+                let conversation = &mut model.conversations[index];
+                // A reader at the newest message stays at the newest.
+                model.message_cursor = conversation.messages.len() - 1;
+            } else {
+                // One reading earlier messages keeps the view, and the rule
+                // says where the new ones begin.
+                model.conversations[index].mark_new();
+            }
+            let from = model.names.label(&source);
+            let report = model.conversations[index]
+                .messages
+                .last()
+                .is_some_and(Message::is_report);
+            let what = if report { "position" } else { "message" };
+            model.toast(ToastKind::Info, format!("{what} from {from}"));
+            return effects;
+        }
+        OutboxEvent::Verified {
+            message_id,
+            source,
+            valid,
+        } => apply_verdict(model, message_id, source, valid),
+        _ => {}
+    }
+    Vec::new()
+}
+
+/// A held message's signature, checked once its sender's key arrived: the
+/// block changes in place and the ledger says when. Only the messages the
+/// screen holds are here; the shell writes the verdict to the store for the
+/// rest.
+fn apply_verdict<B>(model: &mut UiModel<B>, message_id: [u8; 32], source: [u8; 16], valid: bool) {
+    let now = model.now;
+    let Some(conversation) = model.conversations.iter_mut().find(|c| c.peer == source) else {
+        return;
+    };
+    let peer = conversation.peer;
+    for message in &mut conversation.messages {
+        if message.outbound
+            || message.id != Some(message_id)
+            || message.signature != Signature::Unverified
+        {
+            continue;
+        }
+        let (signature, line) = match valid {
+            true => (
+                Signature::Verified,
+                "signature verified, once the sender's key arrived",
+            ),
+            false => (
+                Signature::Invalid,
+                "signature INVALID against the sender's key",
+            ),
+        };
+        message.signature = signature;
+        message.note(now, line);
+        model.changed.insert((peer, message.activity));
+    }
+    if !valid {
+        let from = model.names.label(&source);
+        model.toast(
+            ToastKind::Error,
+            format!("invalid signature on a message from {from}"),
+        );
+    }
+}
+
+/// The telemetry in the newest message of conversation `index`, just
+/// received: each position into the peer's latest where it is newer, and
+/// into the store; each blob that did not decode named in `tui.log`, the
+/// bytes kept with the message.
+fn take_telemetry<B>(model: &mut UiModel<B>, index: usize, message_id: [u8; 32]) -> Vec<UiEffect> {
+    let Some(conversation) = model.conversations.get(index) else {
+        return Vec::new();
+    };
+    let Some(message) = conversation.messages.last() else {
+        return Vec::new();
+    };
+    if !telemetry::has_telemetry(&message.fields) {
+        return Vec::new();
+    }
+    let source = conversation.peer;
+    let key = message.activity;
+    let read = telemetry::read(source, &message.fields, model.now.map(|now| now.unix_secs));
+    let mut effects = Vec::new();
+    for unreadable in &read.unreadable {
+        effects.push(UiEffect::Log(telemetry::unreadable_line(
+            &source,
+            &message_id,
+            unreadable,
+        )));
+    }
+    for mut fix in read.fixes {
+        fix.message = Some(key);
+        model.take_fix(fix);
+    }
+    effects
+}
+
+/// The fix a message from `peer` carries, the one its position line names
+/// ([`telemetry::shown_fix`]): a report's, and a text's that came with a
+/// telemetry field. `None` for one of ours, which is our position and not
+/// the peer's, and for a message without a readable position.
+pub fn message_fix(peer: [u8; 16], message: &Message) -> Option<Fix> {
+    if message.outbound || !telemetry::has_telemetry(&message.fields) {
+        return None;
+    }
+    let received = message.at.map(|at| at.unix_secs);
+    let read = telemetry::read(peer, &message.fields, received);
+    telemetry::shown_fix(&read).cloned()
+}
+
+impl<B> UiModel<B> {
+    /// The map's pins in `Tab` order: every peer with a position, our own
+    /// named `you`.
+    pub fn map_pins(&self) -> Vec<map::MapPin> {
+        let shown: BTreeMap<[u8; 16], Fix> = self
+            .positions
+            .iter()
+            .filter(|(peer, _)| {
+                self.names.trust(peer) != Trust::Blocked || self.address == Some(**peer)
+            })
+            .map(|(peer, fix)| (*peer, fix.clone()))
+            .collect();
+        map::pins_of(
+            &shown,
+            |peer| self.names.label(peer),
+            self.address,
+            self.now.map(|now| now.unix_secs),
+        )
+    }
+
+    /// The fix message `m` of conversation `c` carries ([`message_fix`]).
+    pub fn message_fix(&self, c: usize, m: usize) -> Option<Fix> {
+        let conversation = self.conversations.get(c)?;
+        message_fix(conversation.peer, conversation.messages.get(m)?)
+    }
+
+    /// The cells the map's picture covers.
+    pub fn map_area(&self) -> Rect
+    where
+        B: InputBuffer,
+    {
+        map::picture_area(Screen::of(self.screen.0, self.screen.1, self.compose_rows()).messages)
+    }
+
+    /// The map is being dragged: the shell draws it at its tick, not at
+    /// every motion the terminal reports.
+    pub fn map_dragging(&self) -> bool {
+        self.map.is_some() && self.map_press.is_some_and(|p| p.dragging)
+    }
+
+    /// The open map as drawn: its view and the pins in it.
+    pub fn map_view(&self) -> Option<map::MapView>
+    where
+        B: InputBuffer,
+    {
+        let state = self.map.as_ref()?;
+        let area = self.map_area();
+        let viewport = map::viewport(state, area, &self.map_setup);
+        let pins = map::place(
+            &self.map_pins(),
+            &viewport,
+            area,
+            &self.map_setup,
+            state.selected,
+            self.ascii,
+        );
+        Some(map::MapView {
+            area,
+            viewport,
+            cell_px: self.map_setup.cell_px,
+            pins,
+        })
+    }
+
+    /// One position received: the peer's latest when it is newer than what
+    /// the screen holds, and for the store either way, which keeps the track.
+    fn take_fix(&mut self, fix: Fix) {
+        let newer = self
+            .positions
+            .get(&fix.peer)
+            .is_none_or(|held| fix.newer_than(held));
+        if newer {
+            self.positions.insert(fix.peer, fix.clone());
+        }
+        self.fixes_received.push(fix);
+    }
+
+    /// The store's latest positions at start, one a peer.
+    pub fn restore_positions(&mut self, fixes: Vec<Fix>) {
+        for fix in fixes {
+            let newer = self
+                .positions
+                .get(&fix.peer)
+                .is_none_or(|held| fix.newer_than(held));
+            if newer {
+                self.positions.insert(fix.peer, fix);
+            }
+        }
+    }
+}
+
+impl<B> UiModel<B> {
+    /// Message `message` of conversation `conversation`, to change: the
+    /// store will learn of it.
+    fn message_mut(&mut self, conversation: usize, message: usize) -> Option<&mut Message> {
+        self.touch(conversation, message);
+        self.conversations
+            .get_mut(conversation)?
+            .messages
+            .get_mut(message)
+    }
+}
+
+fn apply_state<B>(model: &mut UiModel<B>, id: [u8; 32], state: MessageState) {
+    let shown = delivery_of(state);
+    let now = model.now;
+    let running = model.sending.clone();
+    let changed = &mut model.changed;
+    for (c, conversation) in model.conversations.iter_mut().enumerate() {
+        for (m, message) in conversation.messages.iter_mut().enumerate() {
+            if !message.outbound || message.id != Some(id) {
+                continue;
+            }
+            if gives_up(shown) && running.contains(&(c, m)) {
+                // The runner may still carry it another way.
+                continue;
+            }
+            if message.unproven
+                && !matches!(shown, DeliveryState::Delivered | DeliveryState::Rejected)
+            {
+                continue;
+            }
+            if message.delivery != Some(shown) {
+                let words = ledger_words(shown);
+                let line = match message.last_leg {
+                    Some(leg) => format!("{words} ({})", leg_words(leg)),
+                    None => words.to_string(),
+                };
+                message.note(now, &line);
+                changed.insert((conversation.peer, message.activity));
+            }
+            message.delivery = Some(shown);
+        }
+    }
+}
+
+/// A message one of the home's devices sent through the home node: the
+/// bubble this device has for it says sent, and a device without one gets
+/// it. A bubble further along (in the mailbox, delivered) stays: a pull
+/// asked again after a crash brings the sent entry a second time.
+fn home_sent<B>(
+    model: &mut UiModel<B>,
+    message_id: [u8; 32],
+    destination: [u8; 16],
+    body: Vec<u8>,
+    fields: Vec<leviculum_lxmf::Field>,
+) {
+    let now = model.now;
+    let mut found = false;
+    for conversation in &mut model.conversations {
+        for message in &mut conversation.messages {
+            if !message.outbound || message.id != Some(message_id) {
+                continue;
+            }
+            found = true;
+            if matches!(
+                message.delivery,
+                None | Some(DeliveryState::Queued | DeliveryState::InFlight)
+            ) {
+                message.delivery = Some(DeliveryState::Sent);
+                message.note(now, "taken by the mailbox");
+                model.changed.insert((conversation.peer, message.activity));
+            }
+        }
+    }
+    if found {
+        return;
+    }
+    let index = model.conversation(destination);
+    let activity = model.bump();
+    let mut message = Message::ours(String::from_utf8_lossy(&body).into_owned(), now);
+    message.id = Some(message_id);
+    message.delivery = Some(DeliveryState::Sent);
+    message.note(now, "sent from another device, taken by the mailbox");
+    message.activity = activity;
+    message.fields = fields;
+    let conversation = &mut model.conversations[index];
+    conversation.activity = activity;
+    conversation.messages.push(message);
+    let peer = conversation.peer;
+    model.changed.insert((peer, activity));
+    if index == model.selected && model.scroll_top.is_none() {
+        model.message_cursor = model.conversations[index].messages.len() - 1;
+    }
+}
+
+fn on_send_done<B>(model: &mut UiModel<B>, result: Result<(), String>) -> Vec<UiEffect> {
+    let Some((c, m)) = model.sending.pop_front() else {
+        return Vec::new();
+    };
+    if let Some(message) = model.message_mut(c, m) {
+        message.leg = None;
+    }
+    let Err(detail) = result else {
+        return pull_after_send(model);
+    };
+    // Each leg's reason as the runner worded it, its continuation lines cut:
+    // an auto send that failed both ways says why each failed, not only why
+    // the direct one did.
+    let reasons: Vec<&str> = detail
+        .lines()
+        .filter(|line| !line.starts_with(' '))
+        .collect();
+    let text = format!("not sent: {}", reasons.join("; "));
+    let now = model.now;
+    if let Some(message) = model.message_mut(c, m) {
+        message.delivery = Some(DeliveryState::Failed);
+        message.note(now, &text);
+    }
+    model.toast(ToastKind::Error, text);
+    vec![UiEffect::Notice(format!("send: {detail}"))]
+}
+
+fn on_send_unproven<B>(model: &mut UiModel<B>, detail: String) -> Vec<UiEffect> {
+    let Some((c, m)) = model.sending.pop_front() else {
+        return Vec::new();
+    };
+    let now = model.now;
+    if let Some(message) = model.message_mut(c, m) {
+        message.leg = None;
+        message.unproven = true;
+        message.note(now, "sent over a link, no delivery proof yet");
+        // A proof that came in the same breath as the runner's end stays.
+        if message.delivery != Some(DeliveryState::Delivered) {
+            message.delivery = Some(DeliveryState::Sent);
+        }
+    }
+    model.toast(
+        ToastKind::Info,
+        "sent over a link, no delivery proof yet".to_string(),
+    );
+    vec![UiEffect::Notice(format!("send: {detail}"))]
+}
+
+/// What a footer button runs when clicked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FooterAct {
+    /// Its row's action, the one its key runs; `None` for a row the mouse
+    /// leaves alone, the transmitting `send`, whose click target is the
+    /// word on the compose box's border.
+    Row(Option<Action>),
+    /// The open palette's `Enter run`.
+    PaletteRun,
+    /// The open palette's `Esc close`.
+    PaletteClose,
+}
+
+impl FooterRole for FooterAct {
+    fn is_nav(&self) -> bool {
+        false
+    }
+}
+
+/// The palette as drawn.
+#[derive(Clone, Debug)]
+pub struct PaletteView {
+    /// The query line.
+    pub query: String,
+    /// The cursor in it, in characters.
+    pub cursor: usize,
+    /// The matching names, the highlighted one bold behind `▸`.
+    pub rows: Vec<RLine>,
+}
+
+/// A message's detail view as drawn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DetailView {
+    /// The overlay's title.
+    pub title: String,
+    /// Its lines: who, the peer, the id, the size, the state, the ledger.
+    pub rows: Vec<String>,
+}
+
+/// What each part of the screen shows.
+#[derive(Clone, Debug)]
+pub struct View {
+    /// The conversations pane's title: our own address, short, or `Search`
+    /// while a search is open.
+    pub conversations_title: String,
+    /// Its right end: `esc closes` while a search is open.
+    pub conversations_title_right: String,
+    /// On its bottom border, right-aligned: `/ search`, the click that
+    /// opens the search, while none is open.
+    pub list_hint: String,
+    /// The column of the cursor in the search field, in the pane, while the
+    /// field has the focus.
+    pub search_cursor: Option<usize>,
+    /// The list's rows on screen, two a conversation and a blank between.
+    pub conversations: Vec<RLine>,
+    /// The conversation's header: the peer's name and trust state.
+    pub messages_title: String,
+    /// The header's right end: the mailbox state, or the peer's full address
+    /// on a wide pane, where the mailbox has a row of its own.
+    pub messages_title_right: String,
+    /// How many characters the peer's position takes at the start of where
+    /// the header draws it: the row under the title past its one blank on a
+    /// wide pane, the title's right end on a narrow one. A click there puts
+    /// the peer on the map.
+    pub position_len: usize,
+    /// The conversation pane's rows, exactly its height: the header's rows on
+    /// a wide pane, then the blocks, the newest at the bottom unless the
+    /// reader scrolled up.
+    pub messages: Vec<RLine>,
+    /// The compose box's title: whom it writes to.
+    pub compose_title: String,
+    /// The compose line and its cursor, in characters.
+    pub compose: String,
+    pub compose_cursor: usize,
+    /// The compose pane's border hint: the chords that send and break the
+    /// line in this terminal and setting ([`keys::compose_hint`]).
+    pub compose_hint: String,
+    /// Where the focus is: the renderer marks that pane.
+    pub focus: Pane,
+    /// The footer buttons.
+    pub footer: Vec<FooterItem<FooterAct>>,
+    /// The footer button under the pointer, a slot's index.
+    pub footer_hover: Option<usize>,
+    /// The toast to float, if any.
+    pub toast: Option<Toast>,
+    /// The palette, when open.
+    pub palette: Option<PaletteView>,
+    /// Whether the help overlay is up; its text is [`help_groups`].
+    pub help: bool,
+    /// The help's first row on screen.
+    pub help_scroll: usize,
+    /// The detail view, when open.
+    pub detail: Option<DetailView>,
+    /// The detail view's first row on screen.
+    pub detail_scroll: usize,
+    /// The colour tier and the theme the screen is drawn in.
+    pub tier: Tier,
+    pub theme: Theme,
+    /// The config's `map_theme` ([`UiModel::map_theme`]).
+    pub map_theme: Option<ThemeFlag>,
+    /// The map, when open, drawn in the conversation pane's place.
+    pub map: Option<map::MapView>,
+    /// The glyph test pattern over the open map.
+    pub map_glyph_test: bool,
+}
+
+/// The map pane's title.
+pub const MAP_TITLE: &str = "map";
+
+/// How many ticks the map's title names a new way of drawing it: two
+/// seconds at the shell's quarter-second tick.
+pub const MAP_NAMED_TICKS: u64 = 8;
+
+/// The map title's word while a region loads.
+pub const MAP_LOADING: &str = "loading map";
+
+/// The toast for `load map area` over an area loaded already.
+pub const MAP_LOADED_ALREADY: &str = "the map here is loaded already";
+
+/// The empty conversations pane's line.
+pub const NO_CONVERSATIONS: &str = "No conversations: start with --to <address>.";
+
+/// The `blocked` view's line while nothing is blocked.
+pub const NO_BLOCKED: &str = "Nothing blocked. :blocked returns.";
+
+/// The list pane's title in the `blocked` view, and its right end: the
+/// palette name that returns, short enough for the narrow list.
+pub const BLOCKED_TITLE: &str = "Blocked";
+pub const BLOCKED_RETURNS: &str = ":blocked";
+
+/// The list's bottom border while no search is open: a click on it opens
+/// one (section 5, "What the mouse does").
+pub const SEARCH_HINT: &str = "/ search";
+
+/// The list pane's title while a search is open, and its right end.
+pub const SEARCH_TITLE: &str = "Search";
+pub const SEARCH_CLOSES: &str = "esc closes";
+
+/// The list pane while a search is open, `width` x `height` inside: the
+/// field and a blank, then the plain list while the field is empty, else the
+/// results scrolled to show the selected one. The cursor's column in the
+/// field comes with them.
+fn search_pane<B: InputBuffer>(
+    model: &UiModel<B>,
+    open: &search::Search<B>,
+    width: usize,
+    height: usize,
+) -> (Vec<RLine>, usize) {
+    const PREFIX: &str = " / ";
+    let query: Vec<char> = open.query.value().chars().collect();
+    let cursor = open.query.cursor().min(query.len());
+    let visible = width.saturating_sub(PREFIX.len() + 1).max(1);
+    let scroll = (cursor + 1).saturating_sub(visible);
+    let shown: String = query.iter().skip(scroll).take(visible).collect();
+    let mut rows = vec![plain(&format!("{PREFIX}{shown}")), RLine::default()];
+    let below = height.saturating_sub(search::FIELD_ROWS);
+    match model.query() {
+        None if model.conversations.is_empty() => {
+            rows.extend(wrap(&[plain(NO_CONVERSATIONS)], width, 0));
+        }
+        None => rows.extend(layout::list(model, width, below)),
+        Some(query) => {
+            let laid = search::rows(model, query, width);
+            let first = search::first_row(&laid, open.selected, below);
+            rows.extend(laid.rows.into_iter().skip(first).take(below));
+        }
+    }
+    rows.truncate(height);
+    (rows, PREFIX.len() + cursor - scroll)
+}
+
+/// An address cut to what a pane shows.
+pub fn short(address: &[u8; 16]) -> String {
+    let mut hex = to_hex(address);
+    hex.truncate(SHORT_HEX);
+    hex
+}
+
+/// The header's title: the peer as [`Names::label`] says it, its trust
+/// state in words, then whose name it shares and what it announces beside a
+/// petname.
+pub fn header_title(names: &Names, peer: &[u8; 16]) -> String {
+    let mut words = vec![names.trust(peer).as_str().to_string()];
+    words.extend(names.header_notes(peer));
+    format!("{}  {}", names.label(peer), words.join(" · "))
+}
+
+fn push(line: &mut RLine, text: &str, st: RStyle) {
+    line.cells.extend(text.chars().map(|ch| StyledChar {
+        ch,
+        st,
+        link: None,
+        field: None,
+    }));
+}
+
+fn plain(text: &str) -> RLine {
+    let mut line = RLine::default();
+    push(&mut line, text, RStyle::default());
+    line
+}
+
+fn bold() -> RStyle {
+    RStyle {
+        bold: true,
+        ..RStyle::default()
+    }
+}
+
+/// How long a client's quiet pull runs before the header says so.
+pub const QUIET_PULL_MS: u64 = 1_000;
+
+/// Whether the header says a fetch runs: one the reader asked for or the
+/// schedule started, at once; a client's quiet pull, for a wake or after a
+/// send, only once it took longer than [`QUIET_PULL_MS`]. A wake comes for
+/// every message, state and mark, and a line that said each pull would
+/// flicker (1136).
+fn fetch_shown<B>(model: &UiModel<B>) -> bool {
+    let quiet = matches!(model.fetch_reason, Some(Reason::Wake | Reason::Sent));
+    model.fetching
+        && (!quiet || model.elapsed_ms.saturating_sub(model.fetch_since_ms) >= QUIET_PULL_MS)
+}
+
+/// The propagation node's state in the header, longest first: the renderer
+/// takes the first that fits. The word is long, so the narrower forms say
+/// `pn` (1153: "mailbox" now means the user's Loquax Mailbox).
+fn mailbox_words<B>(model: &UiModel<B>) -> Vec<String> {
+    let Some(node) = model.mailbox.node else {
+        return vec!["no propagation node".to_string(), "no pn".to_string()];
+    };
+    let node = to_hex(&node[..4]);
+    let how = if model.mailbox.by_user {
+        "chosen"
+    } else {
+        "adopted"
+    };
+    let sync = match (fetch_shown(model), model.mailbox.synced, model.now) {
+        (true, _, _) => Some("fetching".to_string()),
+        (false, Some(at), Some(now)) => Some(format!("synced {}", list_time(&at, &now))),
+        (false, Some(at), None) => Some(format!("synced {}", at.hh_mm())),
+        (false, None, _) => None,
+    };
+    let next = next_sync(model).map(|at| format!("next {}", at.hh_mm()));
+    let mut words = Vec::new();
+    match (&sync, &next) {
+        (Some(sync), Some(next)) => {
+            words.push(format!("propagation node {node} {how} · {sync} · {next}"));
+            words.push(format!("propagation node · {sync} · {next}"));
+            words.push(format!("pn · {sync} · {next}"));
+            words.push(format!("pn · {next}"));
+        }
+        (Some(only), None) | (None, Some(only)) => {
+            words.push(format!("propagation node {node} {how} · {only}"));
+            words.push(format!("propagation node · {only}"));
+            words.push(format!("pn · {only}"));
+        }
+        (None, None) => words.push(format!("propagation node {node} {how}")),
+    }
+    words.push(format!("propagation node {node}"));
+    words.push(format!("pn {node}"));
+    words.push("pn".to_string());
+    words
+}
+
+/// When the schedule's next sync is due, as a time of day, up to the whole
+/// minute: none without a
+/// schedule, with its timer off, before the first sync or while one runs.
+fn next_sync<B>(model: &UiModel<B>) -> Option<WallTime> {
+    let next = model.sync.as_ref()?.next_ms()?;
+    let now = model.now?;
+    let ahead_secs = next.saturating_sub(model.elapsed_ms).div_ceil(1000);
+    let at = now
+        .unix_secs
+        .saturating_add(i64::try_from(ahead_secs).unwrap_or(i64::MAX));
+    // Up to the minute the header shows: `next 14:20` for a sync due at
+    // 14:19:59, never a minute that has already gone.
+    Some(WallTime {
+        unix_secs: at.saturating_add(59).div_euclid(60).saturating_mul(60),
+        offset_secs: now.offset_secs,
+    })
+}
+
+/// The detail view of the message `key` (its [`Message::activity`]) in
+/// `peer`'s conversation, what `v` opens in the terminal: for a frontend
+/// that shows it its own way.
+pub fn message_detail<B>(model: &UiModel<B>, peer: [u8; 16], key: u64) -> Option<DetailView> {
+    let c = model.conversations.iter().position(|c| c.peer == peer)?;
+    let m = model.conversations[c]
+        .messages
+        .iter()
+        .position(|m| m.activity == key)?;
+    detail_view(model, c, m)
+}
+
+/// The detail view of message `m` of conversation `c`.
+fn detail_view<B>(model: &UiModel<B>, c: usize, m: usize) -> Option<DetailView> {
+    let conversation = model.conversations.get(c)?;
+    let message = conversation.messages.get(m)?;
+    let who = model.names.label(&conversation.peer);
+    let mut rows = vec![
+        match message.outbound {
+            true => format!("from you to {who}"),
+            false => format!("from {who} to you"),
+        },
+        format!("peer   {}", to_hex(&conversation.peer)),
+        match message.id {
+            Some(id) => format!("id     {}", to_hex(&id)),
+            None => "id     none yet: the router has not queued it".to_string(),
+        },
+        format!("size   {} bytes", message.size),
+        match (message.delivery, message.signature) {
+            (Some(state), _) => format!("state  {}", state_words(state)),
+            (None, Signature::Verified) => "signature verified".to_string(),
+            (None, Signature::Unverified) => "signature NOT verified".to_string(),
+            (None, Signature::Invalid) => "signature INVALID".to_string(),
+        },
+    ];
+    let offset = message.at.or(model.now).map_or(0, |at| at.offset_secs);
+    let received = message.at.map(|at| at.unix_secs);
+    let sensors = telemetry::detail_rows(&conversation.peer, &message.fields, offset, received);
+    if !sensors.is_empty() {
+        rows.push(String::new());
+        rows.extend(sensors);
+    }
+    rows.push(String::new());
+    rows.push("on this device".to_string());
+    for entry in &message.ledger {
+        let at = entry
+            .at
+            .map(|at| at.hh_mm_ss())
+            .unwrap_or_else(|| "--:--:--".to_string());
+        rows.push(format!("{at}  {}", entry.what));
+    }
+    Some(DetailView {
+        title: "message".to_string(),
+        rows,
+    })
+}
+
+/// The screen.
+pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
+    let sizes = model.sizes();
+    let (conversations, search_cursor) = match (&model.search, model.order().is_empty()) {
+        (Some(open), _) => {
+            let (rows, cursor) = search_pane(model, open, sizes.list.0, sizes.list.1);
+            (rows, (model.focus == Pane::Search).then_some(cursor))
+        }
+        (None, true) => {
+            let empty = match model.show_blocked {
+                true => NO_BLOCKED,
+                false => NO_CONVERSATIONS,
+            };
+            (wrap(&[plain(empty)], sizes.list.0, 0), None)
+        }
+        (None, false) => (layout::list(model, sizes.list.0, sizes.list.1), None),
+    };
+    let wide = sizes.messages.0 >= WIDE_HEADER;
+    let peer = model.conversations.get(model.selected).map(|c| c.peer);
+    let messages_title = match peer {
+        Some(peer) => header_title(&model.names, &peer),
+        None => "messages".to_string(),
+    };
+    let mailbox = mailbox_words(model);
+    let fix = peer.and_then(|peer| model.positions.get(&peer));
+    let position = fix.map(|fix| telemetry::header_words(fix, model.now.as_ref()));
+    let stale = match (fix, model.now) {
+        (Some(fix), Some(now)) => fix.stale(now.unix_secs),
+        _ => false,
+    };
+    // Room for the right end: the pane less its corners, the title with its
+    // focus mark and the spaces around both.
+    let room = sizes
+        .messages
+        .0
+        .saturating_sub(leviculum_ui::text::fit_width(&messages_title) + 6);
+    let short = position.as_ref().and_then(|words| words.last().cloned());
+    let messages_title_right = match (wide, peer) {
+        (true, Some(peer)) => to_hex(&peer),
+        // Narrow: the position's age before the mailbox, so the reader
+        // knows there is one, then the mailbox alone where both do not fit.
+        _ => {
+            let mut choices: Vec<String> = Vec::new();
+            if let Some(short) = &short {
+                choices.extend(mailbox.iter().map(|words| format!("{short} · {words}")));
+                choices.push(short.clone());
+            }
+            choices.extend(mailbox.iter().cloned());
+            choices
+                .into_iter()
+                .find(|words| words.chars().count() <= room)
+                .unwrap_or_default()
+        }
+    };
+    let mut position_len = match (&short, wide) {
+        (Some(short), false) if messages_title_right.starts_with(short.as_str()) => {
+            short.chars().count()
+        }
+        _ => 0,
+    };
+    let mut laid = model.laid();
+    let texts = core::mem::take(&mut laid.texts);
+    let rows = model.message_rows();
+    let top = model.top_of(laid.rows.len());
+    let mut messages = Vec::with_capacity(sizes.messages.1);
+    if wide {
+        let width = sizes.messages.0;
+        let words = mailbox.first().cloned().unwrap_or_default();
+        // The peer's position on the left of the mailbox's row, the longest
+        // that leaves the mailbox room; dimmed once it is stale.
+        let left_room = width.saturating_sub(words.chars().count() + 4);
+        let at = position
+            .as_ref()
+            .and_then(|all| all.iter().find(|w| w.chars().count() <= left_room))
+            .cloned()
+            .unwrap_or_default();
+        position_len = at.chars().count();
+        let mut row = plain(" ");
+        let st = match stale {
+            true => layout::painted(model.tokens().muted),
+            false => RStyle::default(),
+        };
+        push(&mut row, &at, st);
+        let used = row.cells.len();
+        let pad = width.saturating_sub(used + words.chars().count() + 1);
+        push(
+            &mut row,
+            &format!("{}{words}", " ".repeat(pad)),
+            RStyle::default(),
+        );
+        messages.push(row);
+        let mut rule = plain(" ");
+        push(
+            &mut rule,
+            &"─".repeat(width.saturating_sub(2)),
+            layout::painted(model.tokens().muted),
+        );
+        push(&mut rule, " ", RStyle::default());
+        messages.push(rule);
+    }
+    let shown = laid.rows.len().saturating_sub(top).min(rows);
+    messages.extend((shown..rows).map(|_| RLine::default()));
+    let range = model.selection.map(|s| hit::ordered(&s));
+    for (at, mut row) in laid.rows.into_iter().enumerate().skip(top).take(shown) {
+        // The selected text in inverse video, against whatever it was drawn
+        // in: the selected block is reversed already.
+        if let (Some((from, to)), Some(Some(text))) = (range, texts.get(at)) {
+            for col in hit::selected_columns(text, at, from, to) {
+                if let Some(cell) = row.cells.get_mut(col) {
+                    cell.st.reverse = !cell.st.reverse;
+                }
+            }
+        }
+        messages.push(row);
+    }
+    let compose_title = match peer {
+        Some(peer) => format!("to {}", model.names.label(&peer)),
+        None => "compose".to_string(),
+    };
+    let ctx = model.ctx();
+    let palette = model.palette.as_ref().map(|p| PaletteView {
+        query: p.query.value().to_string(),
+        cursor: p.query.cursor(),
+        rows: match (p.ask, p.drawings) {
+            (Some(ask), _) => model.ask_rows(ask).iter().map(|row| plain(row)).collect(),
+            (None, true) => drawing_rows(p, &model.map_setup),
+            (None, false) => palette_rows(p, ctx),
+        },
+    });
+    let searching = model.search.is_some();
+    let map = model.map_view();
+    // The way the map is drawn, a moment after it changed.
+    let named = model
+        .map_named_until
+        .filter(|&until| model.tick < until)
+        .and_then(|_| model.map_setup.drawings.get(model.map_setup.drawing))
+        .map_or(String::new(), |d| format!("{} · ", d.name));
+    let (messages_title, messages_title_right) = match &map {
+        Some(shown) => (
+            MAP_TITLE.to_string(),
+            match &model.map_loading {
+                Some(word) => format!(
+                    "{named}z{} · {} in view · {word}",
+                    shown.viewport.zoom(),
+                    shown.pins.len()
+                ),
+                None => format!(
+                    "{named}z{} · {} in view",
+                    shown.viewport.zoom(),
+                    shown.pins.len()
+                ),
+            },
+        ),
+        None => (messages_title, messages_title_right),
+    };
+    View {
+        conversations_title: match (searching, model.address) {
+            (true, _) => SEARCH_TITLE.to_string(),
+            (false, _) if model.show_blocked => BLOCKED_TITLE.to_string(),
+            (false, Some(address)) => format!("Loquax {}", &to_hex(&address)[..8]),
+            (false, None) => "Loquax (attaching)".to_string(),
+        },
+        conversations_title_right: match (searching, model.show_blocked) {
+            (true, _) => SEARCH_CLOSES.to_string(),
+            (false, true) => BLOCKED_RETURNS.to_string(),
+            (false, false) => String::new(),
+        },
+        list_hint: match searching {
+            true => String::new(),
+            false => SEARCH_HINT.to_string(),
+        },
+        search_cursor,
+        conversations,
+        messages_title,
+        messages_title_right,
+        position_len: match map {
+            Some(_) => 0,
+            None => position_len,
+        },
+        messages,
+        compose_title,
+        compose: model.compose.value().to_string(),
+        compose_cursor: model.compose.cursor(),
+        compose_hint: keys::compose_hint(ctx),
+        focus: model.focus,
+        footer: footer(model),
+        footer_hover: model.footer_hover,
+        toast: model.current_toast().cloned(),
+        palette,
+        help: model.help,
+        help_scroll: model.help_scroll,
+        detail: model.detail.and_then(|(c, m)| detail_view(model, c, m)),
+        detail_scroll: model.detail_scroll,
+        tier: model.tier,
+        theme: model.theme,
+        map_theme: model.map_theme,
+        map_glyph_test: map.is_some() && model.map_glyph_test,
+        map,
+    }
+}
+
+/// The palette's command rows: the matching names, the highlighted one bold
+/// behind `▸`, each with the first chord this terminal sends for it.
+fn palette_rows<B: InputBuffer>(p: &Palette<B>, ctx: Ctx) -> Vec<RLine> {
+    p.matches()
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let shown = match keys::palette_key(e.name, ctx) {
+                Some(key) => format!("{}  {key}", e.name),
+                None => e.name.to_string(),
+            };
+            let mut line = RLine::default();
+            match i == p.selected {
+                true => push(&mut line, &format!("▸ {shown}"), bold()),
+                false => push(&mut line, &format!("  {shown}"), RStyle::default()),
+            }
+            line
+        })
+        .collect()
+}
+
+/// The palette's rows while it lists the map's drawings: each name, the
+/// one drawing now behind `●`, the highlighted one bold behind `▸`, and the
+/// ones the shell does not expect to work here marked so (1093).
+fn drawing_rows<B: InputBuffer>(p: &Palette<B>, setup: &map::MapSetup) -> Vec<RLine> {
+    p.drawing_matches(&setup.drawings)
+        .iter()
+        .enumerate()
+        .filter_map(|(row, &i)| setup.drawings.get(i).map(|d| (row, i, d)))
+        .map(|(row, i, d)| {
+            let now = match i == setup.drawing {
+                true => "● ",
+                false => "  ",
+            };
+            let shown = match d.expected {
+                true => format!("{now}{}", d.name),
+                false => format!("{now}{}  (may not show here)", d.name),
+            };
+            let mut line = RLine::default();
+            match row == p.selected {
+                true => push(&mut line, &format!("▸ {shown}"), bold()),
+                false => push(&mut line, &format!("  {shown}"), RStyle::default()),
+            }
+            line
+        })
+        .collect()
+}
+
+/// The rows and the column the compose box is scrolled to, a box `width` x
+/// `height` cells inside showing `text` with the cursor at `cursor`: as far
+/// down and right as keeps the cursor in it. The cursor's line and column
+/// come back with them.
+pub fn compose_window(
+    text: &str,
+    cursor: usize,
+    width: usize,
+    height: usize,
+) -> (usize, usize, usize, usize) {
+    let (line, column) = line_and_column(text, cursor);
+    let scroll = (column + 1).saturating_sub(width.max(1));
+    let top = (line + 1).saturating_sub(height.max(1));
+    (top, scroll, line, column)
+}
+
+/// The line and the column, in characters, of the `cursor`th character of
+/// `text`.
+pub fn line_and_column(text: &str, cursor: usize) -> (usize, usize) {
+    let mut line = 0;
+    let mut column = 0;
+    for c in text.chars().take(cursor) {
+        if c == '\n' {
+            line += 1;
+            column = 0;
+        } else {
+            column += 1;
+        }
+    }
+    (line, column)
+}
+
+/// Where the palette is drawn over `screen`, `rows` matches under its query
+/// line: 40 cells wide, centred, two rows from the top.
+pub fn palette_rect(rows: usize, screen: Rect) -> Rect {
+    let width = 40.min(screen.width);
+    let height = (rows as u16 + 3).min(screen.height);
+    Rect::new(
+        screen.x + screen.width.saturating_sub(width) / 2,
+        screen.y + 2,
+        width,
+        height,
+    )
+}
+
+/// The widest the detail view is drawn: the 64 hex digits of an id and its
+/// label on one row.
+pub const DETAIL_MAX_WIDTH: u16 = 76;
+
+/// Where a detail view is drawn over `screen`, centred, and its rows wrapped
+/// to that width.
+pub fn detail_layout(detail: &DetailView, screen: Rect) -> (Rect, Vec<String>) {
+    let width = DETAIL_MAX_WIDTH.min(screen.width.saturating_sub(2)).max(4);
+    let rows: Vec<String> = detail
+        .rows
+        .iter()
+        .flat_map(|row| match row.is_empty() {
+            true => vec![String::new()],
+            false => toast_rows(row, usize::from(width - 2)),
+        })
+        .collect();
+    let height = (rows.len() as u16 + 2).min(screen.height.saturating_sub(1));
+    let area = Rect::new(
+        screen.x + screen.width.saturating_sub(width) / 2,
+        screen.y + screen.height.saturating_sub(height + 1) / 2,
+        width,
+        height,
+    );
+    (area, rows)
+}
+
+/// `direct 12 s` or `via mailbox 40 s`: which leg a waiting send is on and
+/// for how long, while its mark still says it is waiting. Gone the moment it
+/// is handed on, so the label never sits beside a `◇` or a `✓`.
+fn leg_label(message: &Message, state: DeliveryState, tick: u64) -> Option<String> {
+    let (leg, since) = message.leg?;
+    if !matches!(
+        state,
+        DeliveryState::Queued | DeliveryState::Stamping | DeliveryState::InFlight
+    ) {
+        return None;
+    }
+    let secs = tick.saturating_sub(since) / TICKS_PER_SECOND;
+    Some(format!("{} {secs} s", leg_words(leg)))
+}
+
+/// Cut `lines` to rows of at most `width` cells, every row after a line's
+/// first set in by `indent`, and the cells keeping their styles. A row the
+/// indent alone would fill is not indented, so a narrow pane still shows
+/// text.
+pub fn wrap(lines: &[RLine], width: usize, indent: usize) -> Vec<RLine> {
+    let width = width.max(1);
+    let indent = if indent < width { indent } else { 0 };
+    let mut rows = Vec::new();
+    for line in lines {
+        let mut cells = line.cells.as_slice();
+        let mut first = true;
+        loop {
+            let pad = if first { 0 } else { indent };
+            let room = width - pad;
+            // At the last space that fits, which the break then swallows; a
+            // word longer than the row is cut where the row ends.
+            let (take, skip) = if cells.len() <= room {
+                (cells.len(), 0)
+            } else {
+                match cells[..=room].iter().rposition(|cell| cell.ch == ' ') {
+                    Some(space) if space > 0 => (space, 1),
+                    _ => (room, 0),
+                }
+            };
+            let mut row = RLine::default();
+            push(&mut row, &" ".repeat(pad), RStyle::default());
+            row.cells.extend_from_slice(&cells[..take]);
+            rows.push(row);
+            cells = &cells[take + skip..];
+            first = false;
+            if cells.is_empty() {
+                break;
+            }
+        }
+    }
+    rows
+}
+
+/// The most rows a toast takes: enough for both legs of a failed auto send
+/// at 80 columns, few enough to leave the messages pane readable.
+pub const TOAST_MAX_ROWS: usize = 3;
+
+/// `text` wrapped to `width` at word boundaries with [`wrap`], as a block
+/// wraps a message, in at most
+/// [`TOAST_MAX_ROWS`] rows: what does not fit is cut at the end of the last
+/// row with a `…`.
+pub fn toast_rows(text: &str, width: usize) -> Vec<String> {
+    let as_text = |row: &RLine| row.cells.iter().map(|cell| cell.ch).collect::<String>();
+    let mut rows: Vec<String> = wrap(&[plain(text)], width, 0).iter().map(as_text).collect();
+    if rows.len() > TOAST_MAX_ROWS {
+        let rest = rows.split_off(TOAST_MAX_ROWS - 1).join(" ");
+        rows.push(leviculum_ui::text::truncate_to_cols(&rest, width));
+    }
+    rows
+}
+
+/// The footer: the palette's own two keys while it is open, else the rows
+/// with a footer label that have a chord in the focused pane.
+fn footer<B>(model: &UiModel<B>) -> Vec<FooterItem<FooterAct>> {
+    if model.palette.is_some() {
+        return vec![
+            FooterItem::action("Enter", "run", FooterAct::PaletteRun),
+            FooterItem::action("Esc", "close", FooterAct::PaletteClose),
+        ];
+    }
+    keys::footer(keys::panes_of(model.focus), model.ctx(), FooterAct::Row)
+}
+
+/// The help overlay's text, every row of the keymap ([`keys::help_groups`]).
+pub fn help_groups() -> Vec<HelpGroup> {
+    keys::help_groups()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal field for the model's tests: insert and backspace at the
+    /// end, the edits these tests make, `Ctrl-U`, and a cursor a click
+    /// places, which the next edit puts back at the end. The terminal's
+    /// field is `tui_input::Input`.
+    #[derive(Default, Clone, Debug)]
+    struct Field(String, Option<usize>);
+
+    impl InputBuffer for Field {
+        fn value(&self) -> &str {
+            &self.0
+        }
+        fn cursor(&self) -> usize {
+            self.1.unwrap_or(self.0.chars().count())
+        }
+        fn edit(&mut self, key: &KeyEvent) -> bool {
+            self.1 = None;
+            match key.code {
+                KeyCode::Char(c)
+                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    self.0.push(c);
+                    true
+                }
+                KeyCode::Backspace => {
+                    self.0.pop();
+                    true
+                }
+                KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => {
+                    self.0.clear();
+                    true
+                }
+                _ => false,
+            }
+        }
+        fn take(&mut self) -> String {
+            self.1 = None;
+            core::mem::take(&mut self.0)
+        }
+        fn newline(&mut self) {
+            self.1 = None;
+            self.0.push('\n');
+        }
+        fn set_cursor(&mut self, at: usize) {
+            self.1 = Some(at.min(self.0.chars().count()));
+        }
+    }
+
+    const PEER: [u8; 16] = [0xab; 16];
+    const OTHER: [u8; 16] = [0xcd; 16];
+    const ID: [u8; 32] = [0x11; 32];
+    const ID2: [u8; 32] = [0x22; 32];
+
+    fn key(code: KeyCode) -> UiEvent {
+        UiEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn ctrl_key(c: char) -> UiEvent {
+        UiEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
+    }
+
+    fn typed(model: &mut UiModel<Field>, text: &str) {
+        for c in text.chars() {
+            update(model, key(KeyCode::Char(c)));
+        }
+    }
+
+    fn engine(model: &mut UiModel<Field>, event: OutboxEvent) {
+        update(model, UiEvent::Engine(event));
+    }
+
+    fn state(model: &mut UiModel<Field>, id: [u8; 32], state: MessageState) {
+        engine(
+            model,
+            OutboxEvent::State {
+                message_id: id,
+                state,
+            },
+        );
+    }
+
+    fn last_delivery(model: &UiModel<Field>) -> Option<DeliveryState> {
+        model.messages_of_selected().last().and_then(|m| m.delivery)
+    }
+
+    /// Compose a message to the first conversation and press Enter.
+    fn sent(model: &mut UiModel<Field>, body: &str) -> Vec<UiEffect> {
+        update(model, key(KeyCode::Tab));
+        update(model, key(KeyCode::Tab));
+        assert_eq!(model.focus, Pane::Compose);
+        typed(model, body);
+        update(model, key(KeyCode::Enter))
+    }
+
+    #[test]
+    fn tab_and_shift_tab_cycle_the_three_panes() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            seen.push(model.focus);
+            update(&mut model, key(KeyCode::Tab));
+        }
+        assert_eq!(seen, [Pane::Conversations, Pane::Messages, Pane::Compose]);
+        assert_eq!(model.focus, Pane::Conversations);
+        update(&mut model, key(KeyCode::BackTab));
+        assert_eq!(model.focus, Pane::Compose);
+    }
+
+    #[test]
+    fn compose_takes_plain_typing_and_q_does_not_quit_there() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Tab));
+        typed(&mut model, "quit?");
+        assert!(!model.quit);
+        assert!(!model.help);
+        assert_eq!(model.compose.value(), "quit?");
+        update(&mut model, key(KeyCode::Esc));
+        assert_eq!(model.focus, Pane::Messages);
+        let effects = update(&mut model, key(KeyCode::Char('q')));
+        assert!(model.quit);
+        assert_eq!(effects, [UiEffect::Quit]);
+    }
+
+    #[test]
+    fn ctrl_c_clears_compose_instead_of_quitting_and_ctrl_q_quits() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Tab));
+        typed(&mut model, "draft");
+        assert!(update(&mut model, ctrl_key('c')).is_empty());
+        assert!(!model.quit);
+        assert_eq!(model.compose.value(), "");
+        assert_eq!(update(&mut model, ctrl_key('q')), [UiEffect::Quit]);
+        assert!(model.quit);
+    }
+
+    #[test]
+    fn colon_opens_the_palette_in_a_command_pane_and_types_in_compose() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(&mut model, key(KeyCode::Char(':')));
+        assert!(model.palette.is_some());
+        update(&mut model, key(KeyCode::Esc));
+        update(&mut model, key(KeyCode::BackTab));
+        update(&mut model, key(KeyCode::Char(':')));
+        assert!(model.palette.is_none());
+        assert_eq!(model.compose.value(), ":");
+    }
+
+    #[test]
+    fn enter_sends_to_the_selected_conversation_and_clears_the_line() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        update(&mut model, key(KeyCode::Char('j')));
+        assert_eq!(model.selected, 1);
+        let effects = sent(&mut model, "hello");
+        assert_eq!(
+            effects,
+            [UiEffect::Send {
+                to: OTHER,
+                body: "hello".to_string(),
+                fields: Vec::new(),
+            }]
+        );
+        assert_eq!(model.compose.value(), "");
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Queued));
+        // An empty line sends nothing.
+        assert!(update(&mut model, key(KeyCode::Enter)).is_empty());
+    }
+
+    #[test]
+    fn the_glyph_follows_the_router_states_of_the_message_it_queued() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        sent(&mut model, "hi");
+        engine(&mut model, OutboxEvent::Queued { message_id: ID });
+        state(&mut model, ID, MessageState::Sending);
+        assert_eq!(last_delivery(&model), Some(DeliveryState::InFlight));
+        state(&mut model, ID, MessageState::Sent);
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Sent));
+        update(&mut model, UiEvent::SendDone(Ok(())));
+        assert!(model.sending.is_empty());
+        // The proof arrives after the runner has finished.
+        state(&mut model, ID, MessageState::Delivered);
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Delivered));
+        // A state for some other id touches nothing.
+        state(&mut model, ID2, MessageState::Failed);
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Delivered));
+    }
+
+    #[test]
+    fn an_auto_fallback_never_shows_the_cancelled_direct_leg_as_failed() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        sent(&mut model, "hi");
+        engine(&mut model, OutboxEvent::Queued { message_id: ID });
+        state(&mut model, ID, MessageState::Cancelled);
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Queued));
+        engine(&mut model, OutboxEvent::Queued { message_id: ID2 });
+        state(&mut model, ID2, MessageState::AwaitingCollection);
+        assert_eq!(last_delivery(&model), Some(DeliveryState::InMailbox));
+        update(&mut model, UiEvent::SendDone(Ok(())));
+        assert_eq!(last_delivery(&model), Some(DeliveryState::InMailbox));
+    }
+
+    #[test]
+    fn a_runner_that_gave_up_marks_the_message_failed_and_keeps_the_text() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        sent(&mut model, "hi");
+        let effects = update(
+            &mut model,
+            UiEvent::SendDone(Err("no route\n  more".to_string())),
+        );
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Failed));
+        assert_eq!(
+            effects,
+            [UiEffect::Notice("send: no route\n  more".to_string())]
+        );
+        assert_eq!(
+            model.current_toast().map(|t| t.text.as_str()),
+            Some("not sent: no route")
+        );
+    }
+
+    #[test]
+    fn a_toast_quotes_both_legs_of_a_failed_auto_send() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        sent(&mut model, "hi");
+        update(
+            &mut model,
+            UiEvent::SendDone(Err(
+                "direct: no route after 30.0s\n  more\npropagated: no propagation node".to_string(),
+            )),
+        );
+        assert_eq!(
+            model.current_toast().map(|t| t.text.as_str()),
+            Some("not sent: direct: no route after 30.0s; propagated: no propagation node")
+        );
+    }
+
+    /// The policy half of leviculum 1002 on the screen: a message the runner
+    /// left on a link without a proof is `◇` and stays `◇` through the
+    /// router's retries and its giving up, with no red cross; a late proof
+    /// still turns it `✓`.
+    #[test]
+    fn an_unproven_send_stays_sent_until_a_proof_and_never_turns_red() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        sent(&mut model, "hi");
+        engine(&mut model, OutboxEvent::Queued { message_id: ID });
+        state(&mut model, ID, MessageState::Sending);
+        let effects = update(
+            &mut model,
+            UiEvent::SendUnproven("went onto a link".to_string()),
+        );
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Sent));
+        assert!(model.sending.is_empty());
+        assert_eq!(
+            effects,
+            [UiEffect::Notice("send: went onto a link".to_string())]
+        );
+        for retry in [
+            MessageState::Outbound,
+            MessageState::Sending,
+            MessageState::Failed,
+        ] {
+            state(&mut model, ID, retry);
+            assert_eq!(
+                last_delivery(&model),
+                Some(DeliveryState::Sent),
+                "{retry:?}"
+            );
+        }
+        engine(
+            &mut model,
+            OutboxEvent::Left {
+                message_id: ID,
+                last: Some(MessageState::Failed),
+            },
+        );
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Sent));
+
+        let mut late = UiModel::<Field>::new(&[PEER]);
+        sent(&mut late, "hi");
+        engine(&mut late, OutboxEvent::Queued { message_id: ID });
+        update(&mut late, UiEvent::SendUnproven(String::new()));
+        state(&mut late, ID, MessageState::Delivered);
+        assert_eq!(last_delivery(&late), Some(DeliveryState::Delivered));
+    }
+
+    /// The row names the leg and its seconds while the send waits, and drops
+    /// both once the message is handed on.
+    #[test]
+    fn a_waiting_send_shows_its_leg_and_the_seconds_on_it() {
+        let text =
+            |model: &UiModel<Field>| -> String { shown(model).last().cloned().expect("a message") };
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        sent(&mut model, "hi");
+        update(&mut model, UiEvent::SendLeg(Leg::Direct));
+        for _ in 0..12 {
+            update(&mut model, UiEvent::Tick);
+        }
+        assert!(text(&model) == "hi  direct 3 s ○", "{}", text(&model));
+        update(&mut model, UiEvent::SendLeg(Leg::Propagated));
+        for _ in 0..8 {
+            update(&mut model, UiEvent::Tick);
+        }
+        assert!(
+            text(&model) == "hi  via propagation node 2 s ○",
+            "{}",
+            text(&model)
+        );
+        engine(&mut model, OutboxEvent::Queued { message_id: ID });
+        state(&mut model, ID, MessageState::AwaitingCollection);
+        assert_eq!(text(&model), "hi  ⌂");
+    }
+
+    #[test]
+    fn the_mapping_is_the_documented_table() {
+        use MessageState::*;
+        let rows = [
+            (Generating, DeliveryState::Queued),
+            (Outbound, DeliveryState::Queued),
+            (Sending, DeliveryState::InFlight),
+            (Sent, DeliveryState::Sent),
+            (AwaitingCollection, DeliveryState::InMailbox),
+            (Delivered, DeliveryState::Delivered),
+            (Rejected, DeliveryState::Rejected),
+            (Cancelled, DeliveryState::Failed),
+            (Failed, DeliveryState::Failed),
+        ];
+        for (router, shown) in rows {
+            assert_eq!(delivery_of(router), shown, "{router:?}");
+        }
+    }
+
+    #[test]
+    fn a_received_message_opens_its_conversation_and_counts_unread() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        let received = OutboxEvent::Received {
+            message_id: ID,
+            source: OTHER,
+            title: Vec::new(),
+            body: b"hey".to_vec(),
+            fields: Vec::new(),
+            verified: true,
+        };
+        engine(&mut model, received.clone());
+        engine(&mut model, received);
+        assert_eq!(model.conversations.len(), 2);
+        assert_eq!(model.conversations[1].messages.len(), 1, "deduplicated");
+        assert_eq!(model.conversations[1].unread, 1);
+        // Most recent first: the new conversation is on top.
+        assert_eq!(model.order(), [1, 0]);
+        update(&mut model, key(KeyCode::Char('g')));
+        assert_eq!(model.selected, 1);
+        assert_eq!(model.conversations[1].unread, 0);
+        assert_eq!(model.messages_of_selected()[0].body, "hey");
+    }
+
+    fn received_from(source: [u8; 16], id: [u8; 32], body: &str) -> OutboxEvent {
+        OutboxEvent::Received {
+            message_id: id,
+            source,
+            title: Vec::new(),
+            body: body.as_bytes().to_vec(),
+            fields: Vec::new(),
+            verified: true,
+        }
+    }
+
+    /// On a client of a home node, opening a conversation marks its unread
+    /// read for the other devices; a device that is no client marks nothing.
+    #[test]
+    fn opening_a_conversation_on_a_client_marks_its_unread_read() {
+        use crate::home::wire::{Mark, MarkFlag};
+        for client in [false, true] {
+            let mut model = UiModel::<Field>::new(&[PEER]);
+            model.home_client = client;
+            engine(&mut model, received_from(OTHER, ID, "one"));
+            engine(&mut model, received_from(OTHER, ID2, "two"));
+            assert_eq!(model.conversations[1].unread, 2);
+            assert!(model.take_marks().is_empty(), "nothing read yet");
+            update(&mut model, key(KeyCode::Char('g')));
+            assert_eq!(model.selected, 1);
+            let marks = model.take_marks();
+            match client {
+                true => assert_eq!(
+                    marks,
+                    [Mark {
+                        flag: MarkFlag::Read,
+                        ids: vec![ID2, ID],
+                    }]
+                ),
+                false => assert!(marks.is_empty()),
+            }
+            // One arriving in the open conversation is read where it lands.
+            engine(&mut model, received_from(OTHER, [0x33; 32], "three"));
+            assert_eq!(model.conversations[1].unread, 0);
+            let marks = model.take_marks();
+            match client {
+                true => assert_eq!(
+                    marks,
+                    [Mark {
+                        flag: MarkFlag::Read,
+                        ids: vec![[0x33; 32]],
+                    }]
+                ),
+                false => assert!(marks.is_empty()),
+            }
+        }
+    }
+
+    /// A frontend without keys opens a conversation by its peer: the same
+    /// read and the same marks as the list's key, and a peer not listed yet
+    /// gets a conversation.
+    #[test]
+    fn a_tap_opens_a_conversation_as_the_key_does() {
+        use crate::home::wire::{Mark, MarkFlag};
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.home_client = true;
+        engine(&mut model, received_from(OTHER, ID, "one"));
+        assert_eq!(model.conversations[1].unread, 1);
+        assert!(update(&mut model, UiEvent::Open { peer: OTHER }).is_empty());
+        assert_eq!(model.selected, 1);
+        assert_eq!(model.conversations[1].unread, 0);
+        assert_eq!(
+            model.take_marks(),
+            [Mark {
+                flag: MarkFlag::Read,
+                ids: vec![ID],
+            }]
+        );
+        let new = [0x5a; 16];
+        update(&mut model, UiEvent::Open { peer: new });
+        assert_eq!(model.conversations[model.selected].peer, new);
+        // Back to the list: none open, so what arrives stays unread and
+        // nothing is marked, where the list is a screen of its own.
+        model.list_apart = true;
+        update(&mut model, UiEvent::Close);
+        assert_eq!(model.selected, NONE_OPEN);
+        engine(&mut model, received_from(new, ID2, "later"));
+        assert_eq!(model.selected, NONE_OPEN);
+        let index = model.conversations.iter().position(|c| c.peer == new);
+        assert_eq!(model.conversations[index.expect("listed")].unread, 1);
+        assert!(model.take_marks().is_empty());
+    }
+
+    /// A frontend's text goes out as compose's does: a bubble of ours,
+    /// queued, in the peer's conversation, opened; blank text sends
+    /// nothing; and a reaction by peer and target is the picker's.
+    #[test]
+    fn a_frontend_writes_and_reacts_without_the_compose_pane() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        assert!(update(
+            &mut model,
+            UiEvent::Write {
+                peer: OTHER,
+                body: "  ".to_string()
+            }
+        )
+        .is_empty());
+        let effects = update(
+            &mut model,
+            UiEvent::Write {
+                peer: OTHER,
+                body: "hallo".to_string(),
+            },
+        );
+        assert_eq!(
+            effects,
+            [UiEffect::Send {
+                to: OTHER,
+                body: "hallo".to_string(),
+                fields: Vec::new(),
+            }]
+        );
+        let conversation = &model.conversations[model.selected];
+        assert_eq!(conversation.peer, OTHER);
+        let ours = conversation.messages.last().expect("the bubble");
+        assert!(ours.outbound);
+        assert_eq!(ours.delivery, Some(DeliveryState::Queued));
+        assert_eq!(model.sending.len(), 1);
+        assert_eq!(model.compose.value(), "", "compose is not touched");
+
+        engine(&mut model, received_from(OTHER, ID, "lunch?"));
+        let effects = update(
+            &mut model,
+            UiEvent::React {
+                peer: OTHER,
+                target: ID,
+                content: "ok".to_string(),
+            },
+        );
+        let [UiEffect::Send { to, body, fields }] = effects.as_slice() else {
+            panic!("one send: {effects:?}");
+        };
+        assert_eq!((*to, body.as_str()), (OTHER, ""));
+        assert_eq!(fields.len(), 1);
+        assert_eq!(model.sending.len(), 2);
+    }
+
+    /// Another device read a message: every received message up to it is
+    /// read here, the later ones stay unread, and the same mark twice
+    /// changes nothing more.
+    #[test]
+    fn a_read_mark_from_another_device_reads_up_to_its_message() {
+        use crate::home::wire::{Mark, MarkFlag};
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        engine(&mut model, received_from(OTHER, ID, "one"));
+        engine(&mut model, received_from(OTHER, ID2, "two"));
+        engine(&mut model, received_from(OTHER, [0x33; 32], "three"));
+        assert_eq!(model.conversations[1].unread, 3);
+        let read = OutboxEvent::HomeMarked {
+            mark: Mark {
+                flag: MarkFlag::Read,
+                ids: vec![ID2],
+            },
+        };
+        engine(&mut model, read.clone());
+        assert_eq!(model.conversations[1].unread, 1);
+        engine(&mut model, read);
+        assert_eq!(model.conversations[1].unread, 1);
+        // An id this device never had changes nothing.
+        engine(
+            &mut model,
+            OutboxEvent::HomeMarked {
+                mark: Mark {
+                    flag: MarkFlag::Read,
+                    ids: vec![[0x99; 32]],
+                },
+            },
+        );
+        assert_eq!(model.conversations[1].unread, 1);
+        // The store learns the new count; a mark applied is not marked again.
+        let writes = model.take_writes();
+        assert!(writes.iter().any(|w| matches!(
+            w,
+            StoreWrite::Conversation { peer, unread: 1, .. } if *peer == OTHER
+        )));
+        assert!(model.take_marks().is_empty());
+    }
+
+    /// Another device deleted a message: off the screen and out of the
+    /// store, by its id, whether this device shows it or not.
+    #[test]
+    fn a_deleted_mark_from_another_device_deletes_the_message_here() {
+        use crate::home::wire::{Mark, MarkFlag};
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.home_client = true;
+        engine(&mut model, received_from(OTHER, ID, "one"));
+        engine(&mut model, received_from(OTHER, ID2, "two"));
+        model.take_writes();
+        let deleted = OutboxEvent::HomeMarked {
+            mark: Mark {
+                flag: MarkFlag::Deleted,
+                ids: vec![ID, [0x99; 32]],
+            },
+        };
+        engine(&mut model, deleted);
+        assert_eq!(model.conversations[1].messages.len(), 1);
+        assert_eq!(model.conversations[1].messages[0].id, Some(ID2));
+        assert_eq!(
+            model.take_writes(),
+            [
+                StoreWrite::ForgetId { id: ID },
+                StoreWrite::ForgetId { id: [0x99; 32] }
+            ]
+        );
+        assert!(model.take_marks().is_empty(), "not marked back");
+    }
+
+    /// A message another device sent through the home node comes as a sent
+    /// bubble; the device that sent it keeps its own bubble, which leaves
+    /// queued; a bubble further along does not go back.
+    #[test]
+    fn a_message_sent_from_another_device_shows_as_a_sent_bubble() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.home_client = true;
+        let home_sent = |id: [u8; 32], to: [u8; 16]| OutboxEvent::HomeSent {
+            message_id: id,
+            destination: to,
+            body: b"from the laptop".to_vec(),
+            fields: Vec::new(),
+        };
+        engine(&mut model, home_sent(ID, OTHER));
+        assert_eq!(model.conversations.len(), 2);
+        let bubble = &model.conversations[1].messages[0];
+        assert!(bubble.outbound);
+        assert_eq!(bubble.body, "from the laptop");
+        assert_eq!(bubble.delivery, Some(DeliveryState::Sent));
+        assert_eq!(model.conversations[1].unread, 0, "ours, not unread");
+        // Again: one bubble.
+        engine(&mut model, home_sent(ID, OTHER));
+        assert_eq!(model.conversations[1].messages.len(), 1);
+        // Delivered, then the sent entry again: stays delivered.
+        state(&mut model, ID, MessageState::Delivered);
+        engine(&mut model, home_sent(ID, OTHER));
+        assert_eq!(
+            model.conversations[1].messages[0].delivery,
+            Some(DeliveryState::Delivered)
+        );
+        // The device that sent it: its queued bubble says sent.
+        sent(&mut model, "mine");
+        engine(&mut model, OutboxEvent::Queued { message_id: ID2 });
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Queued));
+        engine(&mut model, home_sent(ID2, PEER));
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Sent));
+        assert_eq!(model.conversations[0].messages.len(), 1);
+    }
+
+    /// A finished send on a client pulls at once; one finishing while a
+    /// pull runs pulls again after it.
+    #[test]
+    fn a_send_on_a_client_is_followed_by_a_pull() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        sent(&mut model, "not a client");
+        assert!(update(&mut model, UiEvent::SendDone(Ok(()))).is_empty());
+        model.home_client = true;
+        // Still in compose: the next sends are typed and sent from there.
+        typed(&mut model, "a client");
+        update(&mut model, key(KeyCode::Enter));
+        assert_eq!(
+            update(&mut model, UiEvent::SendDone(Ok(()))),
+            [UiEffect::Fetch]
+        );
+        assert_eq!(model.fetch_reason, Some(Reason::Sent));
+        typed(&mut model, "while it pulls");
+        update(&mut model, key(KeyCode::Enter));
+        assert!(update(&mut model, UiEvent::SendDone(Ok(()))).is_empty());
+        assert_eq!(
+            update(&mut model, UiEvent::FetchDone(Ok(0))),
+            [UiEffect::Fetch]
+        );
+        assert!(update(&mut model, UiEvent::FetchDone(Ok(0))).is_empty());
+    }
+
+    /// A wake pulls at once on a client, follows a running pull once however
+    /// many wakes come meanwhile, and does nothing on a messenger.
+    #[test]
+    fn a_wake_on_a_client_pulls_and_a_burst_behind_a_pull_is_one_more() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        assert!(update(&mut model, UiEvent::HomeWake).is_empty());
+        model.home_client = true;
+        assert_eq!(update(&mut model, UiEvent::HomeWake), [UiEffect::Fetch]);
+        assert_eq!(model.fetch_reason, Some(Reason::Wake));
+        for _ in 0..3 {
+            assert!(update(&mut model, UiEvent::HomeWake).is_empty());
+        }
+        assert_eq!(
+            update(&mut model, UiEvent::FetchDone(Ok(1))),
+            [UiEffect::Fetch]
+        );
+        assert_eq!(model.fetch_reason, Some(Reason::Wake));
+        assert!(update(&mut model, UiEvent::FetchDone(Ok(0))).is_empty());
+    }
+
+    /// 1136: a wake's pull is quiet. The header says "fetching" for it
+    /// only past a second, a pull with nothing new raises no toast, and
+    /// one asked for says so at once.
+    #[test]
+    fn a_wake_pull_is_silent_unless_it_is_slow_or_brings_a_message() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.home_client = true;
+        update(
+            &mut model,
+            UiEvent::MailboxChosen {
+                node: [0x9c; 16],
+                by_user: false,
+            },
+        );
+        let toasts = model.toasts.len();
+        update(&mut model, UiEvent::Elapsed(10_000));
+        assert_eq!(update(&mut model, UiEvent::HomeWake), [UiEffect::Fetch]);
+        assert!(!view(&model).messages_title_right.contains("fetching"));
+        update(&mut model, UiEvent::Elapsed(10_000 + QUIET_PULL_MS - 1));
+        assert!(!view(&model).messages_title_right.contains("fetching"));
+        update(&mut model, UiEvent::Elapsed(10_000 + QUIET_PULL_MS));
+        assert!(view(&model).messages_title_right.contains("fetching"));
+        update(&mut model, UiEvent::FetchDone(Ok(0)));
+        assert_eq!(model.toasts.len(), toasts, "names only: nothing said");
+        update(&mut model, UiEvent::HomeWake);
+        update(&mut model, UiEvent::FetchDone(Ok(1)));
+        assert_eq!(
+            model.toasts.last().map(|t| t.text.as_str()),
+            Some("1 new message(s)")
+        );
+        update(&mut model, UiEvent::Run(PaletteCommand::Fetch));
+        assert!(view(&model).messages_title_right.contains("fetching"));
+    }
+
+    #[test]
+    fn a_reader_at_the_newest_message_follows_a_new_one() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        let from_peer = |id: [u8; 32]| OutboxEvent::Received {
+            message_id: id,
+            source: PEER,
+            title: Vec::new(),
+            body: b"hey".to_vec(),
+            fields: Vec::new(),
+            verified: true,
+        };
+        engine(&mut model, from_peer(ID));
+        assert_eq!(model.message_cursor, 0);
+        engine(&mut model, from_peer(ID2));
+        assert_eq!(model.message_cursor, 1, "followed");
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Char('g')));
+        engine(&mut model, from_peer([0x33; 32]));
+        assert_eq!(model.message_cursor, 0, "a reader scrolled up stays put");
+    }
+
+    fn alt_key(c: char) -> UiEvent {
+        UiEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT))
+    }
+
+    #[test]
+    fn the_palette_filters_runs_and_closes() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(&mut model, key(KeyCode::Char(':')));
+        assert!(model.palette.is_some());
+        typed(&mut model, "foc");
+        update(&mut model, key(KeyCode::Down));
+        update(&mut model, key(KeyCode::Down));
+        update(&mut model, key(KeyCode::Enter));
+        assert!(model.palette.is_none());
+        assert_eq!(model.focus, Pane::Compose);
+        // From compose the palette is Alt-x.
+        update(&mut model, alt_key('x'));
+        typed(&mut model, "fetch");
+        assert_eq!(update(&mut model, key(KeyCode::Enter)), [UiEffect::Fetch]);
+        assert!(model.fetching);
+        update(&mut model, alt_key('x'));
+        update(&mut model, key(KeyCode::Esc));
+        assert!(model.palette.is_none());
+        assert_eq!(
+            model.focus,
+            Pane::Compose,
+            "closing the palette keeps the pane"
+        );
+    }
+
+    /// `:` `q` `Enter` quits, as a vi reader expects.
+    #[test]
+    fn colon_q_enter_quits() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(&mut model, key(KeyCode::Char(':')));
+        typed(&mut model, "q");
+        assert_eq!(update(&mut model, key(KeyCode::Enter)), [UiEffect::Quit]);
+        assert!(model.quit);
+    }
+
+    /// Decided change 1: `Enter` on a message opens its detail view; compose
+    /// is `i`, `a`, `r`.
+    #[test]
+    fn enter_on_a_message_shows_its_details_and_i_a_r_compose() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        sent(&mut model, "hi");
+        engine(&mut model, OutboxEvent::Queued { message_id: ID });
+        update(&mut model, key(KeyCode::Esc));
+        assert_eq!(model.focus, Pane::Messages);
+        assert!(update(&mut model, key(KeyCode::Enter)).is_empty());
+        assert_eq!(model.focus, Pane::Messages, "Enter no longer composes");
+        let detail = view(&model).detail.expect("the detail view");
+        assert!(
+            detail.rows.contains(&"state  queued".to_string()),
+            "{detail:?}"
+        );
+        update(&mut model, key(KeyCode::Esc));
+        assert!(model.detail.is_none());
+        for c in ['i', 'a', 'r'] {
+            model.focus = Pane::Messages;
+            update(&mut model, key(KeyCode::Char(c)));
+            assert_eq!(model.focus, Pane::Compose, "{c}");
+        }
+        // From the list too, and Enter there opens the conversation.
+        model.focus = Pane::Conversations;
+        update(&mut model, key(KeyCode::Enter));
+        assert_eq!(model.focus, Pane::Messages);
+    }
+
+    /// Decided change 2: `Ctrl-p` and `Ctrl-n` in compose are the buffer's
+    /// (line motions), not the palette; in a command pane they move the
+    /// cursor, as in lnomad.
+    #[test]
+    fn ctrl_p_is_a_motion_everywhere_and_never_the_palette() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        update(&mut model, ctrl_key('n'));
+        assert_eq!(model.selected, 1);
+        update(&mut model, ctrl_key('p'));
+        assert_eq!(model.selected, 0);
+        assert!(model.palette.is_none());
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Tab));
+        typed(&mut model, "x");
+        update(&mut model, ctrl_key('p'));
+        assert!(model.palette.is_none());
+        assert_eq!(model.compose.value(), "x");
+    }
+
+    /// Decided change 3: `Ctrl-c` quits nowhere. Outside compose it says
+    /// what does, and over an overlay too.
+    #[test]
+    fn ctrl_c_quits_nowhere_and_says_ctrl_q_does() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        assert!(update(&mut model, ctrl_key('c')).is_empty());
+        assert!(!model.quit);
+        assert_eq!(
+            model.current_toast().map(|t| t.text.as_str()),
+            Some("Ctrl-q quits")
+        );
+        update(&mut model, key(KeyCode::Char('?')));
+        assert!(update(&mut model, ctrl_key('c')).is_empty());
+        assert!(!model.quit);
+        assert_eq!(update(&mut model, ctrl_key('q')), [UiEffect::Quit]);
+    }
+
+    /// Decided change 4: with `send_on_enter` off, `Enter` breaks the line
+    /// and `Alt-Enter` sends; the palette toggles it and says the new rule.
+    #[test]
+    fn send_on_enter_off_swaps_enter_and_alt_enter() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(&mut model, key(KeyCode::Char(':')));
+        typed(&mut model, "send on enter");
+        update(&mut model, key(KeyCode::Enter));
+        assert!(!model.send_on_enter);
+        assert_eq!(
+            model.current_toast().map(|t| t.text.as_str()),
+            Some("Alt-Enter send · Enter newline")
+        );
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Tab));
+        typed(&mut model, "one");
+        assert!(update(&mut model, key(KeyCode::Enter)).is_empty());
+        typed(&mut model, "two");
+        assert_eq!(view(&model).compose_hint, "Alt-Enter send · Enter newline");
+        let effects = update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)),
+        );
+        assert_eq!(
+            effects,
+            [UiEffect::Send {
+                to: PEER,
+                body: "one\ntwo".to_string(),
+                fields: Vec::new(),
+            }]
+        );
+        model.enhanced = true;
+        assert_eq!(view(&model).compose_hint, "Ctrl-Enter send · Enter newline");
+    }
+
+    /// The Enter rule under the enhancement protocol: `Shift-Enter` breaks
+    /// the line, `Ctrl-Enter` sends and never breaks it, and the hint says
+    /// so; `Ctrl-j` breaks the line in every terminal.
+    #[test]
+    fn shift_enter_breaks_ctrl_enter_sends_and_ctrl_j_breaks_everywhere() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.enhanced = true;
+        assert_eq!(
+            view(&model).compose_hint,
+            "Enter send · Shift-Enter newline"
+        );
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Tab));
+        typed(&mut model, "a");
+        update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
+        );
+        typed(&mut model, "b");
+        update(&mut model, ctrl_key('j'));
+        typed(&mut model, "c");
+        let effects = update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)),
+        );
+        assert_eq!(
+            effects,
+            [UiEffect::Send {
+                to: PEER,
+                body: "a\nb\nc".to_string(),
+                fields: Vec::new(),
+            }]
+        );
+        model.enhanced = false;
+        assert_eq!(view(&model).compose_hint, "Enter send · Alt-Enter newline");
+    }
+
+    /// Signal's conversation keys: `Alt-↓`/`Alt-↑` step, `Alt-Shift-↓` jumps
+    /// to the next unread, from any pane.
+    #[test]
+    fn alt_arrows_step_conversations_and_alt_shift_finds_unread() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER, [0xef; 16]]);
+        let alt = |code| UiEvent::Key(KeyEvent::new(code, KeyModifiers::ALT));
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, alt(KeyCode::Down));
+        assert_eq!((model.selected, model.focus), (1, Pane::Compose));
+        update(&mut model, alt(KeyCode::Up));
+        assert_eq!(model.selected, 0);
+        model.conversations[2].unread = 1;
+        update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(
+                KeyCode::Down,
+                KeyModifiers::ALT | KeyModifiers::SHIFT,
+            )),
+        );
+        assert_eq!(model.selected, 2);
+        assert_eq!(model.conversations[2].unread, 0);
+    }
+
+    /// Help, footer and palette all read the table: the footer's keys move
+    /// with the pane, the palette shows each name's chord, the help lists
+    /// every row.
+    #[test]
+    fn help_footer_and_palette_derive_from_the_table() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        let footer_keys = |model: &UiModel<Field>| -> Vec<(&str, &str)> {
+            view(model)
+                .footer
+                .iter()
+                .map(|f| (f.key, f.label))
+                .collect()
+        };
+        assert_eq!(
+            footer_keys(&model),
+            [
+                ("Enter", "open"),
+                ("i", "write"),
+                ("Tab", "pane"),
+                (":", "commands"),
+                ("?", "help"),
+                ("q", "quit")
+            ]
+        );
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Tab));
+        assert_eq!(
+            footer_keys(&model),
+            [
+                ("Enter", "send"),
+                ("Tab", "pane"),
+                ("Esc", "back"),
+                ("Alt-x", "commands"),
+                ("F1", "help"),
+                ("Ctrl-q", "quit")
+            ]
+        );
+        update(&mut model, alt_key('x'));
+        let rows: Vec<String> = view(&model)
+            .palette
+            .map(|p| p.rows.iter().map(text).collect())
+            .unwrap_or_default();
+        assert_eq!(rows[0], "▸ send  Enter");
+        assert!(rows.contains(&"  quit  q".to_string()), "{rows:?}");
+        let help: Vec<&str> = help_groups()
+            .iter()
+            .flat_map(|g| g.entries.iter().map(|e| e.desc))
+            .collect();
+        assert!(help.contains(&"scroll a line"));
+        assert!(help.contains(&"the message's details"));
+    }
+
+    #[test]
+    fn help_opens_from_a_command_pane_and_closes_on_esc() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(&mut model, key(KeyCode::Char('?')));
+        assert!(model.help);
+        assert!(view(&model).help);
+        update(&mut model, key(KeyCode::Char('j')));
+        assert!(model.help, "keys do not leak through the overlay");
+        update(&mut model, key(KeyCode::Esc));
+        assert!(!model.help);
+    }
+
+    #[test]
+    fn the_palette_s_theme_swaps_light_and_dark_and_says_which() {
+        let mut model = UiModel::<Field>::new(&[]);
+        assert_eq!(model.theme, Theme::Dark);
+        update(&mut model, UiEvent::Run(PaletteCommand::Theme));
+        assert_eq!(model.theme, Theme::Light);
+        assert_eq!(
+            model.current_toast().map(|t| t.text.as_str()),
+            Some("theme light")
+        );
+        update(&mut model, UiEvent::Run(PaletteCommand::Theme));
+        assert_eq!(model.theme, Theme::Dark);
+        assert_eq!(
+            model.current_toast().map(|t| t.text.as_str()),
+            Some("theme dark")
+        );
+    }
+
+    #[test]
+    fn toasts_age_out_on_the_tick() {
+        let mut model = UiModel::<Field>::new(&[]);
+        sent(&mut model, "hi");
+        assert!(model.current_toast().is_some());
+        for _ in 0..TOAST_TICKS {
+            update(&mut model, UiEvent::Tick);
+        }
+        assert!(model.current_toast().is_none());
+        assert!(model.toasts.is_empty());
+    }
+
+    fn text(line: &RLine) -> String {
+        line.cells.iter().map(|c| c.ch).collect()
+    }
+
+    /// The conversation pane's rows that carry something, as text, trimmed.
+    fn shown(model: &UiModel<Field>) -> Vec<String> {
+        view(model)
+            .messages
+            .iter()
+            .map(text)
+            .map(|row| row.trim().to_string())
+            .filter(|row| !row.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn the_view_draws_the_glyph_and_says_nothing_is_earlier() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        assert_eq!(shown(&model), [layout::EARLIEST]);
+        assert_eq!(view(&model).messages_title, "<abababab…>  unknown");
+        sent(&mut model, "hi");
+        engine(&mut model, OutboxEvent::Queued { message_id: ID });
+        assert_eq!(shown(&model), [layout::EARLIEST, "hi  ○"]);
+        state(&mut model, ID, MessageState::Delivered);
+        assert_eq!(shown(&model)[1], "hi  ✓");
+        model.ascii = true;
+        assert_eq!(shown(&model)[1], "hi  v");
+        assert_eq!(
+            text(&view(&model).conversations[0]).trim_end(),
+            "▌<abababab…>"
+        );
+        assert_eq!(text(&view(&model).conversations[1]).trim_end(), "▌you: hi");
+    }
+
+    /// `Alt-Enter` puts a line break in the compose pane, `Enter` still
+    /// sends, and the sent body keeps its lines (leviculum 1002).
+    #[test]
+    fn alt_enter_breaks_the_line_and_enter_sends_both_lines() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Tab));
+        typed(&mut model, "one");
+        let effects = update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)),
+        );
+        assert!(effects.is_empty(), "Alt-Enter must not send: {effects:?}");
+        update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
+        );
+        typed(&mut model, "three");
+        assert_eq!(model.compose.value(), "one\n\nthree");
+        let effects = update(&mut model, key(KeyCode::Enter));
+        assert_eq!(
+            effects,
+            [UiEffect::Send {
+                to: PEER,
+                body: "one\n\nthree".to_string(),
+                fields: Vec::new(),
+            }]
+        );
+    }
+
+    /// A body with line breaks is drawn as its lines in one block, the mark
+    /// closing the last, both ways.
+    #[test]
+    fn a_multi_line_body_is_its_lines_in_one_block_with_the_mark_last() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        sent(&mut model, "");
+        model.compose.0 = "first\nsecond".to_string();
+        update(&mut model, key(KeyCode::Enter));
+        engine(
+            &mut model,
+            OutboxEvent::Received {
+                message_id: ID2,
+                source: PEER,
+                title: Vec::new(),
+                body: b"back\nagain".to_vec(),
+                fields: Vec::new(),
+                verified: true,
+            },
+        );
+        assert_eq!(
+            shown(&model),
+            [layout::EARLIEST, "first", "second  ○", "back", "again"]
+        );
+    }
+
+    #[test]
+    fn a_toast_wraps_at_words_to_three_rows_and_cuts_the_rest() {
+        assert_eq!(toast_rows("short", 20), ["short"]);
+        assert_eq!(
+            toast_rows("not sent: direct: no route; propagated: none", 20),
+            ["not sent: direct: no", "route; propagated:", "none"]
+        );
+        let long = toast_rows(&"word ".repeat(20), 12);
+        assert_eq!(long.len(), TOAST_MAX_ROWS, "{long:?}");
+        assert!(long[2].ends_with('…'), "{long:?}");
+        assert!(long.iter().all(|row| row.chars().count() <= 12), "{long:?}");
+    }
+
+    #[test]
+    fn wrap_cuts_to_the_width_and_sets_the_rest_in() {
+        let rows: Vec<String> = wrap(&[plain("abcdefghij"), plain("")], 6, 2)
+            .iter()
+            .map(text)
+            .collect();
+        assert_eq!(rows, ["abcdef", "  ghij", ""]);
+        // At a space when one fits, and the space goes with the break.
+        let rows: Vec<String> = wrap(&[plain("ab cd efgh")], 6, 2)
+            .iter()
+            .map(text)
+            .collect();
+        assert_eq!(rows, ["ab cd", "  efgh"]);
+        // An indent as wide as the pane would leave no room: none then.
+        let rows: Vec<String> = wrap(&[plain("abcd")], 2, 2).iter().map(text).collect();
+        assert_eq!(rows, ["ab", "cd"]);
+    }
+
+    // The chat layout (loquax-keys-and-layout.md, section 5; slice 2).
+
+    /// 2026-10-26 at `hour:minute`, an hour east of UTC.
+    fn at(day: u32, hour: u32, minute: u32) -> WallTime {
+        WallTime::from_civil(2026, 10, day, hour, minute, 3600)
+    }
+
+    fn clock(model: &mut UiModel<Field>, day: u32, hour: u32, minute: u32) {
+        update(model, UiEvent::Clock(at(day, hour, minute)));
+    }
+
+    fn receive(model: &mut UiModel<Field>, from: [u8; 16], id: u8, body: &str) {
+        engine(
+            model,
+            OutboxEvent::Received {
+                message_id: [id; 32],
+                source: from,
+                title: Vec::new(),
+                body: body.as_bytes().to_vec(),
+                fields: Vec::new(),
+                verified: true,
+            },
+        );
+    }
+
+    /// Send from compose and come back to the list, the focus where it was.
+    fn say(model: &mut UiModel<Field>, body: &str) {
+        let focus = model.focus;
+        model.focus = Pane::Compose;
+        typed(model, body);
+        update(model, key(KeyCode::Enter));
+        model.focus = focus;
+    }
+
+    /// The conversation pane's rows as text, untrimmed.
+    fn rows(model: &UiModel<Field>) -> Vec<String> {
+        view(model).messages.iter().map(text).collect()
+    }
+
+    /// The column of a row's first and last non-blank cell.
+    fn extent(row: &str) -> (usize, usize) {
+        let cells: Vec<char> = row.chars().collect();
+        let first = cells.iter().position(|c| *c != ' ').unwrap_or(0);
+        let last = cells.iter().rposition(|c| *c != ' ').unwrap_or(0);
+        (first, last)
+    }
+
+    const LONG: &str = "yes, from ten. Shall I bring the T114 and the long antenna, \
+                        or is the stick enough for the hill?";
+
+    /// Ours end one cell short of the pane's right edge, theirs start one cell
+    /// in from its left, both at most three quarters of the pane wide, and a
+    /// line breaks at a space.
+    #[test]
+    fn blocks_sit_by_side_capped_at_three_quarters_and_wrapped_at_a_space() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 14, 2);
+        say(&mut model, LONG);
+        receive(&mut model, PEER, 1, LONG);
+        let width = model.sizes().messages.0;
+        assert_eq!(width, 52, "the 80 x 24 mockup's pane");
+        let cap = layout::block_cap(width);
+        assert_eq!(cap, 37);
+        let rows = rows(&model);
+        let text_rows: Vec<&String> = rows
+            .iter()
+            .filter(|r| !r.trim().is_empty() && !r.contains(layout::EARLIEST) && !r.contains("──"))
+            .collect();
+        let (ours, theirs) = text_rows.split_at(text_rows.len() / 2);
+        // The text within the cap; the time closing the last row may reach
+        // past it, as long as the row keeps its margin cells.
+        let body_rows = |rows: &[&String]| -> Vec<String> {
+            rows.iter()
+                .map(|r| r.replace("  14:02", "").replace(" ○", ""))
+                .collect()
+        };
+        for row in body_rows(ours) {
+            let (first, last) = extent(&row);
+            assert!(last - first < cap, "{row:?}");
+        }
+        for row in ours {
+            assert!(extent(row).0 > 1, "{row:?}");
+        }
+        // The block's right edge: its widest row ends at the pane's last
+        // cell but one.
+        assert_eq!(
+            ours.iter().map(|r| extent(r).1).max(),
+            Some(width - 2),
+            "{ours:?}"
+        );
+        // Left-aligned inside the block: every row of it starts in one column.
+        let starts: Vec<usize> = ours.iter().map(|r| extent(r).0).collect();
+        assert!(starts.windows(2).all(|w| w[0] == w[1]), "{starts:?}");
+        for row in theirs {
+            assert_eq!(extent(row).0, 1, "{row:?}");
+            assert!(extent(row).1 < width - 1, "{row:?}");
+        }
+        for row in body_rows(theirs) {
+            assert!(extent(&row).1 < cap + 1, "{row:?}");
+        }
+        // Each wrapped row ends at a word's end: the words come out whole.
+        let words: Vec<&str> = theirs.iter().flat_map(|r| r.split_whitespace()).collect();
+        let expected: Vec<&str> = LONG.split_whitespace().chain(["14:02"]).collect();
+        assert_eq!(words, expected);
+        assert!(ours
+            .last()
+            .is_some_and(|r| r.trim_end().ends_with("14:02 ○")));
+        assert!(theirs
+            .last()
+            .is_some_and(|r| r.trim_end().ends_with("14:02")));
+    }
+
+    /// A centred date before each day's first message: the day before and
+    /// `Today`, across midnight.
+    #[test]
+    fn a_date_line_separates_the_days_across_midnight() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 25, 23, 59);
+        receive(&mut model, PEER, 1, "late");
+        clock(&mut model, 26, 0, 1);
+        receive(&mut model, PEER, 2, "early");
+        receive(&mut model, PEER, 3, "again");
+        assert_eq!(
+            shown(&model),
+            [
+                layout::EARLIEST,
+                "── Sunday 25 October ──",
+                "late  23:59",
+                "── Today ──",
+                "early  00:01",
+                "again  00:01",
+            ]
+        );
+        let rows = rows(&model);
+        let date = rows.iter().find(|r| r.contains("Today")).expect("today");
+        let (first, last) = extent(date);
+        assert!(first.abs_diff(52 - 1 - last) <= 1, "centred: {date:?}");
+    }
+
+    /// A conversation that is not open collects its unread under a `2 new`
+    /// rule, which is there when it is opened and stays until it is left.
+    #[test]
+    fn the_new_rule_marks_where_the_unread_begins_until_the_conversation_is_left() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        clock(&mut model, 26, 14, 0);
+        say(&mut model, "to the first");
+        receive(&mut model, OTHER, 1, "read later");
+        receive(&mut model, OTHER, 2, "and this");
+        assert_eq!(model.conversations[1].unread, 2);
+        let list: Vec<String> = view(&model).conversations.iter().map(text).collect();
+        assert!(
+            list.iter()
+                .any(|r| r.starts_with(" and this ") && r.trim_end().ends_with("[2]")),
+            "{list:?}"
+        );
+        update(&mut model, key(KeyCode::Char('g')));
+        assert_eq!(model.selected, 1);
+        let rule = "───── 2 new ─────";
+        let shown_now = shown(&model);
+        let at = shown_now
+            .iter()
+            .position(|r| r.contains(" 2 new "))
+            .expect("the rule");
+        assert_eq!(shown_now[at + 1], "read later  14:00", "{shown_now:?}");
+        assert!(shown_now[at].contains(rule.trim_matches('─')));
+        // Full width: the margin cell either side, dashes to them.
+        let row = rows(&model)
+            .into_iter()
+            .find(|r| r.contains(" 2 new "))
+            .expect("rule");
+        assert_eq!(extent(&row), (1, 50), "{row:?}");
+        // It stays while the conversation is open, through a reply.
+        say(&mut model, "thanks");
+        assert!(shown(&model).iter().any(|r| r.contains(" 2 new ")));
+        // Left, and back: gone.
+        update(&mut model, key(KeyCode::Char('j')));
+        update(&mut model, key(KeyCode::Char('g')));
+        assert_eq!(model.selected, 1);
+        assert!(!shown(&model).iter().any(|r| r.contains(" new ")));
+    }
+
+    /// A reply arriving while the reader is scrolled up draws the rule above
+    /// it and does not move the view; going back to the newest follows again.
+    #[test]
+    fn a_reply_while_scrolled_up_draws_the_rule_and_does_not_jump() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 9, 0);
+        for id in 1..=12 {
+            receive(&mut model, PEER, id, &format!("message {id}"));
+        }
+        update(&mut model, key(KeyCode::Tab));
+        assert_eq!(model.focus, Pane::Messages);
+        for _ in 0..8 {
+            update(&mut model, key(KeyCode::Char('k')));
+        }
+        assert!(model.scroll_top.is_some(), "scrolled up");
+        let before = rows(&model);
+        receive(&mut model, PEER, 13, "a reply");
+        assert_eq!(rows(&model), before, "the view did not move");
+        assert_eq!(model.message_cursor, 3, "nor did the cursor");
+        update(&mut model, key(KeyCode::Char('G')));
+        assert!(model.scroll_top.is_none(), "following again");
+        let now = shown(&model);
+        let n = now.len();
+        assert!(now[n - 2].contains(" 1 new "), "{now:?}");
+        assert_eq!(now[n - 1], "▌a reply  09:00");
+        // Following, a message arrives read: no rule of its own, the view
+        // keeps the newest at the bottom.
+        receive(&mut model, PEER, 14, "and another");
+        let now = shown(&model);
+        assert_eq!(now.last().map(String::as_str), Some("▌and another  09:00"));
+        assert_eq!(now.iter().filter(|r| r.contains(" new ")).count(), 1);
+    }
+
+    /// A page is the pane's height now that the model knows it.
+    #[test]
+    fn a_page_moves_the_view_by_the_panes_height() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        for id in 1..=40 {
+            receive(&mut model, PEER, id, &format!("message {id}"));
+        }
+        update(&mut model, key(KeyCode::Tab));
+        let height = model.message_rows();
+        let total = model.laid().rows.len();
+        update(&mut model, key(KeyCode::PageUp));
+        assert_eq!(model.scroll_top, Some(total - 2 * height));
+        update(&mut model, key(KeyCode::PageDown));
+        assert_eq!(model.scroll_top, None, "back at the bottom");
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 80,
+                height: 40,
+            },
+        );
+        assert!(model.message_rows() > height);
+    }
+
+    /// Below 40 cells of pane ours go flush left with `you` before the time;
+    /// at 40 they are flush right again.
+    #[test]
+    fn the_narrow_fallback_starts_below_forty_cells() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 9, 12);
+        say(&mut model, "on my way");
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 67,
+                height: 24,
+            },
+        );
+        assert_eq!(model.sizes().messages.0, 39);
+        let narrow = rows(&model)
+            .into_iter()
+            .find(|r| r.contains("on my way"))
+            .expect("row");
+        assert_eq!(extent(&narrow).0, 1, "{narrow:?}");
+        assert_eq!(narrow.trim(), "on my way  you 09:12 ○");
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 68,
+                height: 24,
+            },
+        );
+        assert_eq!(model.sizes().messages.0, 40);
+        let wide = rows(&model)
+            .into_iter()
+            .find(|r| r.contains("on my way"))
+            .expect("row");
+        assert_eq!(extent(&wide).1, 38, "{wide:?}");
+        assert_eq!(wide.trim(), "on my way  09:12 ○");
+    }
+
+    /// The selected block, under focus, is reversed behind the bar; nothing
+    /// is marked while another pane has the focus.
+    #[test]
+    fn the_selected_block_is_reversed_behind_the_bar_under_focus() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        receive(&mut model, PEER, 1, "one");
+        receive(&mut model, PEER, 2, "two");
+        let marked = |model: &UiModel<Field>| -> Vec<String> {
+            view(model)
+                .messages
+                .iter()
+                .filter(|r| r.cells.iter().any(|c| c.st.reverse))
+                .map(text)
+                .map(|r| r.trim().to_string())
+                .collect()
+        };
+        assert!(marked(&model).is_empty());
+        update(&mut model, key(KeyCode::Tab));
+        assert_eq!(marked(&model), ["▌two"]);
+        update(&mut model, key(KeyCode::Char('k')));
+        assert_eq!(marked(&model), ["▌one"]);
+    }
+
+    /// The detail view of a sent message lists what this session saw: the
+    /// queue, the leg, the router's states and the proof, with the times, the
+    /// full id, the peer and the size; `q` closes it.
+    #[test]
+    fn the_detail_view_lists_the_ledger_with_the_proof() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 14, 2);
+        say(&mut model, "hello");
+        update(&mut model, UiEvent::SendLeg(Leg::Direct));
+        engine(&mut model, OutboxEvent::Queued { message_id: ID });
+        clock(&mut model, 26, 14, 3);
+        state(&mut model, ID, MessageState::Sending);
+        update(&mut model, UiEvent::SendDone(Ok(())));
+        state(&mut model, ID, MessageState::Delivered);
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Enter));
+        let detail = view(&model).detail.expect("the detail view");
+        assert_eq!(
+            detail.rows,
+            [
+                "from you to <abababab…>",
+                "peer   abababababababababababababababab",
+                &format!("id     {}", "11".repeat(32)),
+                "size   5 bytes",
+                "state  delivered",
+                "",
+                "on this device",
+                "14:02:00  queued",
+                "14:02:00  trying direct",
+                "14:02:00  queued by the router as 11111111",
+                "14:03:00  in flight (direct)",
+                "14:03:00  delivered: proof received (direct)",
+            ]
+        );
+        update(&mut model, key(KeyCode::Char('q')));
+        assert!(model.detail.is_none());
+        assert_eq!(model.focus, Pane::Messages);
+    }
+
+    /// A detail view taller than a short screen scrolls by the shared scroll
+    /// keys and the wheel, clamped at both ends and on a resize, from the top
+    /// each time it opens (1095).
+    #[test]
+    fn the_detail_view_scrolls_on_a_short_screen() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 80,
+                height: 10,
+            },
+        );
+        clock(&mut model, 26, 14, 2);
+        say(&mut model, "hello");
+        update(&mut model, UiEvent::SendLeg(Leg::Direct));
+        engine(&mut model, OutboxEvent::Queued { message_id: ID });
+        update(&mut model, UiEvent::SendDone(Ok(())));
+        state(&mut model, ID, MessageState::Delivered);
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Enter));
+        let detail = view(&model).detail.expect("the detail view");
+        let (_, max) = detail_scroll_bounds(&detail, Rect::new(0, 0, 80, 10));
+        assert!(max > 1, "the detail view overflows 80 x 10");
+        assert_eq!(model.detail_scroll, 0);
+        update(&mut model, key(KeyCode::Up));
+        assert_eq!(model.detail_scroll, 0, "clamped at the top");
+        update(&mut model, key(KeyCode::Char('j')));
+        update(&mut model, key(KeyCode::Down));
+        assert_eq!(model.detail_scroll, 2);
+        assert_eq!(view(&model).detail_scroll, 2);
+        update(&mut model, key(KeyCode::Char('k')));
+        assert_eq!(model.detail_scroll, 1);
+        update(&mut model, key(KeyCode::End));
+        assert_eq!(model.detail_scroll, max);
+        update(&mut model, key(KeyCode::PageDown));
+        assert_eq!(model.detail_scroll, max, "clamped at the bottom");
+        update(&mut model, mouse(MouseEventKind::ScrollUp, 40, 5));
+        assert_eq!(model.detail_scroll, max.saturating_sub(WHEEL_ROWS));
+        update(&mut model, key(KeyCode::Home));
+        assert_eq!(model.detail_scroll, 0);
+        update(&mut model, mouse(MouseEventKind::ScrollDown, 40, 5));
+        assert_eq!(model.detail_scroll, WHEEL_ROWS.min(max));
+        assert!(model.detail.is_some(), "no scroll key closes it");
+        update(&mut model, key(KeyCode::End));
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 80,
+                height: 40,
+            },
+        );
+        assert_eq!(model.detail_scroll, 0, "all of it fits now");
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 80,
+                height: 10,
+            },
+        );
+        update(&mut model, key(KeyCode::End));
+        update(&mut model, key(KeyCode::Char('q')));
+        update(&mut model, key(KeyCode::Enter));
+        assert_eq!(model.detail_scroll, 0, "it opens at the top");
+    }
+
+    /// A failure names its reason in the ledger; a received message says
+    /// whether its signature verified.
+    #[test]
+    fn the_ledger_keeps_a_failure_and_a_received_messages_signature() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        say(&mut model, "hi");
+        update(&mut model, UiEvent::SendDone(Err("no route".to_string())));
+        let ledger: Vec<&str> = model.conversations[0].messages[0]
+            .ledger
+            .iter()
+            .map(|e| e.what.as_str())
+            .collect();
+        assert_eq!(ledger, ["queued", "not sent: no route"]);
+        engine(
+            &mut model,
+            OutboxEvent::Received {
+                message_id: ID2,
+                source: PEER,
+                title: Vec::new(),
+                body: b"who?".to_vec(),
+                fields: Vec::new(),
+                verified: false,
+            },
+        );
+        let them = &model.conversations[0].messages[1];
+        assert_eq!(them.ledger[0].what, "received, signature NOT verified");
+        assert_eq!(them.size, 4);
+        assert!(shown(&model).contains(&"who?  unverified".to_string()));
+    }
+
+    /// A held message's verdict changes its block in place (leviculum
+    /// 1079): a signature that holds drops `unverified`, one that does not
+    /// says `INVALID signature`, and each says so in the ledger. A verdict
+    /// for a message of another sender changes nothing.
+    #[test]
+    fn a_verdict_turns_an_unverified_message_verified_or_invalid() {
+        const ID3: [u8; 32] = [0x33; 32];
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        for (id, body) in [(ID2, b"one".as_slice()), (ID3, b"two".as_slice())] {
+            engine(
+                &mut model,
+                OutboxEvent::Received {
+                    message_id: id,
+                    source: PEER,
+                    title: Vec::new(),
+                    body: body.to_vec(),
+                    fields: Vec::new(),
+                    verified: false,
+                },
+            );
+        }
+        engine(
+            &mut model,
+            OutboxEvent::Verified {
+                message_id: ID2,
+                source: [0x77; 16],
+                valid: true,
+            },
+        );
+        assert_eq!(
+            model.conversations[0].messages[0].signature,
+            Signature::Unverified
+        );
+        engine(
+            &mut model,
+            OutboxEvent::Verified {
+                message_id: ID2,
+                source: PEER,
+                valid: true,
+            },
+        );
+        engine(
+            &mut model,
+            OutboxEvent::Verified {
+                message_id: ID3,
+                source: PEER,
+                valid: false,
+            },
+        );
+        let messages = &model.conversations[0].messages;
+        assert_eq!(messages[0].signature, Signature::Verified);
+        assert_eq!(
+            messages[0].ledger.last().map(|e| e.what.as_str()),
+            Some("signature verified, once the sender's key arrived")
+        );
+        assert_eq!(messages[1].signature, Signature::Invalid);
+        assert_eq!(
+            messages[1].ledger.last().map(|e| e.what.as_str()),
+            Some("signature INVALID against the sender's key")
+        );
+        let lines = shown(&model);
+        assert!(lines.contains(&"one".to_string()), "{lines:?}");
+        assert!(
+            lines.contains(&"two  INVALID signature".to_string()),
+            "{lines:?}"
+        );
+    }
+
+    /// The header names the peer, its trust and the propagation node, the
+    /// longest form that fits; a wide pane gives the address and a row for
+    /// the propagation node.
+    #[test]
+    fn the_header_says_the_trust_and_the_mailbox_state() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        assert_eq!(view(&model).messages_title_right, "no propagation node");
+        update(
+            &mut model,
+            UiEvent::MailboxChosen {
+                node: [0x9c; 16],
+                by_user: false,
+            },
+        );
+        assert_eq!(
+            view(&model).messages_title_right,
+            "propagation node 9c9c9c9c"
+        );
+        clock(&mut model, 26, 14, 3);
+        update(&mut model, UiEvent::Run(PaletteCommand::Fetch));
+        update(&mut model, UiEvent::FetchDone(Ok(0)));
+        assert_eq!(view(&model).messages_title_right, "pn · synced 14:03");
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 120,
+                height: 40,
+            },
+        );
+        let wide = view(&model);
+        assert_eq!(wide.messages_title_right, to_hex(&PEER));
+        assert_eq!(
+            text(&wide.messages[0]).trim(),
+            "propagation node 9c9c9c9c adopted · synced 14:03"
+        );
+        assert!(text(&wide.messages[1]).trim().chars().all(|c| c == '─'));
+        assert_eq!(wide.compose_title, "to <abababab…>");
+    }
+
+    fn engine_says(model: &mut UiModel<Field>, event: OutboxEvent) -> Vec<UiEffect> {
+        update(model, UiEvent::Engine(event))
+    }
+
+    /// The mailbox schedule through the model: the engine's `Ready` starts
+    /// the first sync, the header names the next one, an empty automatic
+    /// sync says nothing, a full one says what came, and the timer starts
+    /// the next sync without a key.
+    #[test]
+    fn the_schedule_syncs_at_start_and_on_its_timer_and_the_header_says_when() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.sync = Some(Schedule::new(Some(crate::sync::DEFAULT_BOUND_MS)));
+        update(
+            &mut model,
+            UiEvent::MailboxChosen {
+                node: [0x9c; 16],
+                by_user: false,
+            },
+        );
+        clock(&mut model, 26, 14, 5);
+        let effects = engine_says(
+            &mut model,
+            OutboxEvent::Ready {
+                address: [0xee; 16],
+            },
+        );
+        assert_eq!(effects, [UiEffect::Fetch], "start syncs");
+        assert_eq!(model.fetch_reason, Some(Reason::Start));
+        assert_eq!(view(&model).messages_title_right, "pn · fetching");
+        update(&mut model, UiEvent::Elapsed(1_000));
+        assert!(
+            update(&mut model, UiEvent::Run(PaletteCommand::Fetch)).is_empty(),
+            "one at a time"
+        );
+        let toasts = model.toasts.len();
+        update(&mut model, UiEvent::FetchDone(Ok(0)));
+        assert_eq!(
+            model.toasts.len(),
+            toasts,
+            "an empty automatic sync is quiet"
+        );
+        // At 80 columns only the next sync fits: it is kept before the
+        // last one and the node.
+        assert_eq!(view(&model).messages_title_right, "pn · next 14:20");
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 120,
+                height: 40,
+            },
+        );
+        assert_eq!(
+            text(&view(&model).messages[0]).trim(),
+            "propagation node 9c9c9c9c adopted · synced 14:05 · next 14:20"
+        );
+        assert!(update(&mut model, UiEvent::Elapsed(899_999)).is_empty());
+        let effects = update(&mut model, UiEvent::Elapsed(900_000));
+        assert_eq!(effects, [UiEffect::Fetch], "the bound, without a key");
+        assert_eq!(model.fetch_reason, Some(Reason::Timer));
+        update(&mut model, UiEvent::Elapsed(901_000));
+        update(&mut model, UiEvent::FetchDone(Ok(2)));
+        assert_eq!(
+            model.toasts.last().map(|t| t.text.as_str()),
+            Some("2 new message(s)")
+        );
+        // Activity: two minutes, not fifteen.
+        assert!(update(&mut model, UiEvent::Elapsed(1_020_999)).is_empty());
+        assert_eq!(
+            update(&mut model, UiEvent::Elapsed(1_021_000)),
+            [UiEffect::Fetch]
+        );
+    }
+
+    /// An announce of the selected node syncs; another node's does not.
+    #[test]
+    fn the_mailbox_announcing_syncs_and_another_node_does_not() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.sync = Some(Schedule::new(Some(crate::sync::DEFAULT_BOUND_MS)));
+        update(
+            &mut model,
+            UiEvent::MailboxChosen {
+                node: [0x9c; 16],
+                by_user: true,
+            },
+        );
+        engine_says(
+            &mut model,
+            OutboxEvent::Ready {
+                address: [0xee; 16],
+            },
+        );
+        update(&mut model, UiEvent::Elapsed(1_000));
+        update(&mut model, UiEvent::FetchDone(Ok(0)));
+        update(&mut model, UiEvent::Elapsed(120_000));
+        let other = OutboxEvent::NodeAnnounced {
+            destination: [0x42; 16],
+        };
+        assert!(engine_says(&mut model, other).is_empty());
+        let ours = OutboxEvent::NodeAnnounced {
+            destination: [0x9c; 16],
+        };
+        assert_eq!(engine_says(&mut model, ours), [UiEffect::Fetch]);
+        assert_eq!(model.fetch_reason, Some(Reason::Announce));
+    }
+
+    /// A failed automatic sync says so once, not on every retry; one the
+    /// reader asked for always says so.
+    #[test]
+    fn automatic_failures_are_said_once_in_a_row() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.sync = Some(Schedule::new(Some(crate::sync::DEFAULT_BOUND_MS)));
+        engine_says(
+            &mut model,
+            OutboxEvent::Ready {
+                address: [0xee; 16],
+            },
+        );
+        let first = update(&mut model, UiEvent::FetchDone(Err("no route".into())));
+        assert_eq!(first, [UiEffect::Notice("fetch: no route".into())]);
+        update(&mut model, UiEvent::Elapsed(30_000));
+        assert_eq!(model.fetch_reason, Some(Reason::Timer), "the retry");
+        let second = update(&mut model, UiEvent::FetchDone(Err("no route".into())));
+        assert!(second.is_empty(), "{second:?}");
+        update(&mut model, UiEvent::Run(PaletteCommand::Fetch));
+        let asked = update(&mut model, UiEvent::FetchDone(Err("no route".into())));
+        assert_eq!(asked, [UiEffect::Notice("fetch: no route".into())]);
+    }
+
+    /// Without a schedule nothing syncs by itself: what every key script
+    /// without `--sync-interval` relies on.
+    #[test]
+    fn without_a_schedule_only_the_key_syncs() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        assert!(engine_says(
+            &mut model,
+            OutboxEvent::Ready {
+                address: [0xee; 16]
+            }
+        )
+        .is_empty());
+        assert!(update(&mut model, UiEvent::Elapsed(24 * 3_600_000)).is_empty());
+        assert!(update(&mut model, UiEvent::Resumed).is_empty());
+    }
+
+    // The mouse (section 5, "What the mouse does"), fed to the model as the
+    // terminal sends it: cells from 0, the left button down and up.
+
+    fn mouse(kind: MouseEventKind, col: u16, row: u16) -> UiEvent {
+        UiEvent::Mouse(MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    fn press(model: &mut UiModel<Field>, (col, row): (u16, u16)) -> Vec<UiEffect> {
+        let mut effects = update(
+            model,
+            mouse(MouseEventKind::Down(MouseButton::Left), col, row),
+        );
+        effects.extend(update(
+            model,
+            mouse(MouseEventKind::Up(MouseButton::Left), col, row),
+        ));
+        effects
+    }
+
+    /// Every cell of the screen whose target `want` takes, in reading order.
+    fn cells(model: &UiModel<Field>, want: impl Fn(&hit::Target) -> bool) -> Vec<(u16, u16)> {
+        let (width, height) = model.screen;
+        (0..height)
+            .flat_map(|row| (0..width).map(move |col| (col, row)))
+            .filter(|&(col, row)| want(&hit::target_at(model, col, row)))
+            .collect()
+    }
+
+    /// The screen cell of the `nth` character of the first conversation row
+    /// holding `needle`.
+    fn cell_of(model: &UiModel<Field>, needle: &str, nth: usize) -> (u16, u16) {
+        let screen = hit::screen(model);
+        let (row, col) = rows(model)
+            .iter()
+            .enumerate()
+            .find_map(|(r, line)| {
+                line.find(needle)
+                    .map(|byte| (r, line[..byte].chars().count() + nth))
+            })
+            .unwrap_or_else(|| panic!("{needle:?} not on screen: {:#?}", rows(model)));
+        (
+            screen.messages.x + 1 + col as u16,
+            screen.messages.y + 1 + row as u16,
+        )
+    }
+
+    /// A model with one conversation of `n` short messages from the peer.
+    fn chatty(n: u8) -> UiModel<Field> {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        clock(&mut model, 26, 12, 0);
+        for id in 1..=n {
+            receive(&mut model, PEER, id, &format!("message {id}"));
+        }
+        model.toasts.clear();
+        model
+    }
+
+    #[test]
+    fn a_click_focuses_its_pane_and_the_wheel_scrolls_the_one_under_the_pointer() {
+        let mut model = chatty(15);
+        assert_eq!(model.focus, Pane::Conversations);
+        let screen = hit::screen(&model);
+        let over_messages = (screen.messages.x + 10, screen.messages.y + 5);
+        update(
+            &mut model,
+            mouse(MouseEventKind::ScrollUp, over_messages.0, over_messages.1),
+        );
+        // The conversation moved, the focus and the list did not.
+        let total = model.laid().rows.len();
+        let bottom = total - model.message_rows();
+        assert_eq!(model.scroll_top, Some(bottom - WHEEL_ROWS));
+        assert_eq!(model.focus, Pane::Conversations);
+        assert_eq!(model.selected, 0);
+        update(
+            &mut model,
+            mouse(MouseEventKind::ScrollDown, over_messages.0, over_messages.1),
+        );
+        assert_eq!(model.scroll_top, None, "back at the newest");
+        // The wheel over the list steps the conversation, whatever has the
+        // focus.
+        model.focus = Pane::Compose;
+        update(&mut model, mouse(MouseEventKind::ScrollDown, 3, 5));
+        assert_eq!(model.selected, 1);
+        assert_eq!(model.focus, Pane::Compose);
+        // A click on a pane's border focuses it.
+        press(&mut model, (screen.messages.x, screen.messages.y + 3));
+        assert_eq!(model.focus, Pane::Messages);
+        press(&mut model, (screen.compose.x, screen.compose.y + 1));
+        assert_eq!(model.focus, Pane::Compose);
+        press(&mut model, (0, 10));
+        assert_eq!(model.focus, Pane::Conversations);
+    }
+
+    #[test]
+    fn a_click_on_a_row_opens_it_and_one_on_the_badge_opens_it_at_its_new_rule() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        clock(&mut model, 26, 12, 0);
+        // Read with OTHER, then left it for PEER, and two arrive from OTHER.
+        model.selected = 1;
+        for id in 1..=12 {
+            receive(&mut model, OTHER, id, &format!("old {id}"));
+        }
+        update(&mut model, UiEvent::Run(PaletteCommand::NextConversation));
+        let at_peer = cells(&model, |t| *t == hit::Target::Conversation(0));
+        press(&mut model, at_peer[0]);
+        assert_eq!((model.selected, model.focus), (0, Pane::Conversations));
+        for id in 13..=24 {
+            receive(&mut model, OTHER, id, &format!("new {id}"));
+        }
+        assert_eq!(model.conversations[1].unread, 12);
+        let badge = cells(&model, |t| *t == hit::Target::Badge(1));
+        assert_eq!(badge.len(), "[12]".len(), "{badge:?}");
+        assert!(badge
+            .windows(2)
+            .all(|w| w[1].0 == w[0].0 + 1 && w[1].1 == w[0].1));
+        press(&mut model, badge[1]);
+        assert_eq!(model.selected, 1);
+        assert_eq!(model.focus, Pane::Messages);
+        assert_eq!(model.conversations[1].unread, 0);
+        assert_eq!(model.message_cursor, 12, "the first unread message");
+        let shown = rows(&model);
+        assert!(shown[0].contains(" 12 new "), "{shown:#?}");
+        assert!(shown[1].contains("new 13"), "{shown:#?}");
+    }
+
+    #[test]
+    fn a_click_selects_a_message_and_one_on_its_mark_opens_the_detail_view() {
+        let mut model = chatty(15);
+        say(&mut model, "the newest, ours");
+        let mark = cells(&model, |t| {
+            matches!(t, hit::Target::Block { mark: true, .. })
+        });
+        assert_eq!(mark.len(), 1, "one cell, the glyph: {mark:?}");
+        // A message up the screen, selected where it is: the view stays.
+        let older = cell_of(&model, "message 10", 2);
+        press(&mut model, older);
+        assert_eq!(model.focus, Pane::Messages);
+        assert_eq!(model.message_cursor, 9);
+        assert!(rows(&model).iter().any(|r| r.contains("message 10")));
+        assert!(rows(&model).iter().any(|r| r.contains("the newest, ours")));
+        assert_eq!(model.detail, None);
+        press(&mut model, mark[0]);
+        assert_eq!(model.detail, Some((0, 15)));
+        // Inside the detail view a click does nothing, outside it closes.
+        let area = hit::screen(&model).area();
+        let detail = detail_view(&model, 0, 15).expect("a detail view");
+        let (rect, _) = detail_layout(&detail, area);
+        press(&mut model, (rect.x + 2, rect.y + 1));
+        assert_eq!(model.detail, Some((0, 15)));
+        press(&mut model, (0, 0));
+        assert_eq!(model.detail, None);
+    }
+
+    #[test]
+    fn a_click_in_compose_places_the_cursor_at_its_cell() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.focus = Pane::Compose;
+        typed(&mut model, "first line");
+        model.compose.newline();
+        typed(&mut model, "second");
+        model.focus = Pane::Conversations;
+        let screen = hit::screen(&model);
+        let (x, y) = (screen.compose.x + 1, screen.compose.y + 1);
+        press(&mut model, (x + 3, y + 1));
+        assert_eq!(model.focus, Pane::Compose);
+        assert_eq!(model.compose.cursor(), "first line\n".len() + 3);
+        press(&mut model, (x + 30, y));
+        assert_eq!(model.compose.cursor(), "first line".len(), "the line's end");
+    }
+
+    /// The quiet keyboard holds for the mouse: of every cell on the screen,
+    /// in every pane's focus and at both mockup sizes, the only clicks that
+    /// transmit are on the word `send` on the compose box's border and on
+    /// the mailbox state in the header, and each of them does.
+    #[test]
+    fn the_only_clicks_that_transmit_are_send_and_the_mailbox_state() {
+        let mut seen = Vec::new();
+        for (width, height) in [(80, 24), (120, 40)] {
+            for focus in [Pane::Conversations, Pane::Messages, Pane::Compose] {
+                let mut model = chatty(4);
+                update(&mut model, UiEvent::Resize { width, height });
+                update(
+                    &mut model,
+                    UiEvent::MailboxChosen {
+                        node: [0x9c; 16],
+                        by_user: false,
+                    },
+                );
+                say(&mut model, "see https://example.org/x");
+                model.focus = Pane::Compose;
+                typed(&mut model, "a draft");
+                model.focus = focus;
+                for row in 0..height {
+                    for col in 0..width {
+                        let target = hit::target_at(&model, col, row);
+                        let mut clicked = model.clone();
+                        let effects = press(&mut clicked, (col, row));
+                        let tx = effects
+                            .iter()
+                            .any(|e| matches!(e, UiEffect::Send { .. } | UiEffect::Fetch));
+                        if tx && !seen.contains(&target) {
+                            seen.push(target.clone());
+                        }
+                        match target {
+                            hit::Target::Send | hit::Target::Mailbox => {
+                                assert!(tx, "{target:?} at {col},{row} did not transmit")
+                            }
+                            _ => assert!(!tx, "{target:?} at {col},{row} transmitted"),
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(seen, [hit::Target::Mailbox, hit::Target::Send]);
+    }
+
+    #[test]
+    fn a_footer_click_runs_its_row_and_a_hover_marks_it() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        let screen = hit::screen(&model);
+        let slots = leviculum_ui::footer::layout(view(&model).footer, screen.footer);
+        let help = slots
+            .iter()
+            .find(|slot| slot.item.label == "help")
+            .expect("? help in the list's footer");
+        update(
+            &mut model,
+            mouse(MouseEventKind::Moved, help.rect.x + 1, help.rect.y),
+        );
+        assert_eq!(model.footer_hover, Some(help.index));
+        assert_eq!(view(&model).footer_hover, Some(help.index));
+        update(&mut model, mouse(MouseEventKind::Moved, 5, 5));
+        assert_eq!(model.footer_hover, None);
+        press(&mut model, (help.rect.x, help.rect.y));
+        assert!(model.help);
+        // The help fills an 80 x 24 screen, so any click closes it, as in
+        // lnomad.
+        press(&mut model, (40, 12));
+        assert!(!model.help);
+        // `send` in compose's footer is left to the border's word.
+        model.focus = Pane::Compose;
+        let slots = leviculum_ui::footer::layout(view(&model).footer, screen.footer);
+        let send = slots
+            .iter()
+            .find(|slot| slot.item.label == "send")
+            .expect("Enter send in compose's footer");
+        assert_eq!(send.item.action, FooterAct::Row(None));
+        update(
+            &mut model,
+            mouse(MouseEventKind::Moved, send.rect.x, send.rect.y),
+        );
+        assert_eq!(model.footer_hover, None);
+    }
+
+    #[test]
+    fn a_drag_copies_the_text_of_the_blocks_without_times_and_marks() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 12, 0);
+        receive(&mut model, PEER, 1, "the quick brown fox");
+        say(&mut model, "jumps over\nthe lazy dog");
+        model.toasts.clear();
+        let from = cell_of(&model, "the quick", 0);
+        let to = cell_of(&model, "the lazy dog", "the lazy dog".len() - 1);
+        update(
+            &mut model,
+            mouse(MouseEventKind::Down(MouseButton::Left), from.0, from.1),
+        );
+        update(
+            &mut model,
+            mouse(MouseEventKind::Drag(MouseButton::Left), to.0, to.1),
+        );
+        let effects = update(
+            &mut model,
+            mouse(MouseEventKind::Up(MouseButton::Left), to.0, to.1),
+        );
+        let text = "the quick brown fox\njumps over\nthe lazy dog";
+        assert_eq!(effects, [UiEffect::Copy(text.to_string())]);
+        assert_eq!(
+            model.current_toast().map(|t| t.text.as_str()),
+            Some("copied 43 chars")
+        );
+        // The selection is drawn in inverse video against the block, which
+        // the focus reversed: the time beside it stays as the block is.
+        let line = view(&model)
+            .messages
+            .into_iter()
+            .find(|l| text_of(l).contains("the quick"))
+            .expect("the row");
+        let quick: Vec<bool> = line
+            .cells
+            .iter()
+            .filter(|c| c.ch != ' ' && c.ch != layout::BAR)
+            .map(|c| c.st.reverse)
+            .collect();
+        assert!(quick[..16].iter().all(|r| *r != quick[16]), "{quick:?}");
+        assert!(
+            quick[16..].iter().all(|r| *r == quick[16]),
+            "the time: {quick:?}"
+        );
+        // `y` copies the selection again; with none, `Alt-w` copies the
+        // message under the cursor whole, the one the drag began on.
+        assert_eq!(
+            update(&mut model, key(KeyCode::Char('y'))),
+            [UiEffect::Copy(text.to_string())]
+        );
+        assert_eq!(
+            update(&mut model, alt_key('w')),
+            [UiEffect::Copy("the quick brown fox".to_string())]
+        );
+        // Part of a line: from inside one word to inside the next.
+        let from = cell_of(&model, "quick", 1);
+        let to = cell_of(&model, "brown", 2);
+        update(
+            &mut model,
+            mouse(MouseEventKind::Down(MouseButton::Left), from.0, from.1),
+        );
+        update(
+            &mut model,
+            mouse(MouseEventKind::Drag(MouseButton::Left), to.0, to.1),
+        );
+        let effects = update(
+            &mut model,
+            mouse(MouseEventKind::Up(MouseButton::Left), to.0, to.1),
+        );
+        assert_eq!(effects, [UiEffect::Copy("uick bro".to_string())]);
+    }
+
+    fn text_of(line: &RLine) -> String {
+        line.cells.iter().map(|c| c.ch).collect()
+    }
+
+    #[test]
+    fn a_click_on_a_link_follows_it_as_lnomad_does() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        let other = to_hex(&OTHER);
+        receive(
+            &mut model,
+            PEER,
+            1,
+            &format!("see https://example.org/a. or write lxmf@{other}"),
+        );
+        let url = cell_of(&model, "https://", 3);
+        assert_eq!(
+            press(&mut model, url),
+            [UiEffect::Open("https://example.org/a".to_string())]
+        );
+        let lxmf = cell_of(&model, "lxmf@", 0);
+        assert_eq!(press(&mut model, lxmf), []);
+        assert_eq!(model.conversations[model.selected].peer, OTHER);
+        assert_eq!(model.focus, Pane::Compose);
+    }
+
+    #[test]
+    fn the_mouse_switch_turns_capture_off_and_the_model_deaf_to_it() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        assert_eq!(
+            update(&mut model, UiEvent::Run(PaletteCommand::Mouse)),
+            [UiEffect::Mouse(false)]
+        );
+        assert!(!model.mouse);
+        let screen = hit::screen(&model);
+        press(&mut model, (screen.compose.x + 2, screen.compose.y + 1));
+        assert_eq!(model.focus, Pane::Conversations);
+        assert_eq!(
+            update(&mut model, UiEvent::Run(PaletteCommand::Mouse)),
+            [UiEffect::Mouse(true)]
+        );
+        press(&mut model, (screen.compose.x + 2, screen.compose.y + 1));
+        assert_eq!(model.focus, Pane::Compose);
+    }
+
+    // The search (slice 4).
+
+    /// The list pane's rows as text, trailing blanks cut.
+    fn list_rows(model: &UiModel<Field>) -> Vec<String> {
+        view(model)
+            .conversations
+            .iter()
+            .map(|line| text(line).trim_end().to_string())
+            .collect()
+    }
+
+    /// A model of two conversations: PEER with three messages, two of them
+    /// with a `tripod`, OTHER with one, written in this order, so the list
+    /// has OTHER on top.
+    fn searchable() -> UiModel<Field> {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 120,
+                height: 40,
+            },
+        );
+        clock(&mut model, 26, 14, 0);
+        receive(&mut model, PEER, 1, "did the board come back?");
+        clock(&mut model, 26, 14, 5);
+        receive(
+            &mut model,
+            PEER,
+            2,
+            "and the small tripod\nif it fits in the bag",
+        );
+        clock(&mut model, 26, 14, 6);
+        say(&mut model, "the Tripod fits");
+        update(&mut model, key(KeyCode::Char('j')));
+        clock(&mut model, 26, 14, 7);
+        say(&mut model, "the tripod stays in the van");
+        model.toasts.clear();
+        model
+    }
+
+    fn search_for(model: &mut UiModel<Field>, query: &str) {
+        model.focus = Pane::Conversations;
+        update(model, key(KeyCode::Char('/')));
+        assert_eq!(model.focus, Pane::Search);
+        typed(model, query);
+    }
+
+    /// Conversations by name first, then messages, each most recent first;
+    /// the match is case-blind and a message whose conversation matches by
+    /// name is in both groups.
+    #[test]
+    fn the_matcher_groups_conversations_then_messages_most_recent_first() {
+        let mut model = searchable();
+        let tripod = search::hits(
+            &model.conversations,
+            &model.names,
+            &model.order(),
+            "tripod",
+            &[],
+        );
+        let m = |conversation, message| search::Hit::Message {
+            conversation,
+            message,
+        };
+        assert_eq!(tripod, [m(1, 0), m(0, 2), m(0, 1)]);
+        assert_eq!(
+            search::hits(
+                &model.conversations,
+                &model.names,
+                &model.order(),
+                "TRIPOD",
+                &[]
+            ),
+            tripod
+        );
+        // `abab` is PEER's name, and one of our messages says it.
+        say(&mut model, "ask abababab about it");
+        let by_name = search::hits(
+            &model.conversations,
+            &model.names,
+            &model.order(),
+            "ABAB",
+            &[],
+        );
+        assert_eq!(by_name, [search::Hit::Conversation(0), m(1, 1)]);
+        assert!(
+            search::hits(&model.conversations, &model.names, &model.order(), "", &[]).is_empty()
+        );
+        assert!(search::hits(
+            &model.conversations,
+            &model.names,
+            &model.order(),
+            "drone",
+            &[]
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn find_and_mark_ignore_case_and_mark_the_first_match_only() {
+        assert_eq!(search::find("The Tripod", "tripod"), Some((4, 6)));
+        assert_eq!(search::find("Ärger", "ä"), Some((0, 1)));
+        assert_eq!(search::find("tripod", ""), None);
+        assert_eq!(search::find("pod", "tripod"), None);
+        assert_eq!(
+            search::mark_first("tripod, and a tripod again", "TRIPOD"),
+            "«tripod», and a tripod again"
+        );
+        assert_eq!(search::mark_first("no match", "x"), "no match");
+    }
+
+    /// A preview is the body on one line, the first match marked, and cut so
+    /// the match stays in view.
+    #[test]
+    fn a_preview_joins_the_lines_and_keeps_the_match_in_view() {
+        let body = "and the small tripod\nif it fits in the bag";
+        assert_eq!(
+            search::preview(body, "tripod", 29),
+            "and the small «tripod» if it…"
+        );
+        // Past the room: the start goes.
+        assert_eq!(search::preview(body, "bag", 24), "…if it fits in the «bag»");
+        assert_eq!(search::preview(body, "fits", 18), "…pod if it «fits»…");
+        let short = search::preview(body, "fits", 24);
+        assert!(short.contains("«fits»"), "{short}");
+        assert_eq!(short.chars().count(), 24, "{short}");
+    }
+
+    /// The search as the list shows it at 120 x 40: the field, the groups
+    /// with their counts, two rows a result with who and when, the match
+    /// marked; one row per message however often it matches; `no matches`
+    /// when nothing does; the plain list again for an empty field.
+    #[test]
+    fn the_results_take_the_list_pane_as_the_query_is_typed() {
+        let mut model = searchable();
+        say(&mut model, "a tripod, and a tripod again");
+        search_for(&mut model, "tri");
+        let shown = list_rows(&model);
+        assert_eq!(shown[0], " / tri");
+        assert_eq!(shown[1], "");
+        assert_eq!(view(&model).conversations_title, SEARCH_TITLE);
+        assert_eq!(view(&model).conversations_title_right, SEARCH_CLOSES);
+        assert_eq!(view(&model).list_hint, "");
+        assert_eq!(view(&model).search_cursor, Some(6));
+        typed(&mut model, "pod");
+        let shown = list_rows(&model);
+        assert!(shown[2].starts_with(" MESSAGES"), "{shown:#?}");
+        assert!(shown[2].ends_with(" 4"), "{shown:#?}");
+        assert_eq!(shown[3], " ▌you to <cdcdcdcd…>        14:07");
+        assert_eq!(shown[4], " ▌a «tripod», and a tripod again");
+        assert_eq!(shown[7], "  the «tripod» stays in the van");
+        assert_eq!(shown[9], "  you to <abababab…>        14:06");
+        assert_eq!(shown[10], "  the «Tripod» fits");
+        assert_eq!(shown[12], "  <abababab…>               14:05");
+        assert_eq!(shown[13], "  and the small «tripod» if it f…");
+        typed(&mut model, "s");
+        assert_eq!(list_rows(&model)[2], format!(" {}", search::NO_MATCHES));
+        // Backspaced to empty: the plain list under the field.
+        for _ in 0.."tripods".len() {
+            update(&mut model, key(KeyCode::Backspace));
+        }
+        let shown = list_rows(&model);
+        assert_eq!(shown[0], " /");
+        assert!(shown[2].starts_with("▌<cdcdcdcd…>"), "{shown:#?}");
+        assert!(shown[5].starts_with(" <abababab…>"), "{shown:#?}");
+    }
+
+    /// `Enter` on a message opens its conversation at it: the block selected
+    /// and the match marked in place; `n` and `N` step the matches of that
+    /// conversation round its ends; `Esc` twice brings the list back and the
+    /// conversation keeps what it shows.
+    #[test]
+    fn a_message_result_opens_at_the_message_and_n_steps_the_matches() {
+        let mut model = searchable();
+        search_for(&mut model, "tripod");
+        assert_eq!(model.focus, Pane::Search);
+        update(&mut model, key(KeyCode::Tab));
+        assert_eq!(model.focus, Pane::Conversations);
+        update(&mut model, key(KeyCode::Char('j')));
+        update(&mut model, key(KeyCode::Char('n')));
+        assert_eq!(model.search.as_ref().map(|s| s.selected), Some(2));
+        update(&mut model, key(KeyCode::Enter));
+        assert_eq!(model.selected, 0);
+        assert_eq!(model.focus, Pane::Messages);
+        assert_eq!(model.message_cursor, 1);
+        let shown = rows(&model);
+        assert!(
+            shown.iter().any(|r| r.contains("▌and the small «tripod»")),
+            "{shown:#?}"
+        );
+        assert!(
+            shown.iter().any(|r| r.contains("the «Tripod» fits")),
+            "{shown:#?}"
+        );
+        assert!(shown.iter().all(|r| !r.contains("«board»")));
+        update(&mut model, key(KeyCode::Char('n')));
+        assert_eq!(model.message_cursor, 2);
+        update(&mut model, key(KeyCode::Char('n')));
+        assert_eq!(model.message_cursor, 1, "round to the first");
+        assert!(model
+            .current_toast()
+            .is_some_and(|t| t.text.contains("first")));
+        update(&mut model, ctrl_key('r'));
+        assert_eq!(model.message_cursor, 2, "Ctrl-r is N, round to the last");
+        update(&mut model, ctrl_key('s'));
+        assert_eq!(model.message_cursor, 1, "Ctrl-s is n");
+        update(&mut model, key(KeyCode::Esc));
+        assert_eq!(model.focus, Pane::Conversations);
+        assert!(model.search.is_some());
+        update(&mut model, key(KeyCode::Esc));
+        assert!(model.search.is_none());
+        assert_eq!(model.focus, Pane::Conversations);
+        assert_eq!(model.selected, 0, "the conversation stays open");
+        assert_eq!(model.message_cursor, 1);
+        assert!(rows(&model).iter().all(|r| !r.contains('«')));
+        assert!(list_rows(&model)
+            .iter()
+            .any(|r| r.starts_with("▌<abababab…>")));
+    }
+
+    /// `Ctrl-s` opens the search from every pane, compose included; while it
+    /// is open `Ctrl-s` in the results steps them and `Ctrl-r` is the previous
+    /// one, not the fetch it is outside a search.
+    #[test]
+    fn ctrl_s_opens_the_search_everywhere_and_ctrl_r_fetches_only_outside_it() {
+        let mut model = searchable();
+        model.focus = Pane::Compose;
+        update(&mut model, ctrl_key('s'));
+        assert_eq!(model.focus, Pane::Search);
+        typed(&mut model, "tripod");
+        assert_eq!(model.compose.value(), "", "the field took the typing");
+        update(&mut model, ctrl_key('s'));
+        assert_eq!(model.search.as_ref().map(|s| s.selected), Some(1));
+        update(&mut model, key(KeyCode::Tab));
+        assert!(update(&mut model, ctrl_key('r')).is_empty(), "no fetch");
+        assert_eq!(model.search.as_ref().map(|s| s.selected), Some(0));
+        update(&mut model, key(KeyCode::Enter));
+        assert_eq!(model.selected, 1, "the first result is OTHER's message");
+        update(&mut model, key(KeyCode::Esc));
+        update(&mut model, key(KeyCode::Esc));
+        assert!(model.search.is_none());
+        assert_eq!(update(&mut model, ctrl_key('r')), [UiEffect::Fetch]);
+    }
+
+    /// While the search is open the footer is its own: in the field `Enter
+    /// open`, the `Ctrl-s / Ctrl-r` pair, `Tab to the results`, `Esc close
+    /// search`; in the results `n / N` as well. Outside it neither.
+    #[test]
+    fn the_footer_of_an_open_search_comes_from_its_rows() {
+        let mut model = searchable();
+        let footer = |model: &UiModel<Field>| -> Vec<String> {
+            view(model)
+                .footer
+                .iter()
+                .map(|item| format!("{} {}", item.key, item.label))
+                .collect()
+        };
+        assert!(!footer(&model).iter().any(|i| i.contains("next, previous")));
+        search_for(&mut model, "tripod");
+        let field = footer(&model);
+        assert_eq!(
+            field[..4],
+            [
+                "Enter open",
+                "Ctrl-s / Ctrl-r next, previous",
+                "Tab to the results",
+                "Esc close search"
+            ],
+            "{field:?}"
+        );
+        update(&mut model, key(KeyCode::Tab));
+        let results = footer(&model);
+        assert!(
+            results.contains(&"n / N next, previous".to_string()),
+            "{results:?}"
+        );
+        assert!(
+            results.contains(&"Esc close search".to_string()),
+            "{results:?}"
+        );
+        assert!(!results.contains(&"Tab to the results".to_string()));
+    }
+
+    /// The mouse: `/ search` on the list's bottom border opens the search, a
+    /// click on a result opens it, one on the field puts the cursor there.
+    #[test]
+    fn a_click_opens_the_search_and_a_result() {
+        let mut model = searchable();
+        let hint = cells(&model, |t| *t == hit::Target::SearchHint);
+        assert_eq!(hint.len(), SEARCH_HINT.chars().count());
+        let screen = hit::screen(&model);
+        assert!(hint.iter().all(|&(_, row)| row == screen.list.bottom() - 1));
+        press(&mut model, hint[0]);
+        assert_eq!(model.focus, Pane::Search);
+        assert!(cells(&model, |t| *t == hit::Target::SearchHint).is_empty());
+        typed(&mut model, "tripod");
+        let third = cells(&model, |t| *t == hit::Target::Result(2));
+        assert_eq!(third.len(), 2 * usize::from(screen.list.width - 2));
+        model.focus = Pane::Conversations;
+        press(&mut model, third[0]);
+        assert_eq!(model.selected, 0);
+        assert_eq!(model.message_cursor, 1);
+        assert_eq!(model.focus, Pane::Messages);
+        let field = cells(&model, |t| *t == hit::Target::SearchField);
+        press(&mut model, field[0]);
+        assert_eq!(model.focus, Pane::Search);
+    }
+
+    fn announced(model: &mut UiModel<Field>, peer: [u8; 16], name: &str) {
+        engine(
+            model,
+            OutboxEvent::Announced {
+                destination: peer,
+                name: Some(name.to_string()),
+            },
+        );
+    }
+
+    /// Slice 5: a peer's announced name replaces its address in the list,
+    /// the header, the compose box, the detail view and the toasts, with
+    /// its short hash beside it.
+    #[test]
+    fn an_announced_name_is_drawn_with_its_short_hash_everywhere() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.screen = (80, 24);
+        announced(&mut model, PEER, "Alice\u{202e}\u{200b}");
+        let shown = view(&model);
+        assert_eq!(shown.messages_title, "Alice ·abab  unknown");
+        assert_eq!(shown.compose_title, "to Alice ·abab");
+        assert_eq!(text(&shown.conversations[0]).trim_end(), "▌Alice ·abab");
+        engine(
+            &mut model,
+            OutboxEvent::Received {
+                message_id: ID,
+                source: PEER,
+                title: Vec::new(),
+                body: b"hi".to_vec(),
+                fields: Vec::new(),
+                verified: true,
+            },
+        );
+        assert_eq!(
+            model.current_toast().map(|t| t.text.as_str()),
+            Some("message from Alice ·abab")
+        );
+        let detail = detail_view(&model, 0, 0).expect("a message");
+        assert_eq!(detail.rows[0], "from Alice ·abab to you");
+    }
+
+    /// Two peers announcing names that look alike are both marked, and the
+    /// header says whose name the open one shares.
+    #[test]
+    fn a_shared_name_marks_both_peers() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        announced(&mut model, PEER, "Alice");
+        announced(&mut model, OTHER, "АLICE");
+        assert_eq!(
+            view(&model).messages_title,
+            "Alice ·abab ≈  unknown · same name as ·cdcd"
+        );
+        let rows: Vec<String> = view(&model).conversations.iter().map(text).collect();
+        assert!(
+            rows.iter().any(|r| r.contains("Alice ·abab ≈")),
+            "{rows:#?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("АLICE ·cdcd ≈")),
+            "{rows:#?}"
+        );
+    }
+
+    /// A name change is said once, in the conversation, where it happened;
+    /// a repeat of the same name says nothing more.
+    #[test]
+    fn a_changed_name_is_said_once_in_the_conversation() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        announced(&mut model, PEER, "Alice");
+        sent(&mut model, "hi");
+        announced(&mut model, PEER, "Ally");
+        announced(&mut model, PEER, "Ally");
+        assert_eq!(
+            shown(&model),
+            [
+                layout::EARLIEST,
+                "hi  ○",
+                "── was Alice, now announces Ally ──"
+            ]
+        );
+        assert_eq!(view(&model).messages_title, "Ally ·abab  unknown");
+        // Our own address names nobody.
+        model.address = Some(OTHER);
+        announced(&mut model, OTHER, "me");
+        assert_eq!(model.names.heard_count(), 1);
+        model.address = None;
+        // A peer with no conversation gets no note, and none is invented.
+        announced(&mut model, OTHER, "Carol");
+        announced(&mut model, OTHER, "Carla");
+        assert!(model.conversations.iter().all(|c| c.peer != OTHER));
+    }
+
+    /// The reader's name wins, the peer is `known`, and the header keeps
+    /// the announced name as provenance; a block says `blocked`.
+    #[test]
+    fn a_petname_wins_and_the_header_says_the_trust() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        model.names = Names::new(
+            crate::names::parse_contacts(&format!(
+                "name {} Mum\nblock {}\n",
+                to_hex(&PEER),
+                to_hex(&OTHER)
+            ))
+            .expect("contacts"),
+        );
+        assert_eq!(view(&model).messages_title, "Mum ·abab  known");
+        announced(&mut model, PEER, "Alice");
+        assert_eq!(
+            view(&model).messages_title,
+            "Mum ·abab  known · announces Alice"
+        );
+        assert_eq!(view(&model).compose_title, "to Mum ·abab");
+        // A blocked peer is opened from the `blocked` view.
+        update(&mut model, UiEvent::Run(PaletteCommand::Blocked));
+        assert_eq!(model.selected, 1);
+        assert_eq!(view(&model).messages_title, "<cdcdcdcd…>  blocked");
+    }
+
+    /// The search matches the name as shown and the short hash beside it.
+    #[test]
+    fn the_search_matches_the_shown_name_and_the_short_hash() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        announced(&mut model, PEER, "Alice");
+        let order = model.order();
+        for query in ["alice", "ABAB", "e ·ab"] {
+            assert_eq!(
+                search::hits(&model.conversations, &model.names, &order, query, &[]),
+                [search::Hit::Conversation(0)],
+                "{query}"
+            );
+        }
+        // The other has no name: its address form still matches.
+        assert_eq!(
+            search::hits(&model.conversations, &model.names, &order, "cdcdcdcd", &[]),
+            [search::Hit::Conversation(1)]
+        );
+    }
+
+    /// A wide name is cut in cells on a narrow list row, the hash kept.
+    #[test]
+    fn a_wide_name_is_cut_in_cells_and_keeps_its_hash() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        announced(&mut model, PEER, &"龙".repeat(16));
+        let row = text(&view(&model).conversations[0]);
+        let width = leviculum_ui::text::fit_width(&row);
+        assert_eq!(width, usize::from(list_width(model.screen.0)) - 2, "{row}");
+        assert!(row.trim_end().ends_with("… ·abab"), "{row}");
+    }
+
+    // The history (loquax-keys-and-layout.md, section 7, slice 6).
+
+    /// A stored message for `restore`, keyed `key`.
+    fn stored(key: u64, outbound: bool, body: &str, delivery: Option<DeliveryState>) -> Message {
+        Message {
+            outbound,
+            body: body.to_string(),
+            id: Some([key as u8; 32]),
+            delivery,
+            signature: Signature::Verified,
+            leg: None,
+            unproven: false,
+            at: Some(at(25, 14, key as u32 % 60)),
+            size: body.len(),
+            ledger: vec![LedgerEntry::new(Some(at(25, 14, 0)), "queued")],
+            last_leg: None,
+            activity: key,
+            fields: Vec::new(),
+        }
+    }
+
+    fn restored(peer: [u8; 16], messages: Vec<Message>, earlier: usize) -> history::Restored {
+        history::Restored {
+            peer,
+            pinned: false,
+            unread: 0,
+            messages,
+            earlier,
+        }
+    }
+
+    fn message_writes(writes: &[StoreWrite]) -> Vec<u64> {
+        writes
+            .iter()
+            .filter_map(|w| match w {
+                StoreWrite::Message { message, .. } => Some(message.activity),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The restart, said honestly: what was in flight comes back `○` with
+    /// the reason in its ledger, and is written back so; what was proven
+    /// stays proven; new messages are keyed after the store's last.
+    #[test]
+    fn a_restart_shows_a_cut_off_send_queued_and_keys_go_on() {
+        let mut model = UiModel::<Field>::new(&[]);
+        clock(&mut model, 26, 12, 0);
+        model.restore(vec![restored(
+            PEER,
+            vec![
+                stored(3, true, "proven", Some(DeliveryState::Delivered)),
+                stored(4, false, "theirs", None),
+                stored(7, true, "in flight", Some(DeliveryState::InFlight)),
+            ],
+            0,
+        )]);
+        let messages = model.messages_of_selected();
+        assert_eq!(messages[0].delivery, Some(DeliveryState::Delivered));
+        assert_eq!(messages[2].delivery, Some(DeliveryState::Queued));
+        assert_eq!(
+            messages[2].ledger.last().map(|e| e.what.as_str()),
+            Some(history::RESTARTED)
+        );
+        assert_eq!(
+            messages[2].ledger.last().and_then(|e| e.at),
+            Some(at(26, 12, 0))
+        );
+        assert_eq!(model.message_cursor, 2);
+        assert_eq!(message_writes(&model.take_writes()), [7]);
+        assert!(model.take_writes().is_empty(), "taken once");
+        assert!(shown(&model).contains(&layout::EARLIEST.to_string()));
+
+        model.focus = Pane::Compose;
+        typed(&mut model, "after the restart");
+        update(&mut model, key(KeyCode::Enter));
+        let writes = model.take_writes();
+        assert_eq!(message_writes(&writes), [8]);
+    }
+
+    /// Every change a fold makes to a message reaches the store: the send,
+    /// its id, each state, and a reply with the unread count of a
+    /// conversation not open.
+    #[test]
+    fn the_store_learns_every_change_once_per_fold() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        sent(&mut model, "hello");
+        let first = message_writes(&model.take_writes());
+        assert_eq!(first.len(), 1);
+        engine(&mut model, OutboxEvent::Queued { message_id: ID });
+        assert_eq!(message_writes(&model.take_writes()), first);
+        state(&mut model, ID, MessageState::Delivered);
+        let writes = model.take_writes();
+        match &writes[..] {
+            [StoreWrite::Message { message, .. }] => {
+                assert_eq!(message.delivery, Some(DeliveryState::Delivered));
+            }
+            other => panic!("one message write, not {other:?}"),
+        }
+        // A tick changes nothing the store keeps.
+        update(&mut model, UiEvent::Tick);
+        assert!(model.take_writes().is_empty());
+        receive(&mut model, OTHER, 9, "elsewhere");
+        let writes = model.take_writes();
+        assert!(writes.contains(&StoreWrite::Conversation {
+            peer: OTHER,
+            pinned: false,
+            unread: 1
+        }));
+        assert_eq!(message_writes(&writes).len(), 1);
+        // Opening it reads it: the store learns the count is gone.
+        update(&mut model, UiEvent::Run(PaletteCommand::NextUnread));
+        assert_eq!(
+            model.take_writes(),
+            [StoreWrite::Conversation {
+                peer: OTHER,
+                pinned: false,
+                unread: 0
+            }]
+        );
+    }
+
+    /// `d` asks, `y` deletes, any other key keeps; a send still running is
+    /// not deleted at all.
+    #[test]
+    fn d_then_y_deletes_a_message_and_another_key_keeps_it() {
+        let mut model = UiModel::<Field>::new(&[]);
+        model.restore(vec![restored(
+            PEER,
+            vec![
+                stored(1, false, "one", None),
+                stored(2, false, "two", None),
+                stored(3, false, "three", None),
+            ],
+            0,
+        )]);
+        model.take_writes();
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Up));
+        assert_eq!(model.message_cursor, 1);
+        update(&mut model, key(KeyCode::Char('d')));
+        let question = view(&model).toast.map(|t| t.text).unwrap_or_default();
+        assert!(question.contains("y deletes"), "{question}");
+        // The question stays up past a toast's life.
+        for _ in 0..TOAST_TICKS * 2 {
+            update(&mut model, UiEvent::Tick);
+        }
+        assert!(view(&model).toast.is_some());
+        update(&mut model, key(KeyCode::Char('n')));
+        assert_eq!(model.messages_of_selected().len(), 3);
+        assert!(model.take_writes().is_empty());
+
+        update(&mut model, key(KeyCode::Char('d')));
+        update(&mut model, key(KeyCode::Char('y')));
+        let bodies: Vec<&str> = model
+            .messages_of_selected()
+            .iter()
+            .map(|m| m.body.as_str())
+            .collect();
+        assert_eq!(bodies, ["one", "three"]);
+        assert_eq!(model.message_cursor, 1);
+        assert_eq!(model.take_writes(), [StoreWrite::ForgetMessage { key: 2 }]);
+
+        // A send the runner still works on stays.
+        model.focus = Pane::Compose;
+        typed(&mut model, "running");
+        update(&mut model, key(KeyCode::Enter));
+        model.focus = Pane::Messages;
+        update(&mut model, key(KeyCode::Char('d')));
+        assert!(model.confirm.is_none());
+        assert_eq!(model.messages_of_selected().len(), 3);
+    }
+
+    #[test]
+    fn the_palette_deletes_a_conversation_after_asking() {
+        let mut model = UiModel::<Field>::new(&[]);
+        model.restore(vec![
+            restored(PEER, vec![stored(5, false, "newer", None)], 0),
+            restored(OTHER, vec![stored(2, false, "older", None)], 0),
+        ]);
+        assert_eq!(model.conversations[model.selected].peer, PEER);
+        update(&mut model, UiEvent::Run(PaletteCommand::DeleteConversation));
+        update(&mut model, key(KeyCode::Char('y')));
+        assert_eq!(model.conversations.len(), 1);
+        assert_eq!(model.conversations[model.selected].peer, OTHER);
+        assert_eq!(model.message_cursor, 0);
+        assert_eq!(
+            model.take_writes(),
+            [StoreWrite::ForgetConversation { peer: PEER }]
+        );
+    }
+
+    /// A pinned conversation sits on top above the dotted rule, whatever
+    /// came in since, and the pin is written.
+    #[test]
+    fn a_pinned_conversation_sits_above_the_rule() {
+        let mut model = UiModel::<Field>::new(&[]);
+        model.restore(vec![
+            restored(PEER, vec![stored(5, false, "newer", None)], 0),
+            restored(OTHER, vec![stored(2, false, "older", None)], 0),
+        ]);
+        update(&mut model, UiEvent::Run(PaletteCommand::NextConversation));
+        assert_eq!(model.conversations[model.selected].peer, OTHER);
+        update(&mut model, UiEvent::Run(PaletteCommand::Pin));
+        assert_eq!(
+            model.take_writes(),
+            [StoreWrite::Conversation {
+                peer: OTHER,
+                pinned: true,
+                unread: 0
+            }]
+        );
+        receive(&mut model, PEER, 9, "newest of all");
+        let order: Vec<[u8; 16]> = model
+            .order()
+            .iter()
+            .map(|&i| model.conversations[i].peer)
+            .collect();
+        assert_eq!(order, [OTHER, PEER]);
+        let list: Vec<String> = view(&model).conversations.iter().map(text).collect();
+        assert!(
+            list[2].trim().chars().all(|c| c == layout::PIN_RULE),
+            "{list:?}"
+        );
+        assert!(!list[2].trim().is_empty());
+        assert!(
+            list[5].trim().is_empty(),
+            "no rule under the last: {list:?}"
+        );
+        update(&mut model, UiEvent::Run(PaletteCommand::Pin));
+        let list: Vec<String> = view(&model).conversations.iter().map(text).collect();
+        assert!(list.iter().all(|row| !row.contains(layout::PIN_RULE)));
+    }
+
+    /// The top of what is loaded says how much more the store holds;
+    /// reaching it asks for the next page, which goes above with the cursor
+    /// still on the message it was on.
+    #[test]
+    fn reaching_the_top_loads_the_earlier_page() {
+        let mut model = UiModel::<Field>::new(&[]);
+        clock(&mut model, 26, 12, 0);
+        model.restore(vec![restored(
+            PEER,
+            vec![
+                stored(10, false, "ten", None),
+                stored(11, false, "eleven", None),
+            ],
+            9,
+        )]);
+        assert!(shown(&model).contains(&layout::earlier_line(9)));
+        update(&mut model, key(KeyCode::Tab));
+        let effects = update(&mut model, key(KeyCode::Up));
+        assert_eq!(
+            effects,
+            [UiEffect::Store(StoreRead::Earlier {
+                peer: PEER,
+                before: 10,
+                through: None
+            })]
+        );
+        let older: Vec<Message> = (1..=9).map(|k| stored(k, false, "old", None)).collect();
+        update(
+            &mut model,
+            UiEvent::Earlier {
+                peer: PEER,
+                messages: older,
+                earlier: 0,
+            },
+        );
+        assert_eq!(model.messages_of_selected().len(), 11);
+        assert_eq!(model.message_cursor, 9, "still on ten");
+        assert_eq!(model.messages_of_selected()[9].body, "ten");
+        assert_eq!(
+            text(&model.laid().rows[0]).trim(),
+            layout::EARLIEST,
+            "the top of the conversation is the top of the store now"
+        );
+        // Nothing more to ask for.
+        update(&mut model, key(KeyCode::Char('g')));
+        assert!(update(&mut model, key(KeyCode::Up)).is_empty());
+    }
+
+    /// A search reaches below what the screen loaded through the store: its
+    /// hit joins the messages group, and opening it loads the conversation
+    /// down to it and opens it there.
+    #[test]
+    fn a_stored_search_hit_opens_at_its_message() {
+        let mut model = UiModel::<Field>::new(&[]);
+        clock(&mut model, 26, 12, 0);
+        model.restore(vec![restored(
+            PEER,
+            vec![stored(10, false, "the tripod fits", None)],
+            9,
+        )]);
+        update(&mut model, key(KeyCode::Char('/')));
+        typed(&mut model, "tri");
+        let last = update(&mut model, key(KeyCode::Char('p')));
+        assert_eq!(
+            last,
+            [UiEffect::Store(StoreRead::Search("trip".to_string()))]
+        );
+        assert_eq!(model.loaded_from().get(&PEER), Some(&10));
+        let old = StoredHit {
+            peer: PEER,
+            key: 4,
+            outbound: false,
+            body: "bring the tripod".to_string(),
+            at: Some(at(25, 14, 4)),
+        };
+        // An answer to an older query is dropped.
+        update(
+            &mut model,
+            UiEvent::StoredHits {
+                query: "tri".to_string(),
+                hits: vec![old.clone()],
+            },
+        );
+        assert_eq!(model.hits().len(), 1);
+        update(
+            &mut model,
+            UiEvent::StoredHits {
+                query: "trip".to_string(),
+                hits: vec![old],
+            },
+        );
+        assert_eq!(
+            model.hits(),
+            [
+                search::Hit::Message {
+                    conversation: 0,
+                    message: 0
+                },
+                search::Hit::Stored(0)
+            ]
+        );
+        let results: Vec<String> = view(&model).conversations.iter().map(text).collect();
+        assert!(
+            results.iter().any(|row| row.contains("bring the «trip»od")),
+            "{results:?}"
+        );
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Down));
+        let effects = update(&mut model, key(KeyCode::Enter));
+        assert_eq!(
+            effects,
+            [UiEffect::Store(StoreRead::Earlier {
+                peer: PEER,
+                before: 10,
+                through: Some(4)
+            })]
+        );
+        let older: Vec<Message> = (4..=9)
+            .map(|k| match k {
+                4 => stored(k, false, "bring the tripod", None),
+                _ => stored(k, false, "old", None),
+            })
+            .collect();
+        update(
+            &mut model,
+            UiEvent::Earlier {
+                peer: PEER,
+                messages: older,
+                earlier: 3,
+            },
+        );
+        assert_eq!(model.focus, Pane::Messages);
+        assert_eq!(model.message_cursor, 0);
+        assert_eq!(model.messages_of_selected()[0].body, "bring the tripod");
+    }
+
+    // Telemetry (loquax-map.md, slice (a)): positions in the model, shown as
+    // text.
+
+    use leviculum_lxmf::constants::{FIELD_TELEMETRY, FIELD_TELEMETRY_STREAM};
+    use leviculum_lxmf::telemetry::{encode_stream_field_value, Location, StreamEntry, Telemetry};
+
+    /// 2026-10-26 14:00 at +01:00, the clock these tests set.
+    fn two_pm() -> i64 {
+        at(26, 14, 0).unix_secs
+    }
+
+    fn fix_at(lat: i32, lon: i32, last_update: i64) -> Telemetry {
+        Telemetry {
+            location: Some(Location {
+                latitude_e6: lat,
+                longitude_e6: lon,
+                altitude_e2: 4_210,
+                speed_e2: 120,
+                bearing_e2: 9_000,
+                accuracy_e2: 500,
+                last_update,
+            }),
+            ..Telemetry::default()
+        }
+    }
+
+    fn arrive(
+        model: &mut UiModel<Field>,
+        from: [u8; 16],
+        id: u8,
+        body: &str,
+        fields: Vec<(i64, Vec<u8>)>,
+    ) -> Vec<UiEffect> {
+        update(
+            model,
+            UiEvent::Engine(OutboxEvent::Received {
+                message_id: [id; 32],
+                source: from,
+                title: Vec::new(),
+                body: body.as_bytes().to_vec(),
+                fields,
+                verified: true,
+            }),
+        )
+    }
+
+    fn report_of(telemetry: &Telemetry) -> Vec<(i64, Vec<u8>)> {
+        vec![(FIELD_TELEMETRY, telemetry.encode_field_value())]
+    }
+
+    #[test]
+    fn a_report_is_one_position_line_and_the_header_says_where_and_how_old() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 14, 0);
+        arrive(
+            &mut model,
+            PEER,
+            1,
+            "",
+            report_of(&fix_at(43_773_100, 11_256_000, two_pm() - 240)),
+        );
+        assert_eq!(
+            shown(&model),
+            vec![
+                layout::EARLIEST.to_string(),
+                "── Today ──".to_string(),
+                "◎ position 43.77310 N 11.25600 E  14:00".to_string(),
+            ]
+        );
+        assert_eq!(view(&model).messages_title_right, "pos 4 min · no pn");
+        let list: Vec<String> = view(&model).conversations.iter().map(text).collect();
+        assert!(
+            list[1].contains("◎ position"),
+            "the list's preview: {list:?}"
+        );
+        assert_eq!(
+            model.toasts.last().map(|t| t.text.as_str()),
+            Some("position from <abababab…>")
+        );
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 120,
+                height: 40,
+            },
+        );
+        let wide = view(&model);
+        let row = text(&wide.messages[0]);
+        assert!(
+            row.starts_with(" at 43.77310 N 11.25600 E · ±5 m · 4 min ago "),
+            "{row:?}"
+        );
+        assert!(row.trim_end().ends_with("no propagation node"), "{row:?}");
+        // The age counts from the fix, not from when it arrived.
+        clock(&mut model, 26, 15, 0);
+        assert!(text(&view(&model).messages[0]).contains("· 1 h ago"));
+    }
+
+    #[test]
+    fn consecutive_reports_fold_into_the_latest_and_the_cursor_steps_over_them() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 14, 0);
+        arrive(&mut model, PEER, 1, "on my way", Vec::new());
+        for (id, minutes) in [(2u8, 10i64), (3, 5), (4, 1)] {
+            arrive(
+                &mut model,
+                PEER,
+                id,
+                "",
+                report_of(&fix_at(
+                    43_773_100 + id as i32 * 100,
+                    11_256_000,
+                    two_pm() - minutes * 60,
+                )),
+            );
+        }
+        let rows = shown(&model);
+        let lines: Vec<&String> = rows.iter().filter(|r| r.contains('◎')).collect();
+        assert_eq!(lines.len(), 1, "{rows:?}");
+        assert!(
+            lines[0].contains("◎ position 43.77350 N"),
+            "the latest: {rows:?}"
+        );
+        assert!(rows.contains(&"on my way  14:00".to_string()));
+        // The store still gets every one of them.
+        let writes = model.take_writes();
+        let positions = writes
+            .iter()
+            .filter(|w| matches!(w, StoreWrite::Position(_)))
+            .count();
+        assert_eq!(positions, 3);
+        // Up from the shown report goes past the folded ones to the text.
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Up));
+        assert_eq!(model.message_cursor, 0, "{rows:?}");
+        update(&mut model, key(KeyCode::Down));
+        assert_eq!(model.message_cursor, 3);
+        // A text between two reports breaks the run.
+        arrive(&mut model, PEER, 5, "here", Vec::new());
+        arrive(&mut model, PEER, 6, "", report_of(&fix_at(1, 1, two_pm())));
+        let rows = shown(&model);
+        assert_eq!(
+            rows.iter().filter(|r| r.contains('◎')).count(),
+            2,
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn text_and_telemetry_show_the_text_and_move_the_position() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 14, 0);
+        arrive(
+            &mut model,
+            PEER,
+            1,
+            "parked at the gate",
+            report_of(&fix_at(52_000_000, 13_000_000, two_pm() - 60)),
+        );
+        // The text, and under it the position line it came with (1132).
+        let rows = shown(&model);
+        let at = rows
+            .iter()
+            .position(|r| r == "parked at the gate")
+            .unwrap_or_else(|| panic!("{rows:?}"));
+        assert_eq!(rows[at + 1], "◎ position 52.00000 N 13.00000 E  14:00");
+        assert_eq!(model.positions[&PEER].location.latitude_e6, 52_000_000);
+        assert_eq!(
+            model.toasts.last().map(|t| t.text.as_str()),
+            Some("message from <abababab…>")
+        );
+        let detail = detail_view(&model, 0, 0).expect("a detail view");
+        assert!(
+            detail
+                .rows
+                .contains(&"  position  52.00000 N 13.00000 E".to_string()),
+            "{:?}",
+            detail.rows
+        );
+        assert!(detail.rows.contains(&"  speed     1.20 m/s".to_string()));
+        assert!(detail.rows.contains(&"  bearing   90.00°".to_string()));
+        assert!(detail.rows.contains(&"  accuracy  ±5 m".to_string()));
+    }
+
+    #[test]
+    fn a_fix_direct_and_again_in_a_stream_is_one_position_and_rows_name_their_peer() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        clock(&mut model, 26, 14, 0);
+        let bob = fix_at(43_773_100, 11_256_000, two_pm() - 300);
+        arrive(&mut model, PEER, 1, "", report_of(&bob));
+        let carol = fix_at(-33_868_800, 151_209_300, two_pm() - 100);
+        let collector = [0xc0; 16];
+        let stream = encode_stream_field_value(&[
+            StreamEntry {
+                source: PEER.to_vec(),
+                timestamp: leviculum_lxmf::msgpack::Number::Int(two_pm() - 300),
+                telemetry: bob.encode(),
+                appearance: None,
+            },
+            StreamEntry {
+                source: OTHER.to_vec(),
+                timestamp: leviculum_lxmf::msgpack::Number::Int(two_pm() - 100),
+                telemetry: carol.encode(),
+                appearance: None,
+            },
+        ]);
+        arrive(
+            &mut model,
+            collector,
+            2,
+            "",
+            vec![(FIELD_TELEMETRY_STREAM, stream)],
+        );
+        assert_eq!(model.positions.len(), 2);
+        assert_eq!(model.positions[&PEER].via, PEER, "the direct one stays");
+        assert_eq!(model.positions[&OTHER].via, collector);
+        // Both go to the store; its key makes the repeated fix one row.
+        let fixes: Vec<_> = model
+            .take_writes()
+            .into_iter()
+            .filter_map(|w| match w {
+                StoreWrite::Position(fix) => Some((fix.peer, fix.fix_time())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            fixes,
+            vec![
+                (PEER, two_pm() - 300),
+                (PEER, two_pm() - 300),
+                (OTHER, two_pm() - 100)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_broken_blob_is_kept_with_its_message_and_logged() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 14, 0);
+        let broken = vec![(FIELD_TELEMETRY, vec![0xc4, 0x01, 0x07])];
+        let effects = arrive(&mut model, PEER, 1, "", broken.clone());
+        match effects.as_slice() {
+            [UiEffect::Log(line)] => assert!(
+                line.starts_with("TELEMETRY_UNREADABLE source=abab"),
+                "{line}"
+            ),
+            other => panic!("not logged: {other:?}"),
+        }
+        assert_eq!(
+            model.conversations[0].messages[0].fields, broken,
+            "kept raw"
+        );
+        assert!(model.positions.is_empty());
+        assert!(shown(&model).contains(&"◎ telemetry, unreadable (kept)  14:00".to_string()));
+    }
+
+    #[test]
+    fn a_stale_fix_is_dimmed_in_the_header_and_still_aged() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.tier = Tier::Ansi256;
+        clock(&mut model, 26, 14, 0);
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 120,
+                height: 40,
+            },
+        );
+        arrive(
+            &mut model,
+            PEER,
+            1,
+            "",
+            report_of(&fix_at(
+                1_000_000,
+                1_000_000,
+                two_pm() - telemetry::STALE_AFTER_SECS,
+            )),
+        );
+        let fresh = view(&model).messages[0].cells[1].st;
+        assert_eq!(fresh, RStyle::default(), "two hours is still current");
+        clock(&mut model, 26, 14, 1);
+        let row = &view(&model).messages[0];
+        assert!(text(row).contains("· 2 h ago"));
+        assert_eq!(row.cells[1].st, layout::painted(model.tokens().muted));
+    }
+
+    #[test]
+    fn a_fix_from_the_future_shows_its_claim_and_does_not_hold_the_header() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 14, 0);
+        arrive(
+            &mut model,
+            PEER,
+            1,
+            "",
+            report_of(&fix_at(1_000_000, 1_000_000, two_pm() + 7200)),
+        );
+        assert_eq!(view(&model).messages_title_right, "pos ahead · no pn");
+        assert!(shown(&model).contains(&"◎ position 1.00000 N 1.00000 E  14:00".to_string()));
+        // An honest fix a minute later replaces it: the claim sorted at 14:00.
+        clock(&mut model, 26, 14, 2);
+        arrive(
+            &mut model,
+            PEER,
+            2,
+            "",
+            report_of(&fix_at(2_000_000, 1_000_000, two_pm() + 60)),
+        );
+        assert_eq!(model.positions[&PEER].location.latitude_e6, 2_000_000);
+        assert_eq!(view(&model).messages_title_right, "pos 1 min · no pn");
+    }
+
+    #[test]
+    fn restored_positions_keep_the_latest_and_a_deleted_conversation_takes_them() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        let fix = |lat: i32, t: i64| Fix {
+            peer: PEER,
+            via: PEER,
+            message: None,
+            received_at: Some(t),
+            location: fix_at(lat, 0, t).location.expect("a location"),
+            telemetry: Vec::new(),
+        };
+        model.restore_positions(vec![fix(2, 200), fix(1, 100)]);
+        assert_eq!(model.positions[&PEER].location.latitude_e6, 2);
+        model.delete_conversation(PEER);
+        assert!(model.positions.is_empty());
+    }
+
+    /// The Florence fixture's header, z11 to z15: the region the map
+    /// tests' pins lie in.
+    fn florence() -> leviculum_map::region::Header {
+        const FLORENCE: &[u8] = include_bytes!("../../leviculum-map/fixtures/firenze.lmr");
+        *leviculum_map::region::Region::from_bytes(FLORENCE)
+            .expect("open")
+            .header()
+    }
+
+    /// A model with three peers' positions around Florence, ours among them,
+    /// at 14:00, on an 80 x 24 screen drawn with braille, the Florence
+    /// region installed.
+    fn mapped() -> UiModel<Field> {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 14, 0);
+        model.address = Some([0x01; 16]);
+        model.names.remember(PEER, "bob");
+        model.names.remember(OTHER, "Alice");
+        let fix = |peer: [u8; 16], lat: i32, lon: i32, ago: i64| Fix {
+            peer,
+            via: PEER,
+            message: None,
+            received_at: Some(two_pm()),
+            location: fix_at(lat, lon, two_pm() - ago)
+                .location
+                .expect("a location"),
+            telemetry: Vec::new(),
+        };
+        model.restore_positions(vec![
+            fix(PEER, 43_775_000, 11_261_000, 240),
+            fix(OTHER, 43_776_000, 11_266_000, 3 * 3600),
+            fix([0x01; 16], 43_774_000, 11_258_000, 60),
+        ]);
+        update(
+            &mut model,
+            UiEvent::MapSetup(map::MapSetup {
+                cell_px: (2, 4),
+                zooms: (0, 20),
+                regions: vec![florence()],
+                ..map::MapSetup::default()
+            }),
+        );
+        model
+    }
+
+    fn selected_label(model: &UiModel<Field>) -> String {
+        let peer = model.map.and_then(|m| m.selected).expect("a pin selected");
+        let pins = model.map_pins();
+        pins.iter()
+            .find(|p| p.peer == peer)
+            .expect("pin")
+            .label
+            .clone()
+    }
+
+    /// The shell's offer of three drawings, the `now`th drawing.
+    fn offered(model: &mut UiModel<Field>, now: usize) {
+        let drawings = ["octant", "blocks", "braille"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| map::Drawing {
+                name: name.to_string(),
+                expected: i != 1,
+            })
+            .collect();
+        let setup = map::MapSetup {
+            drawings,
+            drawing: now,
+            ..model.map_setup.clone()
+        };
+        update(model, UiEvent::MapSetup(setup));
+    }
+
+    /// `t` asks the shell for the next drawing, `T` and the wrap for the
+    /// one before; the shell's answer is the drawing, and the title names
+    /// it for [`MAP_NAMED_TICKS`] ticks. The first setup names nothing.
+    #[test]
+    fn t_cycles_the_drawings_with_a_wrap_and_the_title_names_the_new_one() {
+        let mut model = mapped();
+        update(&mut model, key(KeyCode::Char('t')));
+        assert!(model.map.is_none(), "t opens nothing outside the map");
+        offered(&mut model, 0);
+        update(&mut model, key(KeyCode::Char('M')));
+        assert!(
+            view(&model).messages_title_right.starts_with("z"),
+            "named at start"
+        );
+        assert_eq!(
+            update(&mut model, key(KeyCode::Char('t'))),
+            vec![UiEffect::MapDrawing(1)]
+        );
+        assert_eq!(
+            update(&mut model, key(KeyCode::Char('T'))),
+            vec![UiEffect::MapDrawing(2)],
+            "back from the first wraps to the last"
+        );
+        assert_eq!(
+            update(&mut model, key(KeyCode::F(2))),
+            vec![UiEffect::MapDrawing(1)]
+        );
+        offered(&mut model, 2);
+        assert_eq!(
+            update(&mut model, key(KeyCode::Char('t'))),
+            vec![UiEffect::MapDrawing(0)],
+            "on from the last wraps to the first"
+        );
+        let title = view(&model).messages_title_right;
+        assert!(title.starts_with("braille · z"), "{title}");
+        for _ in 0..MAP_NAMED_TICKS {
+            update(&mut model, UiEvent::Tick);
+        }
+        let title = view(&model).messages_title_right;
+        assert!(title.starts_with("z"), "{title}");
+        // A shell with one way has nothing to cycle.
+        let mut plain = mapped();
+        update(&mut plain, key(KeyCode::Char('M')));
+        assert!(update(&mut plain, key(KeyCode::Char('t'))).is_empty());
+    }
+
+    /// The palette's `map drawing` lists every drawing, the one now behind
+    /// `●`, the unexpected ones marked; `Enter` asks for the highlighted
+    /// one, the query filters.
+    #[test]
+    fn the_palette_lists_the_drawings_and_enter_takes_one() {
+        let mut model = mapped();
+        offered(&mut model, 0);
+        update(&mut model, key(KeyCode::Char('M')));
+        update(&mut model, UiEvent::Run(PaletteCommand::MapDrawing));
+        let rows: Vec<String> = view(&model)
+            .palette
+            .expect("open")
+            .rows
+            .iter()
+            .map(|r| r.cells.iter().map(|c| c.ch).collect::<String>())
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "▸ ● octant",
+                "    blocks  (may not show here)",
+                "    braille"
+            ]
+        );
+        update(&mut model, key(KeyCode::Down));
+        update(&mut model, key(KeyCode::Down));
+        update(&mut model, key(KeyCode::Down));
+        assert_eq!(
+            update(&mut model, key(KeyCode::Enter)),
+            vec![UiEffect::MapDrawing(2)]
+        );
+        assert!(model.palette.is_none());
+        update(&mut model, UiEvent::Run(PaletteCommand::MapDrawing));
+        for c in "blo".chars() {
+            update(&mut model, key(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            update(&mut model, key(KeyCode::Enter)),
+            vec![UiEffect::MapDrawing(1)]
+        );
+        // Without an offer there is nothing to choose.
+        let mut plain = mapped();
+        update(&mut plain, UiEvent::Run(PaletteCommand::MapDrawing));
+        assert!(plain.palette.is_none());
+    }
+
+    /// `g` puts the glyph test over the map and takes it away; closing the
+    /// map takes it too.
+    #[test]
+    fn g_shows_the_glyph_test_over_the_map() {
+        let mut model = mapped();
+        update(&mut model, key(KeyCode::Char('M')));
+        assert!(!view(&model).map_glyph_test);
+        update(&mut model, key(KeyCode::Char('g')));
+        assert!(view(&model).map_glyph_test);
+        update(&mut model, key(KeyCode::Char('g')));
+        assert!(!view(&model).map_glyph_test);
+        update(&mut model, key(KeyCode::Char('g')));
+        update(&mut model, key(KeyCode::Esc));
+        assert!(!view(&model).map_glyph_test && !model.map_glyph_test);
+    }
+
+    /// `M` puts the map in the conversation's place with every pin in view
+    /// and the first by name selected; `Tab` steps by name; `Esc` brings
+    /// the conversation back with the focus in it.
+    #[test]
+    fn the_map_opens_fitted_steps_its_pins_and_closes() {
+        let mut model = mapped();
+        update(&mut model, key(KeyCode::Char('M')));
+        assert_eq!(model.focus, Pane::Map);
+        let shown = view(&model);
+        let map = shown.map.expect("the map is drawn");
+        assert_eq!(shown.messages_title, MAP_TITLE);
+        assert_eq!(map.pins.len(), 3, "every pin in view: {:?}", map.pins);
+        // 0.008 degrees of longitude in 104 x 72 dots, two cells spare.
+        assert_eq!(map.viewport.zoom(), 14);
+        // By name, case folded: Alice, bob, you.
+        let order: Vec<String> = model.map_pins().into_iter().map(|p| p.label).collect();
+        assert_eq!(order.len(), 3);
+        assert!(order[0].starts_with("Alice") && order[1].starts_with("bob"));
+        assert_eq!(order[2], "you");
+        assert!(selected_label(&model).starts_with("Alice"));
+        // Alice's fix is three hours old: stale, dimmed, with its age.
+        let alice = map
+            .pins
+            .iter()
+            .find(|p| p.text.contains("Alice"))
+            .expect("Alice");
+        // She is at the picture's right edge: her name is set left of her
+        // marker, which stays on her cell.
+        assert!(alice.stale, "{alice:?}");
+        assert_eq!(alice.text, "Alice ·cdcd · 3 h ◉");
+        assert!(alice.col + 19 <= map.area.x + map.area.width, "{alice:?}");
+        let last = map.pins.last().expect("pins");
+        assert!(
+            last.selected && last.text.contains('◉'),
+            "drawn last: {last:?}"
+        );
+        update(&mut model, key(KeyCode::Tab));
+        assert!(selected_label(&model).starts_with("bob"));
+        update(&mut model, key(KeyCode::BackTab));
+        update(&mut model, key(KeyCode::BackTab));
+        assert_eq!(selected_label(&model), "you");
+        update(&mut model, key(KeyCode::Esc));
+        assert!(model.map.is_none());
+        assert_eq!(model.focus, Pane::Messages);
+        assert!(view(&model).map.is_none());
+    }
+
+    #[test]
+    fn zoom_pan_and_fit_move_the_view_within_the_setups_zooms() {
+        let mut model = mapped();
+        update(&mut model, UiEvent::Run(PaletteCommand::Map));
+        let fitted = model.map.expect("open");
+        update(&mut model, key(KeyCode::Char('-')));
+        assert_eq!(model.map.expect("open").zoom, fitted.zoom - 1);
+        for _ in 0..30 {
+            update(&mut model, key(KeyCode::Char('+')));
+        }
+        assert_eq!(model.map.expect("open").zoom, 20, "the setup's deepest");
+        for _ in 0..30 {
+            update(&mut model, key(KeyCode::Char('-')));
+        }
+        assert_eq!(model.map.expect("open").zoom, 0);
+        update(&mut model, key(KeyCode::Char('0')));
+        assert_eq!(model.map, Some(fitted));
+        // A pan moves the centre an eighth of the view, the arrows and vi's
+        // keys alike, and back again.
+        update(&mut model, key(KeyCode::Char('l')));
+        let east = model.map.expect("open").centre;
+        assert!(east.x > fitted.centre.x && east.y == fitted.centre.y);
+        update(&mut model, key(KeyCode::Left));
+        assert_eq!(model.map.expect("open").centre, fitted.centre);
+        update(&mut model, key(KeyCode::Char('j')));
+        assert!(model.map.expect("open").centre.y > fitted.centre.y);
+        update(&mut model, key(KeyCode::Up));
+        assert_eq!(model.map.expect("open").centre, fitted.centre);
+        // Shift, or vi's capitals, moves four times as far: half the view.
+        let at = |model: &UiModel<Field>| {
+            let state = model.map.expect("open");
+            let view = map::viewport(&state, model.map_area(), &model.map_setup);
+            view.to_screen(fitted.centre)
+        };
+        let (w, h) = map::viewport(&fitted, model.map_area(), &model.map_setup).size();
+        let (cx, cy) = at(&model);
+        update(&mut model, key(KeyCode::Char('l')));
+        assert_eq!(at(&model), (cx - i64::from(w / 8), cy));
+        update(&mut model, key(KeyCode::Char('h')));
+        update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT)),
+        );
+        assert_eq!(at(&model), (cx - i64::from(w / 8 * 4), cy));
+        update(&mut model, key(KeyCode::Char('H')));
+        update(&mut model, key(KeyCode::Char('J')));
+        assert_eq!(at(&model), (cx, cy - i64::from(h / 8 * 4)));
+        update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT)),
+        );
+        assert_eq!(model.map.expect("open").centre, fitted.centre);
+    }
+
+    /// `Enter` on a pin, or a click on it, opens that peer's conversation,
+    /// a new one for a peer known only by position; our own pin opens none.
+    #[test]
+    fn a_pin_opens_its_peers_conversation_by_enter_or_click() {
+        let mut model = mapped();
+        update(&mut model, key(KeyCode::Char('M')));
+        assert!(selected_label(&model).starts_with("Alice"));
+        update(&mut model, key(KeyCode::Enter));
+        assert!(model.map.is_none());
+        assert_eq!(model.focus, Pane::Messages);
+        assert_eq!(model.conversations[model.selected].peer, OTHER);
+        // Open again, click bob's name.
+        update(&mut model, ctrl_key('g'));
+        update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT)),
+        );
+        let map = view(&model).map.expect("open");
+        let bob = map
+            .pins
+            .iter()
+            .find(|p| p.text.contains("bob"))
+            .expect("bob");
+        press(&mut model, (bob.col + 3, bob.row));
+        assert!(model.map.is_none());
+        assert_eq!(model.conversations[model.selected].peer, PEER);
+        // A click on the map where no pin is focuses it and opens nothing.
+        update(&mut model, key(KeyCode::Char('M')));
+        let map = view(&model).map.expect("open");
+        let empty = (map.area.x, map.area.y);
+        assert!(map.pins.iter().all(|p| (p.col, p.row) != empty));
+        press(&mut model, empty);
+        assert_eq!(model.focus, Pane::Map);
+        assert!(model.map.is_some());
+        // Our own pin.
+        update(&mut model, key(KeyCode::BackTab));
+        assert_eq!(selected_label(&model), "you");
+        update(&mut model, key(KeyCode::Enter));
+        assert!(model.map.is_some(), "no conversation with ourselves");
+    }
+
+    /// A drag on the map moves the view with the pointer at every
+    /// backend's cell: sixel's 9 x 19 pixels, half-blocks' 1 x 2,
+    /// braille's 2 x 4. The world point at the cell the button went down
+    /// on is at the cell it came up on, the view moved by the cells times
+    /// the cell's pixels, and nothing opens.
+    #[test]
+    fn a_drag_moves_the_map_by_the_cells_at_each_backends_geometry() {
+        for cell_px in [(9, 19), (1, 2), (2, 4)] {
+            let mut model = mapped();
+            update(
+                &mut model,
+                UiEvent::MapSetup(map::MapSetup {
+                    cell_px,
+                    zooms: (0, 20),
+                    regions: vec![florence()],
+                    ..map::MapSetup::default()
+                }),
+            );
+            update(&mut model, key(KeyCode::Char('M')));
+            let before = model.map.expect("open");
+            let shown = view(&model).map.expect("drawn");
+            let area = shown.area;
+            let from = (area.x + 2, area.y + 2);
+            assert_eq!(map::pin_at(&shown.pins, area, from.0, from.1), None);
+            let to = (from.0 + 5, from.1 + 3);
+            let corner = |view: &leviculum_map::viewport::Viewport, (col, row): (u16, u16)| {
+                view.to_world(
+                    i32::from(col - area.x) * i32::from(cell_px.0),
+                    i32::from(row - area.y) * i32::from(cell_px.1),
+                )
+            };
+            let held = corner(&shown.viewport, from);
+            update(
+                &mut model,
+                mouse(MouseEventKind::Down(MouseButton::Left), from.0, from.1),
+            );
+            assert_eq!(model.focus, Pane::Map);
+            assert!(!model.map_dragging(), "not before it moves");
+            update(
+                &mut model,
+                mouse(MouseEventKind::Drag(MouseButton::Left), to.0, to.1),
+            );
+            assert!(model.map_dragging(), "{cell_px:?}");
+            let after = model.map.expect("open");
+            let view_after = view(&model).map.expect("drawn").viewport;
+            assert_eq!(corner(&view_after, to), held, "{cell_px:?}");
+            let pixel = 1u32 << (24 - u32::from(before.zoom));
+            assert_eq!(
+                (
+                    before.centre.x - after.centre.x,
+                    before.centre.y - after.centre.y
+                ),
+                (
+                    5 * u32::from(cell_px.0) * pixel,
+                    3 * u32::from(cell_px.1) * pixel
+                ),
+                "{cell_px:?}"
+            );
+            assert_eq!(after.zoom, before.zoom);
+            update(
+                &mut model,
+                mouse(MouseEventKind::Up(MouseButton::Left), to.0, to.1),
+            );
+            assert!(!model.map_dragging());
+            assert_eq!(model.map.expect("open").centre, after.centre);
+            assert_eq!(model.focus, Pane::Map);
+        }
+    }
+
+    /// A release in a cell no motion reached still ends the drag there: a
+    /// terminal may report the button up without the move before it.
+    #[test]
+    fn a_release_away_from_the_press_is_a_drag_to_it() {
+        let mut model = mapped();
+        update(&mut model, key(KeyCode::Char('M')));
+        let before = model.map.expect("open");
+        let area = model.map_area();
+        let from = (area.x + 2, area.y + 2);
+        update(
+            &mut model,
+            mouse(MouseEventKind::Down(MouseButton::Left), from.0, from.1),
+        );
+        update(
+            &mut model,
+            mouse(MouseEventKind::Up(MouseButton::Left), from.0 + 1, from.1),
+        );
+        let after = model.map.expect("open");
+        let pixel = 1u32 << (24 - u32::from(before.zoom));
+        assert_eq!(before.centre.x - after.centre.x, 2 * pixel);
+    }
+
+    /// A press and release on a pin with no motion between, or a motion
+    /// the terminal reports in the same cell, is a click: the pin opens. A
+    /// drag that starts on a pin moves the map and opens nothing, also when
+    /// the pointer comes back to the pin before the release.
+    #[test]
+    fn a_press_without_motion_is_a_click_and_a_drag_from_a_pin_opens_nothing() {
+        let bob_of = |model: &UiModel<Field>| {
+            let map = view(model).map.expect("open");
+            let bob = map
+                .pins
+                .iter()
+                .find(|p| p.text.contains("bob"))
+                .expect("bob");
+            (bob.col + 3, bob.row)
+        };
+        let mut model = mapped();
+        update(&mut model, key(KeyCode::Char('M')));
+        let bob = bob_of(&model);
+        let before = model.map.expect("open");
+        update(
+            &mut model,
+            mouse(MouseEventKind::Down(MouseButton::Left), bob.0, bob.1),
+        );
+        update(
+            &mut model,
+            mouse(MouseEventKind::Drag(MouseButton::Left), bob.0 + 4, bob.1),
+        );
+        update(
+            &mut model,
+            mouse(MouseEventKind::Drag(MouseButton::Left), bob.0, bob.1),
+        );
+        update(
+            &mut model,
+            mouse(MouseEventKind::Up(MouseButton::Left), bob.0, bob.1),
+        );
+        assert!(model.map.is_some(), "a drag from a pin does not open it");
+        assert_eq!(model.map.expect("open").centre, before.centre, "and back");
+        update(
+            &mut model,
+            mouse(MouseEventKind::Down(MouseButton::Left), bob.0, bob.1),
+        );
+        update(
+            &mut model,
+            mouse(MouseEventKind::Drag(MouseButton::Left), bob.0, bob.1),
+        );
+        assert!(!model.map_dragging(), "the same cell is no drag");
+        update(
+            &mut model,
+            mouse(MouseEventKind::Up(MouseButton::Left), bob.0, bob.1),
+        );
+        assert!(model.map.is_none(), "a click opens it");
+        assert_eq!(model.conversations[model.selected].peer, PEER);
+    }
+
+    /// The wheel zooms about the pointer: the point at the centre of the
+    /// cell under it stays in that cell, in and out; off the picture, on
+    /// the map's border, it zooms about the centre.
+    #[test]
+    fn the_wheel_zooms_the_map_about_the_pointer() {
+        let mut model = mapped();
+        update(&mut model, key(KeyCode::Char('M')));
+        let area = model.map_area();
+        let at = (area.x + 3, area.y + 2);
+        let middle = |model: &UiModel<Field>| {
+            let view = view(model).map.expect("drawn").viewport;
+            view.to_world(
+                i32::from(at.0 - area.x) * 2 + 1,
+                i32::from(at.1 - area.y) * 4 + 2,
+            )
+        };
+        let before = model.map.expect("open");
+        let held = middle(&model);
+        update(&mut model, mouse(MouseEventKind::ScrollUp, at.0, at.1));
+        assert_eq!(model.map.expect("open").zoom, before.zoom + 1);
+        assert_eq!(middle(&model), held);
+        update(&mut model, mouse(MouseEventKind::ScrollDown, at.0, at.1));
+        update(&mut model, mouse(MouseEventKind::ScrollDown, at.0, at.1));
+        assert_eq!(model.map.expect("open").zoom, before.zoom - 1);
+        assert_eq!(middle(&model), held);
+        // On the border: the centre stays.
+        let centre = model.map.expect("open").centre;
+        update(
+            &mut model,
+            mouse(MouseEventKind::ScrollUp, area.x - 1, area.y + 2),
+        );
+        assert_eq!(model.map.expect("open").centre, centre);
+        assert_eq!(model.map.expect("open").zoom, before.zoom);
+    }
+
+    /// The tilted wheel, which is what a sideways swipe on a touch terminal
+    /// may send (1102), pans the map an eighth as `l` and `h` do; off the
+    /// map and under an overlay it does nothing.
+    #[test]
+    fn the_tilted_wheel_pans_the_map_as_h_and_l() {
+        let mut model = mapped();
+        update(&mut model, key(KeyCode::Char('M')));
+        let area = model.map_area();
+        let at = (area.x + 3, area.y + 2);
+        let start = model.map.expect("open");
+        update(&mut model, mouse(MouseEventKind::ScrollRight, at.0, at.1));
+        let tilted = model.map.expect("open");
+        assert_ne!(tilted.centre, start.centre, "it moved");
+        update(&mut model, mouse(MouseEventKind::ScrollLeft, at.0, at.1));
+        assert_eq!(model.map.expect("open").centre, start.centre, "and back");
+        update(&mut model, key(KeyCode::Char('l')));
+        assert_eq!(model.map.expect("open").centre, tilted.centre, "as l");
+        update(&mut model, mouse(MouseEventKind::ScrollLeft, at.0, at.1));
+        assert_eq!(model.map.expect("open").centre, start.centre, "as h");
+        assert_eq!(model.map.expect("open").zoom, start.zoom, "no zoom");
+        // Over the list beside the map: nothing.
+        assert_eq!(hit::pane_at(&model, 1, 1), Some(Pane::Conversations));
+        update(&mut model, mouse(MouseEventKind::ScrollRight, 1, 1));
+        assert_eq!(model.map.expect("open").centre, start.centre);
+        // Under the help: nothing.
+        update(&mut model, key(KeyCode::Char('?')));
+        assert!(model.help);
+        update(&mut model, mouse(MouseEventKind::ScrollRight, at.0, at.1));
+        assert_eq!(model.map.expect("open").centre, start.centre);
+    }
+
+    /// The list stays beside the map: the focus goes there and back by
+    /// `Tab`, and only the conversation or compose taking the focus closes
+    /// the map.
+    #[test]
+    fn the_list_stays_beside_the_map_and_compose_closes_it() {
+        let mut model = mapped();
+        update(&mut model, key(KeyCode::Char('M')));
+        update(&mut model, UiEvent::Run(PaletteCommand::FocusConversations));
+        assert!(model.map.is_some());
+        update(&mut model, key(KeyCode::Tab));
+        assert_eq!(model.focus, Pane::Map, "Tab from the list goes to the map");
+        update(&mut model, UiEvent::Run(PaletteCommand::FocusCompose));
+        assert!(model.map.is_none());
+        assert_eq!(model.focus, Pane::Compose);
+    }
+
+    /// No position at all: the whole world at the shallowest zoom.
+    #[test]
+    fn a_map_without_pins_shows_the_world() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(&mut model, key(KeyCode::Char('M')));
+        let state = model.map.expect("open");
+        assert_eq!((state.zoom, state.selected), (0, None));
+        assert!(view(&model).map.expect("drawn").pins.is_empty());
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Enter));
+        assert!(model.map.is_some());
+    }
+
+    /// The peer's conversation with a text, an older report, a text and
+    /// the latest report, on the Florence region at braille's cell (1076).
+    fn reported() -> UiModel<Field> {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        clock(&mut model, 26, 14, 0);
+        update(
+            &mut model,
+            UiEvent::MapSetup(map::MapSetup {
+                cell_px: (2, 4),
+                zooms: (0, 20),
+                regions: vec![florence()],
+                ..map::MapSetup::default()
+            }),
+        );
+        arrive(&mut model, PEER, 1, "on my way", Vec::new());
+        let older = fix_at(43_773_100, 11_256_000, two_pm() - 600);
+        arrive(&mut model, PEER, 2, "", report_of(&older));
+        arrive(&mut model, PEER, 3, "here", Vec::new());
+        let latest = fix_at(43_775_000, 11_261_000, two_pm() - 60);
+        arrive(&mut model, PEER, 4, "", report_of(&latest));
+        model.toasts.clear();
+        model
+    }
+
+    fn projected(lat: i32, lon: i32) -> leviculum_map::mercator::World {
+        leviculum_map::mercator::project(leviculum_map::mercator::LatLon::from_e6(lat, lon))
+    }
+
+    /// `Enter` on a report opens the map centred on that report's fix, not
+    /// the peer's latest, at the region's deepest zoom with the peer's pin
+    /// selected; `Esc` brings the conversation back with the cursor where
+    /// it was. `Enter` on a text still opens its detail view, and `v` opens
+    /// a report's.
+    #[test]
+    fn enter_on_a_report_opens_the_map_at_its_fix_and_esc_returns() {
+        let mut model = reported();
+        update(&mut model, key(KeyCode::Tab));
+        assert_eq!(model.focus, Pane::Messages);
+        assert_eq!(model.message_cursor, 3);
+        update(&mut model, key(KeyCode::Up));
+        update(&mut model, key(KeyCode::Up));
+        assert_eq!(model.message_cursor, 1, "the older report");
+        update(&mut model, key(KeyCode::Enter));
+        assert_eq!(model.focus, Pane::Map);
+        assert_eq!(model.detail, None);
+        let state = model.map.expect("the map is open");
+        assert_eq!(state.centre, projected(43_773_100, 11_256_000));
+        assert_eq!(state.zoom, florence().max_zoom);
+        assert_eq!(state.selected, Some(PEER));
+        update(&mut model, key(KeyCode::Esc));
+        assert!(model.map.is_none());
+        assert_eq!(model.focus, Pane::Messages);
+        assert_eq!(model.message_cursor, 1);
+        // The latest report, from the cursor's place at the bottom.
+        update(&mut model, key(KeyCode::Char('G')));
+        update(&mut model, key(KeyCode::Enter));
+        let state = model.map.expect("open");
+        assert_eq!(state.centre, projected(43_775_000, 11_261_000));
+        update(&mut model, ctrl_key('g'));
+        // A text opens its detail view, as before.
+        update(&mut model, key(KeyCode::Char('g')));
+        assert_eq!(model.message_cursor, 0);
+        update(&mut model, key(KeyCode::Enter));
+        assert_eq!(model.detail, Some((0, 0)));
+        assert!(model.map.is_none());
+        update(&mut model, key(KeyCode::Esc));
+        // `v` opens a report's detail view, with its sensor rows.
+        update(&mut model, key(KeyCode::Down));
+        assert_eq!(model.message_cursor, 1);
+        update(&mut model, key(KeyCode::Char('v')));
+        assert_eq!(model.detail, Some((0, 1)));
+        assert!(model.map.is_none());
+        let detail = detail_view(&model, 0, 1).expect("a detail view");
+        assert!(
+            detail.rows.iter().any(|r| r.starts_with("  position")),
+            "{:?}",
+            detail.rows
+        );
+    }
+
+    /// A text that came with a position (Sideband's telemetry beside a
+    /// body) shows its position line under the text, and `Enter` or a
+    /// click on it opens the map at that fix with the peer's pin selected,
+    /// as on a report; `v` still opens its detail view (1132).
+    #[test]
+    fn enter_on_a_text_with_a_position_opens_the_map_at_it() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 14, 0);
+        let fix = fix_at(43_773_100, 11_256_000, two_pm() - 240);
+        arrive(&mut model, PEER, 1, "at the bridge", report_of(&fix));
+        assert_eq!(
+            shown(&model),
+            vec![
+                layout::EARLIEST.to_string(),
+                "── Today ──".to_string(),
+                "at the bridge".to_string(),
+                "◎ position 43.77310 N 11.25600 E  14:00".to_string(),
+            ]
+        );
+        assert!(model.message_fix(0, 0).is_some());
+        update(&mut model, key(KeyCode::Tab));
+        assert_eq!(model.message_cursor, 0);
+        update(&mut model, key(KeyCode::Enter));
+        assert_eq!(model.focus, Pane::Map);
+        assert_eq!(model.detail, None);
+        let state = model.map.expect("the map is open");
+        assert_eq!(state.centre, projected(43_773_100, 11_256_000));
+        assert_eq!(state.selected, Some(PEER));
+        assert!(view(&model).map.is_some(), "the frame draws the map");
+        update(&mut model, key(KeyCode::Esc));
+        assert!(model.map.is_none());
+        update(&mut model, key(KeyCode::Char('v')));
+        assert_eq!(model.detail, Some((0, 0)));
+        update(&mut model, key(KeyCode::Esc));
+        let line = cell_of(&model, "◎ position 43.77310", 3);
+        press(&mut model, line);
+        assert_eq!(
+            model.map.expect("a click opens it too").centre,
+            projected(43_773_100, 11_256_000)
+        );
+
+        // Negative: the same text without the field is a text.
+        let mut plain = UiModel::<Field>::new(&[PEER]);
+        clock(&mut plain, 26, 14, 0);
+        arrive(&mut plain, PEER, 1, "at the bridge", Vec::new());
+        assert_eq!(plain.message_fix(0, 0), None);
+        update(&mut plain, key(KeyCode::Tab));
+        update(&mut plain, key(KeyCode::Enter));
+        assert!(plain.map.is_none());
+        assert_eq!(plain.detail, Some((0, 0)));
+    }
+
+    /// Outside the map, outside a fix: the map is somewhere else. Without a
+    /// region the zoom is the outline's deepest.
+    #[test]
+    fn a_report_outside_every_region_opens_at_the_outlines_deepest_zoom() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 14, 0);
+        arrive(
+            &mut model,
+            PEER,
+            1,
+            "",
+            report_of(&fix_at(50_110_600, 8_682_100, two_pm() - 60)),
+        );
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Enter));
+        let state = model.map.expect("open");
+        assert_eq!(state.centre, projected(50_110_600, 8_682_100));
+        assert_eq!(state.zoom, leviculum_map::outline::MAX_ZOOM);
+    }
+
+    /// A model with a report from Frankfurt, outside every region, the
+    /// autoload as `autoload` says, the list focused on it.
+    fn frankfurt(autoload: bool) -> UiModel<Field> {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.map_autoload = autoload;
+        clock(&mut model, 26, 14, 0);
+        arrive(
+            &mut model,
+            PEER,
+            1,
+            "",
+            report_of(&fix_at(50_110_600, 8_682_100, two_pm() - 60)),
+        );
+        update(&mut model, key(KeyCode::Tab));
+        model
+    }
+
+    /// The region the shell would write for `want`, as its header.
+    fn landed(want: &map::MapWant) -> leviculum_map::region::Header {
+        leviculum_map::region::Header {
+            bounds: want.bounds,
+            min_zoom: want.zooms.0,
+            max_zoom: want.zooms.1,
+            ..florence()
+        }
+    }
+
+    /// Going to a place no region holds asks for its region once (1089):
+    /// a 12 km box around it, z10 to z15. The title says it loads; the
+    /// region landing fits the map to its deepest zoom; asked again, the
+    /// place is held and nothing is asked.
+    #[test]
+    fn opening_the_map_at_a_place_without_a_region_loads_it_once() {
+        let mut model = frankfurt(true);
+        let effects = update(&mut model, key(KeyCode::Enter));
+        let [UiEffect::LoadMap(want)] = effects.as_slice() else {
+            panic!("{effects:?}");
+        };
+        let at = projected(50_110_600, 8_682_100);
+        assert_eq!(
+            model.map.expect("open").zoom,
+            leviculum_map::outline::MAX_ZOOM
+        );
+        assert_eq!(want.reason, map::LoadReason::Place);
+        assert_eq!(want.centre, at);
+        assert_eq!((want.zooms, want.floor), ((10, 15), 13));
+        let b = want.bounds;
+        assert!(b.contains(leviculum_map::mercator::unproject(at)));
+        // 12 km north to south: 0.1078 degrees.
+        assert!((b.north - b.south - 1_078_000).abs() < 2_000, "{b:?}");
+        update(&mut model, UiEvent::MapLoad(MapLoad::Started(want.clone())));
+        assert!(
+            view(&model).messages_title_right.ends_with("· loading map"),
+            "{}",
+            view(&model).messages_title_right
+        );
+        let mut setup = model.map_setup.clone();
+        setup.regions.push(landed(want));
+        setup.zooms = (0, 20);
+        update(&mut model, UiEvent::MapSetup(setup));
+        update(&mut model, UiEvent::MapLoad(MapLoad::Done(want.clone())));
+        assert_eq!(model.map_loading, None);
+        let state = model.map.expect("open");
+        assert_eq!((state.centre, state.zoom), (at, 15), "fitted to the region");
+        // The place again: held, nothing asked.
+        update(&mut model, key(KeyCode::Esc));
+        assert_eq!(update(&mut model, key(KeyCode::Enter)), []);
+    }
+
+    /// With `map_autoload = off` going to a place asks for nothing.
+    #[test]
+    fn with_the_autoload_off_nothing_is_loaded() {
+        let mut model = frankfurt(false);
+        assert_eq!(update(&mut model, key(KeyCode::Enter)), []);
+        assert!(model.map.is_some());
+        update(&mut model, key(KeyCode::Esc));
+        assert_eq!(update(&mut model, key(KeyCode::Char('M'))), []);
+    }
+
+    /// `d` on the map asks for the visible area, whether the autoload is on
+    /// or not: from three zooms above the view's to z15, the deepest lowered
+    /// no further than the view's. Over an area held already it says so.
+    #[test]
+    fn the_key_loads_the_visible_area_and_a_held_one_is_not_loaded() {
+        let mut model = frankfurt(false);
+        update(&mut model, key(KeyCode::Enter));
+        let state = model.map.expect("open");
+        let shown = map::viewport(&state, model.map_area(), &model.map_setup);
+        let effects = update(&mut model, key(KeyCode::Char('d')));
+        let [UiEffect::LoadMap(want)] = effects.as_slice() else {
+            panic!("{effects:?}");
+        };
+        assert_eq!(want.reason, map::LoadReason::View);
+        assert_eq!(want.bounds, shown.bounds());
+        assert_eq!(want.zooms, (state.zoom - 3, 15));
+        assert_eq!(want.floor, state.zoom);
+        let mut setup = model.map_setup.clone();
+        setup.regions.push(landed(want));
+        update(&mut model, UiEvent::MapSetup(setup));
+        update(&mut model, UiEvent::MapLoad(MapLoad::Done(want.clone())));
+        assert_eq!(
+            model.map.expect("open"),
+            state,
+            "a view's load moves nothing"
+        );
+        assert_eq!(update(&mut model, key(KeyCode::Char('d'))), []);
+        assert_eq!(
+            model.toasts.last().map(|t| t.text.as_str()),
+            Some(MAP_LOADED_ALREADY)
+        );
+    }
+
+    /// A failed load is one toast, when the shell gives one; a failure it
+    /// said already is silent.
+    #[test]
+    fn a_failed_load_is_one_toast() {
+        let mut model = frankfurt(true);
+        let effects = update(&mut model, key(KeyCode::Enter));
+        let [UiEffect::LoadMap(want)] = effects.as_slice() else {
+            panic!("{effects:?}");
+        };
+        update(&mut model, UiEvent::MapLoad(MapLoad::Started(want.clone())));
+        let before = model.toasts.len();
+        update(
+            &mut model,
+            UiEvent::MapLoad(MapLoad::Failed {
+                want: want.clone(),
+                toast: Some("map: HTTP status 503".to_string()),
+            }),
+        );
+        assert_eq!(model.toasts.len(), before + 1);
+        assert_eq!(model.map_loading, None);
+        update(
+            &mut model,
+            UiEvent::MapLoad(MapLoad::Failed {
+                want: want.clone(),
+                toast: None,
+            }),
+        );
+        assert_eq!(model.toasts.len(), before + 1);
+    }
+
+    /// The palette's `map` asks for the places of the pins no region holds
+    /// 3 km around: one place for three pins a few streets apart (the
+    /// Florence fixture is too small to hold them), none once that place's
+    /// region is there.
+    #[test]
+    fn the_map_asks_for_the_pins_no_region_holds() {
+        let mut model = mapped();
+        model.map_autoload = true;
+        let effects = update(&mut model, key(KeyCode::Char('M')));
+        let [UiEffect::LoadMap(want)] = effects.as_slice() else {
+            panic!("{effects:?}");
+        };
+        assert_eq!(want.reason, map::LoadReason::Place);
+        let mut setup = model.map_setup.clone();
+        setup.regions.push(landed(want));
+        update(&mut model, UiEvent::MapSetup(setup));
+        update(&mut model, key(KeyCode::Esc));
+        assert_eq!(update(&mut model, key(KeyCode::Char('M'))), []);
+    }
+
+    /// A click on a report row opens the map at its fix; a click on the
+    /// header's position, narrow or wide, and `L` or `Alt-l` put the peer
+    /// on the map at its latest fix. The header's position is not the
+    /// mailbox: a click there fetches nothing. A peer without a position
+    /// says so.
+    #[test]
+    fn a_click_on_a_report_or_the_header_position_opens_the_map() {
+        let mut model = reported();
+        let older = cell_of(&model, "◎ position 43.77310", 3);
+        let effects = press(&mut model, older);
+        assert!(effects.is_empty(), "{effects:?}");
+        let state = model.map.expect("open");
+        assert_eq!(state.centre, projected(43_773_100, 11_256_000));
+        assert_eq!(state.selected, Some(PEER));
+        update(&mut model, key(KeyCode::Esc));
+        assert_eq!(model.message_cursor, 1, "the click selected it");
+        // Narrow: `pos 1 min` at the title's right end.
+        assert!(view(&model).messages_title_right.starts_with("pos 1 min"));
+        let narrow = cells(&model, |t| *t == hit::Target::Position);
+        assert_eq!(narrow.len(), "pos 1 min".len(), "{narrow:?}");
+        assert!(!cells(&model, |t| *t == hit::Target::Mailbox).is_empty());
+        let effects = press(&mut model, narrow[0]);
+        assert!(effects.is_empty(), "no fetch: {effects:?}");
+        let latest = projected(43_775_000, 11_261_000);
+        assert_eq!(model.map.expect("open").centre, latest);
+        update(&mut model, key(KeyCode::Esc));
+        // Wide: the row under the title, from its second cell.
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 120,
+                height: 40,
+            },
+        );
+        let shown = view(&model);
+        let words = text(&shown.messages[0]);
+        assert_eq!(
+            shown.position_len,
+            "at 43.77500 N 11.26100 E · ±5 m · 1 min ago"
+                .chars()
+                .count(),
+            "{words:?}"
+        );
+        let wide = cells(&model, |t| *t == hit::Target::Position);
+        assert_eq!(wide.len(), shown.position_len, "{wide:?}");
+        let mailbox = cells(&model, |t| *t == hit::Target::Mailbox);
+        assert_eq!(mailbox.len(), "no propagation node".len(), "{mailbox:?}");
+        let effects = press(&mut model, wide[wide.len() - 1]);
+        assert!(effects.is_empty(), "no fetch: {effects:?}");
+        assert_eq!(model.map.expect("open").centre, latest);
+        update(&mut model, key(KeyCode::Esc));
+        // `L` from the conversation, `Alt-l` from compose.
+        update(&mut model, key(KeyCode::Char('L')));
+        assert_eq!(model.map.expect("open").centre, latest);
+        update(&mut model, key(KeyCode::Esc));
+        update(&mut model, key(KeyCode::Char('i')));
+        assert_eq!(model.focus, Pane::Compose);
+        update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT)),
+        );
+        assert_eq!(model.focus, Pane::Map);
+        assert_eq!(model.map.expect("open").selected, Some(PEER));
+        update(&mut model, key(KeyCode::Esc));
+        // A peer without a position.
+        update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::ALT)),
+        );
+        assert_eq!(model.conversations[model.selected].peer, OTHER);
+        update(&mut model, key(KeyCode::Char('L')));
+        assert!(model.map.is_none());
+        assert_eq!(
+            model.toasts.last().map(|t| t.text.as_str()),
+            Some("no position from <cdcdcdcd…>")
+        );
+        assert!(cells(&model, |t| *t == hit::Target::Position).is_empty());
+    }
+
+    // Blocking and names from the palette (1082): blocked is stored
+    // silently, and `rename`, `block`, `unblock` and `blocked` run from the
+    // palette.
+
+    /// `:` and a palette name, then `Enter`.
+    fn palette(model: &mut UiModel<Field>, name: &str) -> Vec<UiEffect> {
+        update(model, key(KeyCode::Char(':')));
+        typed(model, name);
+        update(model, key(KeyCode::Enter))
+    }
+
+    fn blocking(blocked: &[[u8; 16]]) -> Names {
+        let text: String = blocked
+            .iter()
+            .map(|p| format!("block {}\n", to_hex(p)))
+            .collect();
+        Names::new(crate::names::parse_contacts(&text).expect("contacts"))
+    }
+
+    /// A message from a blocked peer is received and stored as any other,
+    /// and the screen says nothing of it: not in the list, not unread, no
+    /// toast, no `new` rule, no pin on the map, no search hit. The `blocked`
+    /// view lists it, and `unblock` there brings the conversation back with
+    /// its history.
+    #[test]
+    fn a_blocked_peers_message_is_stored_and_shown_nowhere_until_unblocked() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.names = blocking(&[OTHER]);
+        clock(&mut model, 26, 14, 0);
+        let toasts = model.toasts.len();
+        let effects = arrive(
+            &mut model,
+            OTHER,
+            1,
+            "still there? tripod",
+            report_of(&fix_at(43_773_100, 11_256_000, two_pm() - 240)),
+        );
+        assert!(effects.is_empty(), "{effects:?}");
+        // Received and stored.
+        let c = model
+            .conversations
+            .iter()
+            .position(|c| c.peer == OTHER)
+            .expect("kept");
+        assert_eq!(model.conversations[c].messages.len(), 1);
+        let writes = model.take_writes();
+        assert!(
+            writes
+                .iter()
+                .any(|w| matches!(w, StoreWrite::Message { peer, .. } if *peer == OTHER)),
+            "{writes:?}"
+        );
+        // Shown nowhere.
+        assert_eq!(model.order(), [0]);
+        assert_eq!(model.conversations[c].unread, 0);
+        assert_eq!(model.conversations[c].new_rule, None);
+        assert_eq!(model.toasts.len(), toasts, "no toast");
+        assert_eq!(model.selected, 0, "PEER stays open");
+        assert!(
+            list_rows(&model).iter().all(|r| !r.contains("cdcd")),
+            "{:?}",
+            list_rows(&model)
+        );
+        assert!(model.positions.contains_key(&OTHER), "the position is kept");
+        assert!(model.map_pins().is_empty(), "and not pinned");
+        assert!(search::hits(
+            &model.conversations,
+            &model.names,
+            &model.order(),
+            "tripod",
+            &[]
+        )
+        .is_empty());
+        // The `blocked` view lists it, opens it, and its search finds it.
+        palette(&mut model, "blocked");
+        assert_eq!(model.order(), [c]);
+        assert_eq!(model.selected, c);
+        let v = view(&model);
+        assert_eq!(v.conversations_title, BLOCKED_TITLE);
+        assert_eq!(v.conversations_title_right, BLOCKED_RETURNS);
+        assert_eq!(v.messages_title, "<cdcdcdcd…>  blocked");
+        assert!(list_rows(&model).iter().any(|r| r.contains("cdcdcdcd")));
+        assert_eq!(model.messages_of_selected()[0].body, "still there? tripod");
+        // Unblock: back in the list, open, with its history.
+        let effects = palette(&mut model, "unblock");
+        assert_eq!(
+            effects,
+            [UiEffect::Contact(Contact {
+                peer: OTHER,
+                petname: None,
+                blocked: false
+            })]
+        );
+        assert!(!model.show_blocked);
+        assert_eq!(model.conversations[model.selected].peer, OTHER);
+        assert_eq!(model.order().len(), 2);
+        assert_eq!(model.messages_of_selected().len(), 1);
+        assert_eq!(model.map_pins().len(), 1);
+        // Unblocked, the next one counts and toasts as any other.
+        update(&mut model, key(KeyCode::Down));
+        let open = model.selected;
+        assert_ne!(model.conversations[open].peer, OTHER);
+        receive(&mut model, OTHER, 2, "now you see me");
+        assert_eq!(model.conversations[c].unread, 1);
+        assert!(model
+            .current_toast()
+            .is_some_and(|t| t.text.contains("message from")));
+    }
+
+    /// `block` hides the open conversation and opens the next; with only a
+    /// blocked peer on the screen nothing is open, and a message from it
+    /// does not open one.
+    #[test]
+    fn block_hides_the_open_conversation_and_writes_the_contact() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        receive(&mut model, PEER, 1, "hi");
+        assert_eq!(model.selected, 0);
+        let effects = palette(&mut model, "block");
+        assert_eq!(
+            effects,
+            [UiEffect::Contact(Contact {
+                peer: PEER,
+                petname: None,
+                blocked: true
+            })]
+        );
+        assert_eq!(model.names.trust(&PEER), Trust::Blocked);
+        assert_eq!(model.conversations[model.selected].peer, OTHER);
+        assert_eq!(model.order(), [1]);
+        assert!(model
+            .current_toast()
+            .is_some_and(|t| t.text.starts_with("blocked <abababab…>")));
+        // Again: said, not written.
+        update(&mut model, UiEvent::Run(PaletteCommand::Blocked));
+        assert!(palette(&mut model, "block").is_empty());
+        assert!(model
+            .current_toast()
+            .is_some_and(|t| t.text.ends_with("already blocked")));
+        update(&mut model, UiEvent::Run(PaletteCommand::Blocked));
+
+        let mut alone = UiModel::<Field>::new(&[]);
+        alone.names = blocking(&[PEER]);
+        receive(&mut alone, PEER, 1, "hello?");
+        assert_eq!(alone.selected, NONE_OPEN);
+        assert_eq!(view(&alone).messages_title, "messages");
+        assert_eq!(
+            list_rows(&alone).join(" ").trim_end(),
+            NO_CONVERSATIONS,
+            "the list is empty, wrapped"
+        );
+        assert!(palette(&mut alone, "block").is_empty());
+        assert!(alone
+            .current_toast()
+            .is_some_and(|t| t.text == "no conversation here"));
+        // A visible peer's message opens its conversation, as on an empty
+        // screen.
+        receive(&mut alone, OTHER, 2, "me too");
+        assert_eq!(alone.conversations[alone.selected].peer, OTHER);
+        assert_eq!(alone.conversations[alone.selected].unread, 0);
+    }
+
+    /// 1139: on a client of a home node a rename goes to the home node as
+    /// well, the palette's and a frontend's own alike; one pulled from the
+    /// home node is written here and never handed back. Off a home node
+    /// nothing is queued.
+    #[test]
+    fn a_petname_travels_through_the_home_node() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        announced(&mut model, PEER, "Alice");
+        update(
+            &mut model,
+            UiEvent::Rename {
+                peer: PEER,
+                name: "Mum".into(),
+            },
+        );
+        assert!(model.take_petnames().is_empty(), "no home node");
+        model.home_client = true;
+        // The palette holds "Mum" to edit: emptied first.
+        palette(&mut model, "rename");
+        update(&mut model, ctrl_key('u'));
+        typed(&mut model, "Mama");
+        update(&mut model, key(KeyCode::Enter));
+        let effects = update(
+            &mut model,
+            UiEvent::Rename {
+                peer: PEER,
+                name: " ".into(),
+            },
+        );
+        assert_eq!(
+            effects,
+            [UiEffect::Contact(Contact {
+                peer: PEER,
+                petname: None,
+                blocked: false
+            })]
+        );
+        assert_eq!(
+            model.take_petnames(),
+            [(PEER, Some("Mama".to_string())), (PEER, None)]
+        );
+        // Pulled: the reader's word here, the file told, nothing queued.
+        let pulled = |petname: Option<&str>| {
+            UiEvent::Engine(OutboxEvent::HomePetname {
+                destination: PEER,
+                petname: petname.map(str::to_string),
+            })
+        };
+        let effects = update(&mut model, pulled(Some("Mutti \u{202e}")));
+        assert_eq!(
+            effects,
+            [UiEffect::Contact(Contact {
+                peer: PEER,
+                petname: Some("Mutti".into()),
+                blocked: false
+            })]
+        );
+        assert_eq!(model.names.label(&PEER), "Mutti ·abab");
+        assert!(model.take_petnames().is_empty(), "never handed back");
+        assert!(update(&mut model, pulled(Some("Mutti"))).is_empty());
+        update(&mut model, pulled(None));
+        assert_eq!(model.names.label(&PEER), "Alice ·abab");
+    }
+
+    /// `rename` asks in the palette, holding the petname to edit: `Enter`
+    /// sets the typed one, sanitised, and an empty line clears it.
+    #[test]
+    fn rename_takes_text_in_the_palette_and_empty_clears() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        announced(&mut model, PEER, "Alice");
+        assert!(palette(&mut model, "rename").is_empty());
+        let asking = model.palette.as_ref().expect("the palette asks");
+        assert_eq!(asking.ask, Some(contacts::Ask::Rename(PEER)));
+        assert!(asking.matches().is_empty());
+        let rows: Vec<String> = view(&model)
+            .palette
+            .expect("drawn")
+            .rows
+            .iter()
+            .map(text)
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "your name for Alice ·abab",
+                "Enter sets it, empty clears it"
+            ]
+        );
+        assert_eq!(view(&model).footer.len(), 2);
+        typed(&mut model, "Mum ✓");
+        let effects = update(&mut model, key(KeyCode::Enter));
+        assert_eq!(
+            effects,
+            [UiEffect::Contact(Contact {
+                peer: PEER,
+                petname: Some("Mum ?".into()),
+                blocked: false
+            })]
+        );
+        assert!(model.palette.is_none());
+        assert_eq!(
+            view(&model).messages_title,
+            "Mum ? ·abab  known · announces Alice"
+        );
+        assert!(model
+            .current_toast()
+            .is_some_and(|t| t.text == "named Mum ? ·abab"));
+        // The palette holds the petname to edit; `Enter` unchanged writes
+        // nothing.
+        palette(&mut model, "rename");
+        assert_eq!(
+            model.palette.as_ref().map(|p| p.query.value()),
+            Some("Mum ?")
+        );
+        assert!(update(&mut model, key(KeyCode::Enter)).is_empty());
+        // Emptied, it clears.
+        palette(&mut model, "rename");
+        update(&mut model, ctrl_key('u'));
+        let effects = update(&mut model, key(KeyCode::Enter));
+        assert_eq!(
+            effects,
+            [UiEffect::Contact(Contact {
+                peer: PEER,
+                petname: None,
+                blocked: false
+            })]
+        );
+        assert_eq!(view(&model).messages_title, "Alice ·abab  unknown");
+        // Nothing visible is refused, not written.
+        palette(&mut model, "rename");
+        typed(&mut model, "\u{200b}");
+        assert!(update(&mut model, key(KeyCode::Enter)).is_empty());
+        assert_eq!(model.names.petname(&PEER), None);
+        // `Esc` leaves without a write.
+        palette(&mut model, "rename");
+        typed(&mut model, "Bob");
+        update(&mut model, key(KeyCode::Esc));
+        assert!(model.palette.is_none());
+        assert_eq!(model.names.petname(&PEER), None);
+    }
+
+    // Reactions (1104): FIELD_REACTION as Columba, Ratspeak and MeshChatX
+    // send it, drawn under the target and never as a message of its own.
+
+    const THUMBS: &str = "\u{1F44D}";
+    const HEART: &str = "\u{2764}\u{FE0F}";
+
+    /// The reaction field as `app` sends it, with the content beside it.
+    /// Columba (`NativeRnsBackendImpl.sendReaction`, torlando-tech/columba
+    /// `9222e38`, `rns-backend-kt/.../NativeRnsBackendImpl.kt:1498-1522`):
+    /// the field alone, empty content; MeshChatX the same
+    /// (`send_reaction`, Quad4-Software/MeshChatX `4378392`,
+    /// `meshchatx/meshchat.py:11214-11231`). Ratspeak 1.0.35
+    /// (`ratspeak_chat_custom_fields`, ratspeak/Ratspeak `7da1fe3`,
+    /// `crates/ratspeak-runtime/src/lxmf.rs:410-435`) adds its own envelope
+    /// in `FIELD_CUSTOM_TYPE`/`FIELD_CUSTOM_DATA`; 1.0.25 also put a text in
+    /// the content for clients without reactions (ratspeak/Ratspeak#42).
+    fn shaped(app: &str, target: [u8; 32], content: &str) -> (Vec<u8>, Vec<(i64, Vec<u8>)>) {
+        use leviculum_lxmf::constants::{FIELD_CUSTOM_DATA, FIELD_CUSTOM_TYPE, FIELD_REACTION};
+        use leviculum_lxmf::msgpack;
+        let field = leviculum_lxmf::reaction::Reaction {
+            to: target,
+            content: content.into(),
+        }
+        .encode_field_value();
+        let mut fields = vec![(FIELD_REACTION, field)];
+        let mut ratspeak = || {
+            let mut kind = Vec::new();
+            msgpack::bin(&mut kind, b"ratspeak.chat.v2");
+            let mut payload = Vec::new();
+            msgpack::map(&mut payload, 4);
+            for (k, v) in [("kind", "reaction"), ("emoji", content), ("action", "add")] {
+                msgpack::string(&mut payload, k);
+                msgpack::string(&mut payload, v);
+            }
+            msgpack::string(&mut payload, "target");
+            msgpack::bin(&mut payload, &target);
+            let mut data = Vec::new();
+            msgpack::bin(&mut data, &payload);
+            fields.push((FIELD_CUSTOM_TYPE, kind));
+            fields.push((FIELD_CUSTOM_DATA, data));
+        };
+        let body = match app {
+            "columba" | "meshchatx" => Vec::new(),
+            "ratspeak-1.0.35" => {
+                ratspeak();
+                Vec::new()
+            }
+            "ratspeak-1.0.25" => {
+                ratspeak();
+                format!("Reacted to your message with {content}.").into_bytes()
+            }
+            _ => panic!("no shape for {app}"),
+        };
+        (body, fields)
+    }
+
+    fn reacted(model: &mut UiModel<Field>, id: [u8; 32], app: &str, to: [u8; 32], what: &str) {
+        let (body, fields) = shaped(app, to, what);
+        engine(
+            model,
+            OutboxEvent::Received {
+                message_id: id,
+                source: PEER,
+                title: Vec::new(),
+                body,
+                fields,
+                verified: true,
+            },
+        );
+    }
+
+    fn received(model: &mut UiModel<Field>, id: [u8; 32], body: &str) {
+        engine(
+            model,
+            OutboxEvent::Received {
+                message_id: id,
+                source: PEER,
+                title: Vec::new(),
+                body: body.as_bytes().to_vec(),
+                fields: Vec::new(),
+                verified: true,
+            },
+        );
+    }
+
+    /// Every deployed shape is one reaction under its target and no
+    /// message: no block, no unread, no `new` rule, Ratspeak's fallback
+    /// text nowhere on screen; the same reaction twice counts once.
+    #[test]
+    fn each_clients_reaction_is_one_reaction_and_no_message() {
+        for app in ["columba", "meshchatx", "ratspeak-1.0.35", "ratspeak-1.0.25"] {
+            let mut model = UiModel::<Field>::new(&[PEER]);
+            received(&mut model, ID, "lunch at noon?");
+            let before = shown(&model);
+            model.toasts.clear();
+            reacted(&mut model, ID2, app, ID, THUMBS);
+            reacted(&mut model, ID2, app, ID, THUMBS);
+            reacted(&mut model, [0x33; 32], app, ID, THUMBS);
+            let rows = shown(&model);
+            assert_eq!(rows.len(), before.len() + 1, "{app}: {rows:?}");
+            assert_eq!(rows.last().map(String::as_str), Some(THUMBS), "{app}");
+            assert!(
+                !rows.iter().any(|r| r.contains("Reacted")),
+                "{app}: {rows:?}"
+            );
+            let conversation = &model.conversations[0];
+            assert_eq!(conversation.messages.len(), 3, "{app}: deduplicated by id");
+            assert_eq!(conversation.unread, 0, "{app}");
+            assert_eq!(conversation.new_rule, None, "{app}");
+            assert_eq!(
+                model.message_cursor, 0,
+                "{app}: the cursor stays on the text"
+            );
+            assert_eq!(
+                model.current_toast().map(|t| t.text.clone()),
+                Some(format!("<abababab…> reacted {THUMBS}")),
+                "{app}"
+            );
+            assert_eq!(
+                text(&view(&model).conversations[1]).trim(),
+                format!("▌reacted {THUMBS}"),
+                "{app}"
+            );
+        }
+    }
+
+    /// Ours and theirs on one message: each content once with its count,
+    /// ours in brackets.
+    #[test]
+    fn two_reactions_count_and_ours_is_marked() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        received(&mut model, ID, "lunch at noon?");
+        reacted(&mut model, ID2, "columba", ID, THUMBS);
+        reacted(&mut model, [0x33; 32], "columba", ID, HEART);
+        assert_eq!(shown(&model).last().unwrap(), &format!("{THUMBS}  {HEART}"));
+        let effects = model.react(PEER, ID, THUMBS);
+        assert_eq!(
+            shown(&model).last().unwrap(),
+            &format!("[{THUMBS} 2]  {HEART}")
+        );
+        let [UiEffect::Send { to, body, fields }] = effects.as_slice() else {
+            panic!("one send: {effects:?}");
+        };
+        assert_eq!((*to, body.as_str()), (PEER, ""));
+        let (key, value) = &fields[0];
+        assert_eq!(*key, leviculum_lxmf::constants::FIELD_REACTION);
+        assert_eq!(
+            leviculum_lxmf::reaction::Reaction::decode_field_value(value),
+            Some(leviculum_lxmf::reaction::Reaction {
+                to: ID,
+                content: THUMBS.into()
+            })
+        );
+        assert_eq!(model.sending.len(), 1, "delivered like any send");
+    }
+
+    /// A reaction whose target is not here yet is kept, drawn nowhere,
+    /// and attaches when the target arrives.
+    #[test]
+    fn a_reaction_before_its_target_attaches_when_the_target_arrives() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        reacted(&mut model, ID2, "columba", ID, THUMBS);
+        assert_eq!(shown(&model), [layout::EARLIEST]);
+        received(&mut model, ID, "lunch at noon?");
+        let rows = shown(&model);
+        assert_eq!(rows.last().unwrap(), THUMBS, "{rows:?}");
+        assert_eq!(model.message_cursor, 1, "on the text, past the reaction");
+    }
+
+    /// A blocked peer's reaction is kept and says nothing (1082).
+    #[test]
+    fn a_blocked_peers_reaction_is_kept_silently() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        received(&mut model, ID, "lunch at noon?");
+        let mut contact = model.names.contacts.of(&PEER);
+        contact.blocked = true;
+        model.names.contacts.set(&contact);
+        model.toasts.clear();
+        reacted(&mut model, ID2, "columba", ID, THUMBS);
+        assert_eq!(model.conversations[0].messages.len(), 2, "kept");
+        assert!(model.current_toast().is_none());
+    }
+
+    /// `e` opens the picker on the message under the cursor, a digit sends
+    /// that quick reaction, typed text and `Enter` any other.
+    #[test]
+    fn the_picker_sends_a_quick_or_a_typed_reaction() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        received(&mut model, ID, "lunch at noon?");
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Char('e')));
+        let palette = model.palette.as_ref().expect("the picker");
+        assert_eq!(
+            palette.ask,
+            Some(contacts::Ask::React {
+                peer: PEER,
+                target: ID
+            })
+        );
+        assert_eq!(
+            model.ask_rows(palette.ask.unwrap())[0],
+            "react to: lunch at noon?"
+        );
+        let effects = update(&mut model, key(KeyCode::Char('2')));
+        assert!(model.palette.is_none());
+        assert!(matches!(effects.as_slice(), [UiEffect::Send { .. }]));
+        assert_eq!(shown(&model).last().unwrap(), &format!("[{HEART}]"));
+        update(&mut model, UiEvent::Run(PaletteCommand::React));
+        typed(&mut model, "ok");
+        update(&mut model, key(KeyCode::Enter));
+        assert_eq!(shown(&model).last().unwrap(), &format!("[{HEART}]  [ok]"));
+        // A send not yet queued has no id to react to.
+        update(&mut model, key(KeyCode::Tab));
+        typed(&mut model, "see you");
+        update(&mut model, key(KeyCode::Enter));
+        update(&mut model, key(KeyCode::BackTab));
+        update(&mut model, UiEvent::Run(PaletteCommand::React));
+        assert!(model.palette.is_none());
+    }
+
+    // Replies, forwards and a frontend's delete (1137).
+
+    /// A reply goes out with the target's id and its quote, the shape the
+    /// deployed clients read, the text as content; the bubble above it
+    /// shows the target's text, ours or theirs. One whose target this
+    /// device lacks shows the quote the sender put in.
+    #[test]
+    fn a_reply_carries_its_target_and_quote() {
+        use leviculum_lxmf::reply::Reply;
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        received(&mut model, ID, "lunch at noon?\nor later");
+        let effects = update(
+            &mut model,
+            UiEvent::Reply {
+                peer: PEER,
+                target: ID,
+                body: "noon".to_string(),
+            },
+        );
+        let [UiEffect::Send { to, body, fields }] = effects.as_slice() else {
+            panic!("{effects:?}");
+        };
+        assert_eq!((*to, body.as_str()), (PEER, "noon"));
+        assert_eq!(
+            Reply::from_fields(fields),
+            Some(Reply {
+                to: ID,
+                quote: Some("lunch at noon?".to_string())
+            })
+        );
+        let c = 0;
+        let m = model.conversations[c].messages.len() - 1;
+        let quoted = model.quoted(c, m).expect("quoted");
+        assert_eq!(
+            (quoted.text.as_str(), quoted.ours),
+            ("lunch at noon?", Some(false))
+        );
+        assert_eq!(model.message_cursor, m);
+
+        let elsewhere = Reply {
+            to: [0x77; 32],
+            quote: Some("an old one".to_string()),
+        };
+        engine(
+            &mut model,
+            OutboxEvent::Received {
+                message_id: ID2,
+                source: PEER,
+                title: Vec::new(),
+                body: b"yes".to_vec(),
+                fields: elsewhere.fields(),
+                verified: true,
+            },
+        );
+        let m = model.conversations[c].messages.len() - 1;
+        let quoted = model.quoted(c, m).expect("quoted");
+        assert_eq!((quoted.text.as_str(), quoted.ours), ("an old one", None));
+        assert!(update(
+            &mut model,
+            UiEvent::Reply {
+                peer: PEER,
+                target: ID,
+                body: " ".to_string()
+            }
+        )
+        .is_empty());
+    }
+
+    /// A forward is the text and the content fields again, in the other
+    /// conversation, made if new; not the first sender's telemetry.
+    #[test]
+    fn a_forward_copies_text_and_content_fields() {
+        use leviculum_lxmf::constants::{FIELD_IMAGE, FIELD_TELEMETRY};
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        engine(
+            &mut model,
+            OutboxEvent::Received {
+                message_id: ID,
+                source: PEER,
+                title: Vec::new(),
+                body: b"look".to_vec(),
+                fields: vec![(FIELD_TELEMETRY, vec![0xc0]), (FIELD_IMAGE, vec![0x01])],
+                verified: true,
+            },
+        );
+        let key = model.conversations[0].messages[0].activity;
+        let effects = update(
+            &mut model,
+            UiEvent::Forward {
+                from: PEER,
+                key,
+                to: OTHER,
+            },
+        );
+        assert_eq!(
+            effects,
+            [UiEffect::Send {
+                to: OTHER,
+                body: "look".to_string(),
+                fields: vec![(FIELD_IMAGE, vec![0x01])],
+            }]
+        );
+        let other = model.conversations.iter().position(|c| c.peer == OTHER);
+        let other = &model.conversations[other.expect("made")];
+        assert_eq!(other.messages.last().map(|m| m.body.as_str()), Some("look"));
+        assert!(other.messages.last().is_some_and(|m| m.outbound));
+        assert!(update(
+            &mut model,
+            UiEvent::Forward {
+                from: PEER,
+                key: 999,
+                to: OTHER
+            }
+        )
+        .is_empty());
+    }
+
+    /// A frontend's delete of several: each gone from the screen and the
+    /// store, one mark for the home's devices; one still sending is kept.
+    #[test]
+    fn a_frontend_deletes_several_and_keeps_a_send_in_flight() {
+        use crate::home::wire::{Mark, MarkFlag};
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.home_client = true;
+        received(&mut model, ID, "one");
+        received(&mut model, ID2, "two");
+        update(
+            &mut model,
+            UiEvent::Write {
+                peer: PEER,
+                body: "three".to_string(),
+            },
+        );
+        model.take_writes();
+        model.take_marks();
+        model.toasts.clear();
+        let keys: Vec<u64> = model.conversations[0]
+            .messages
+            .iter()
+            .map(|m| m.activity)
+            .collect();
+        update(&mut model, UiEvent::Delete { peer: PEER, keys });
+        let left: Vec<&str> = model.conversations[0]
+            .messages
+            .iter()
+            .map(|m| m.body.as_str())
+            .collect();
+        assert_eq!(left, ["three"]);
+        assert_eq!(
+            model.take_marks(),
+            [Mark {
+                flag: MarkFlag::Deleted,
+                ids: vec![ID, ID2],
+            }]
+        );
+        assert_eq!(model.take_writes().len(), 2);
+        assert_eq!(
+            model.current_toast().map(|t| t.text.clone()),
+            Some(
+                "2 messages deleted from every device of this home; 1 still being sent, kept"
+                    .to_string()
+            )
+        );
+    }
+
+    /// The detail a frontend shows is the terminal's `v` view.
+    #[test]
+    fn a_frontend_gets_the_detail_view_by_key() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        received(&mut model, ID, "one");
+        let key = model.conversations[0].messages[0].activity;
+        let detail = message_detail(&model, PEER, key).expect("detail");
+        assert!(
+            detail.rows.iter().any(|r| r.contains(&to_hex(&ID))),
+            "{:?}",
+            detail.rows
+        );
+        assert!(detail.rows.iter().any(|r| r == "signature verified"));
+        assert!(message_detail(&model, PEER, 999).is_none());
+    }
+}

@@ -1,0 +1,45 @@
+[package]
+name = "leviculum-mapfill-m9"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lew Palm"]
+license = "AGPL-3.0-or-later"
+description = "Bare ThinkNode M9 measurement firmware for the map filler (#474): draw time, PSRAM cost and ST7789 flush"
+publish = false
+
+# Its own workspace, as leviculum-esp: the Xtensa target exists only in the
+# esp-rs compiler fork (`rust-toolchain.toml`), and this directory's
+# `.cargo/config.toml` sets the target and the linker script.
+[workspace]
+
+[dependencies]
+leviculum-mapfill = { path = ".." }
+embedded-graphics = "0.8"
+# The version the community M9 port pins (cedrivard/Leviculum 7a699446,
+# leviculum-esp/Cargo.toml), with its PSRAM driver and blocking SPI DMA.
+esp-hal = { version = "1.2.1", features = ["esp32s3", "unstable"] }
+# The application descriptor the second-stage bootloader reads; without it
+# `espflash` builds an image the ROM declines.
+esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3"] }
+
+[package.metadata.cargo-machete]
+ignored = ["esp-bootloader-esp-idf"]
+
+# The two builds the measurement compares: `--release` at opt-level 3 and
+# `--profile release-s` at "s". Both keep the DWARF for addr2line; espflash
+# packs loadable sections only.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+debug = true
+
+[profile.release-s]
+inherits = "release"
+opt-level = "s"
+
+[[bin]]
+name = "mapfill_m9"
+path = "src/main.rs"
+test = false
+bench = false

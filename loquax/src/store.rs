@@ -1,0 +1,3204 @@
+//! The message store: conversations, messages and their ledgers across
+//! restarts, in SQLite (`docs/src/concepts/loquax-storage.md`, "Decision
+//! (2026-08-10)"), at `${LNMSG_HOME}/history.sqlite3`.
+//!
+//! The model says what changed ([`crate::ui::history::StoreWrite`]); this
+//! file writes it, one transaction a fold, and reads the history back at
+//! start ([`Store::restore`]), a page at a time further back
+//! ([`Store::earlier`]), and through its FTS5 index ([`Store::search`]).
+//!
+//! # The schema
+//!
+//! The page's starting point, with its three commitments: every row is
+//! scoped by our own address (`identity`), a message keeps the sender's
+//! clock (`timestamp`) apart from ours (`received_at`), and `fields` is raw
+//! msgpack. Where it differs:
+//!
+//! - **The key is the screen's message counter** (`seq`, the model's
+//!   [`Message::activity`]), not `(id, identity)`: a message we write has
+//!   no LXMF id until the router queued it, and a send that falls back to a
+//!   mailbox gets a second one. The id is a column, indexed.
+//! - **The ledger is a table of its own**, a row a line, deleted with its
+//!   message; the delivery ledger shares the message's retention (the
+//!   page's "Retention").
+//! - **Conversations are a table** for what is the conversation's and not a
+//!   message's: the pin and the unread count. Names heard from announces
+//!   are one more, so a peer keeps its name across a restart.
+//! - **`fields` is filled, `title` and `timestamp` stay empty for now**:
+//!   the engine's `Received` event carries the fields, which the store keeps
+//!   whole as one raw msgpack map; it does not carry the sender's time, and
+//!   the screen drops the title. The columns are there so filling them is no
+//!   migration.
+//! - **Positions are a table** (`positions`, schema 2): every position a
+//!   telemetry field carried, keyed by who measured and the fix time, so the
+//!   same fix arriving directly and again in a collector's stream is one row
+//!   (`docs/src/concepts/loquax-map.md`, "Stored where"). The wire's
+//!   integers go in as they are.
+//! - **Unverified messages keep their bytes** (`unverified`, schema 3): a
+//!   received message whose sender's key was not known, as it came, so its
+//!   signature can be checked when the key arrives, in this run or a later
+//!   one (leviculum 1079). The row goes once the verdict is in, which
+//!   `messages.verification` then holds: 0 unverified, 1 verified, 2
+//!   invalid. A message stored unverified before schema 3 has no bytes kept
+//!   and stays unverified: the signature was never stored.
+//!
+//! - **The home node's archive is a table** (`archive`, schema 4): on a
+//!   home node (`docs/src/concepts/loquax-home-node.md`) every received
+//!   message is appended as it came, packed, under a sequence that only
+//!   grows (`AUTOINCREMENT`, so a sequence is never handed out twice, even
+//!   after the newest entry was evicted). Its clients pull it by cursor. The
+//!   admitted devices and the open admission tokens are two more tables.
+//! - **The home node's outbox is a table** (`home_outbox`, schema 5): every
+//!   message a client handed in with `/send`, signed and packed once, with
+//!   its state, so a restart keeps retrying it. Each state change is an
+//!   archive entry as well, written in the same transaction.
+//! - **Imported history sits below seq 0** (schema 6, `crate::import`): a
+//!   conversation's imported rows are older than what loquax wrote, so they
+//!   take negative keys below the store's lowest, in the source's time
+//!   order, and say where they came from (`origin`) and what the source app
+//!   thought of their signature (`origin_verdict`), never as our verdict
+//!   (`docs/src/concepts/loquax-import.md`). The model counts its keys
+//!   unsigned, so the store hands it `seq` with the sign bit flipped
+//!   ([`key_of`]): the order is the same, seq 0 is [`KEY_OF_SEQ_ZERO`].
+//!
+//! # Versions
+//!
+//! Schema 1 is the store of slice 6; schema 2 adds `positions`, schema 3
+//! `unverified`, schema 4 the home node's three tables, schema 5 its
+//! outbox and schema 6 the two provenance columns of imported messages,
+//! nothing else, so
+//! an older file is migrated in place at open, in one transaction. A file newer than this program is refused
+//! ([`StoreError::Newer`]): a loquax that knows only schema 1 refuses a
+//! schema 2 file, and leaves it as it is.
+//!
+//! # The durability rule
+//!
+//! From the page: nothing here may treat a corrupt load as an empty one. A
+//! missing file is a first start and makes a fresh store. A file that is
+//! there and is not a whole loquax store (not SQLite at all, shorter than
+//! its own header says, a schema that is not ours, or newer than this
+//! program; SQLite's own checks at open, and the schema's) is refused, with the file named, and loquax does not start over
+//! it. Every write is one transaction under SQLite's rollback journal with
+//! `synchronous=FULL`, so a crash leaves the store as it was before the
+//! write or after it.
+//!
+//! # Retention
+//!
+//! As decided: message text and its ledger are kept until the reader
+//! deletes them. Attachments, which have the byte budget, do not exist yet.
+
+use std::collections::BTreeMap;
+use std::fmt;
+use std::path::{Path, PathBuf};
+
+use leviculum_ui::delivery::DeliveryState;
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+
+use crate::home::outgoing::Change;
+use crate::send::Leg;
+use crate::telemetry::{pack_fields, unpack_fields, Fix};
+use crate::ui::history::{Restored, StoreWrite, StoredHit, LOAD_WINDOW};
+use crate::ui::{LedgerEntry, Message, Signature};
+use crate::when::WallTime;
+use leviculum_lxmf::telemetry::Location;
+
+/// The store's file under the loquax home directory.
+pub const STORE_FILE: &str = "history.sqlite3";
+
+/// The schema this program writes, in SQLite's `user_version`.
+pub const SCHEMA_VERSION: i32 = 6;
+
+/// How long a write waits for another loquax holding the file.
+const BUSY_MS: u64 = 5_000;
+
+/// The most results a search returns from the store.
+pub const SEARCH_LIMIT: usize = 200;
+
+const SCHEMA: &str = "
+CREATE TABLE conversations(
+    identity BLOB NOT NULL,
+    peer BLOB NOT NULL,
+    pinned INTEGER NOT NULL DEFAULT 0,
+    unread INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (identity, peer));
+CREATE TABLE messages(
+    seq INTEGER PRIMARY KEY,
+    identity BLOB NOT NULL,
+    conversation BLOB NOT NULL,
+    id BLOB,
+    direction INTEGER NOT NULL,
+    state INTEGER,
+    unproven INTEGER NOT NULL DEFAULT 0,
+    verification INTEGER NOT NULL,
+    last_leg INTEGER,
+    timestamp REAL,
+    received_at INTEGER,
+    utc_offset INTEGER,
+    size INTEGER NOT NULL,
+    title BLOB,
+    content TEXT NOT NULL,
+    fields BLOB,
+    error TEXT);
+CREATE INDEX messages_by_conversation ON messages(identity, conversation, seq);
+CREATE INDEX messages_by_id ON messages(id);
+CREATE TABLE ledger(
+    message INTEGER NOT NULL REFERENCES messages(seq) ON DELETE CASCADE,
+    line INTEGER NOT NULL,
+    at INTEGER,
+    utc_offset INTEGER,
+    what TEXT NOT NULL,
+    PRIMARY KEY (message, line));
+CREATE TABLE names(
+    identity BLOB NOT NULL,
+    peer BLOB NOT NULL,
+    name TEXT NOT NULL,
+    PRIMARY KEY (identity, peer));
+CREATE VIRTUAL TABLE message_text USING fts5(
+    content, content='messages', content_rowid='seq', tokenize='trigram');
+CREATE TRIGGER message_text_insert AFTER INSERT ON messages BEGIN
+    INSERT INTO message_text(rowid, content) VALUES (new.seq, new.content);
+END;
+CREATE TRIGGER message_text_delete AFTER DELETE ON messages BEGIN
+    INSERT INTO message_text(message_text, rowid, content)
+        VALUES ('delete', old.seq, old.content);
+END;
+CREATE TRIGGER message_text_update AFTER UPDATE OF content ON messages BEGIN
+    INSERT INTO message_text(message_text, rowid, content)
+        VALUES ('delete', old.seq, old.content);
+    INSERT INTO message_text(rowid, content) VALUES (new.seq, new.content);
+END;
+";
+
+/// What schema 2 adds to schema 1: the positions telemetry carried.
+const SCHEMA_V2: &str = "
+CREATE TABLE positions(
+    identity BLOB NOT NULL,
+    peer BLOB NOT NULL,
+    via BLOB NOT NULL,
+    message INTEGER REFERENCES messages(seq) ON DELETE SET NULL,
+    fix_time INTEGER NOT NULL,
+    received_at INTEGER,
+    lat_e6 INTEGER NOT NULL, lon_e6 INTEGER NOT NULL,
+    alt_e2 INTEGER, speed_e2 INTEGER, bearing_e2 INTEGER, accuracy_e2 INTEGER,
+    telemetry BLOB NOT NULL,
+    PRIMARY KEY (identity, peer, fix_time));
+";
+
+/// What schema 3 adds to schema 2: the bytes of the received messages whose
+/// signature waits on their sender's key.
+const SCHEMA_V3: &str = "
+CREATE TABLE unverified(
+    identity BLOB NOT NULL,
+    id BLOB NOT NULL,
+    source BLOB NOT NULL,
+    packed BLOB NOT NULL,
+    PRIMARY KEY (identity, id));
+";
+
+/// What schema 4 adds to schema 3: the home node's archive, its admitted
+/// devices and its open admission tokens.
+const SCHEMA_V4: &str = "
+CREATE TABLE archive(
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    identity BLOB NOT NULL,
+    kind INTEGER NOT NULL,
+    id BLOB NOT NULL,
+    at INTEGER NOT NULL,
+    packed BLOB NOT NULL);
+CREATE UNIQUE INDEX archive_by_id ON archive(identity, kind, id);
+CREATE TABLE home_devices(
+    identity BLOB NOT NULL,
+    device BLOB NOT NULL,
+    name TEXT NOT NULL,
+    admitted_at INTEGER NOT NULL,
+    PRIMARY KEY (identity, device));
+CREATE TABLE home_tokens(
+    identity BLOB NOT NULL,
+    token BLOB NOT NULL,
+    name TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (identity, token));
+";
+
+/// What schema 5 adds to schema 4: the home node's outbox, one row a message
+/// a client handed in with `/send`, keyed by the client's own id so a retried
+/// submission finds its row. `state` is 0 while it is retried, 1 delivered,
+/// 2 when the retries ended; `propagated` is 1 once a propagation node took
+/// a copy.
+const SCHEMA_V5: &str = "
+CREATE TABLE home_outbox(
+    identity BLOB NOT NULL,
+    client_id BLOB NOT NULL,
+    id BLOB NOT NULL,
+    destination BLOB NOT NULL,
+    packed BLOB NOT NULL,
+    created_at INTEGER NOT NULL,
+    state INTEGER NOT NULL,
+    propagated INTEGER NOT NULL,
+    PRIMARY KEY (identity, client_id));
+CREATE UNIQUE INDEX home_outbox_by_id ON home_outbox(identity, id);
+";
+
+/// What schema 6 adds to schema 5: where an imported message came from
+/// (`nomadnet`, `loquax`; NULL for loquax's own rows) and what that app said
+/// of its signature (1 verified, 0 not), kept apart from our own verdict in
+/// `verification`.
+const SCHEMA_V6: &str = "
+ALTER TABLE messages ADD COLUMN origin TEXT;
+ALTER TABLE messages ADD COLUMN origin_verdict INTEGER;
+";
+
+/// The model's key of the row at seq 0. The model counts keys unsigned
+/// ([`Message::activity`]) and imported history sits below seq 0, so a key is
+/// the seq with its sign bit flipped: the same order, and every row of an
+/// older store, whose keys all lie above 0, keeps its place.
+pub const KEY_OF_SEQ_ZERO: u64 = 1 << 63;
+
+/// The model's key for a store row's `seq`.
+pub fn key_of(seq: i64) -> u64 {
+    (seq as u64) ^ KEY_OF_SEQ_ZERO
+}
+
+/// The store row's `seq` for a model key.
+pub fn seq_of(key: u64) -> i64 {
+    (key ^ KEY_OF_SEQ_ZERO) as i64
+}
+
+/// The tables a whole store of schema 1 has.
+const TABLES_V1: [&str; 5] = [
+    "conversations",
+    "messages",
+    "ledger",
+    "names",
+    "message_text",
+];
+
+/// The tables schema 2 adds.
+const TABLES_V2: [&str; 1] = ["positions"];
+
+/// The tables schema 3 adds.
+const TABLES_V3: [&str; 1] = ["unverified"];
+
+/// The tables schema 4 adds.
+const TABLES_V4: [&str; 3] = ["archive", "home_devices", "home_tokens"];
+
+/// The tables schema 5 adds.
+const TABLES_V5: [&str; 1] = ["home_outbox"];
+
+/// A received message kept for its signature check: its id, its sender and
+/// the bytes it came as.
+pub type Held = ([u8; 32], [u8; 16], Vec<u8>);
+
+/// Why the store could not be used.
+#[derive(Debug)]
+pub enum StoreError {
+    /// The file is there and is not a whole store: loquax will not start
+    /// over it.
+    Corrupt { path: PathBuf, detail: String },
+    /// A later loquax wrote it.
+    Newer { path: PathBuf, version: i32 },
+    /// Reading or writing failed.
+    Failed { path: PathBuf, detail: String },
+}
+
+impl fmt::Display for StoreError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Corrupt { path, detail } => write!(
+                f,
+                "the message store {} is damaged ({detail}). Loquax will not start over it, \
+                 because an empty history would be written where the old one was. Move the \
+                 file aside to start with an empty history, or put a backup in its place",
+                path.display()
+            ),
+            Self::Newer { path, version } => write!(
+                f,
+                "the message store {} was written by a later Loquax (schema {version}, this one \
+                 knows {SCHEMA_VERSION}); update Loquax",
+                path.display()
+            ),
+            Self::Failed { path, detail } => {
+                write!(f, "the message store {}: {detail}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for StoreError {}
+
+/// The open store, scoped to one of our addresses.
+pub struct Store {
+    conn: Connection,
+    path: PathBuf,
+    identity: [u8; 16],
+}
+
+impl Store {
+    /// `home/history.sqlite3` for `identity`, our LXMF address.
+    pub fn open_in(home: &Path, identity: [u8; 16]) -> Result<Self, StoreError> {
+        Self::open(&home.join(STORE_FILE), identity)
+    }
+
+    /// The store at `path`: made when the file is missing, refused when it
+    /// is there and not whole ([`StoreError::Corrupt`]).
+    pub fn open(path: &Path, identity: [u8; 16]) -> Result<Self, StoreError> {
+        let fresh = match std::fs::symlink_metadata(path) {
+            Ok(_) => false,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => return Err(failed(path, error)),
+        };
+        let flags = match fresh {
+            true => OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+            // Never create over a name that vanished between the two calls.
+            false => OpenFlags::SQLITE_OPEN_READ_WRITE,
+        } | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(path, flags).map_err(|e| failed(path, e))?;
+        conn.busy_timeout(std::time::Duration::from_millis(BUSY_MS))
+            .map_err(|e| failed(path, e))?;
+        let store = Self {
+            conn,
+            path: path.to_path_buf(),
+            identity,
+        };
+        match fresh {
+            true => store.create()?,
+            false => store.check()?,
+        }
+        store.configure()?;
+        Ok(store)
+    }
+
+    /// The store at `path` for reading only, never made, migrated or
+    /// written: what a dry run and an export look at. `None` when there is
+    /// no file.
+    pub fn open_read_only(path: &Path, identity: [u8; 16]) -> Result<Option<Self>, StoreError> {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(failed(path, error)),
+        }
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(path, flags).map_err(|e| failed(path, e))?;
+        conn.busy_timeout(std::time::Duration::from_millis(BUSY_MS))
+            .map_err(|e| failed(path, e))?;
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map_err(|e| failed(path, e))?;
+        if version > SCHEMA_VERSION {
+            return Err(StoreError::Newer {
+                path: path.to_path_buf(),
+                version,
+            });
+        }
+        if version < SCHEMA_VERSION {
+            return Err(failed(
+                path,
+                format!("schema {version}; start Loquax once to bring it to {SCHEMA_VERSION}"),
+            ));
+        }
+        Ok(Some(Self {
+            conn,
+            path: path.to_path_buf(),
+            identity,
+        }))
+    }
+
+    /// Where it is.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn create(&self) -> Result<(), StoreError> {
+        let batch = format!(
+            "BEGIN IMMEDIATE; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
+             {SCHEMA_V6} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
+        );
+        self.conn
+            .execute_batch(&batch)
+            .map_err(|e| failed(&self.path, e))
+    }
+
+    /// The checks that tell a whole store from a damaged one, cheapest
+    /// first, before anything reads it for the screen.
+    fn check(&self) -> Result<(), StoreError> {
+        let corrupt = |detail: String| StoreError::Corrupt {
+            path: self.path.clone(),
+            detail,
+        };
+        // Reading the schema makes SQLite read the header, roll back a write
+        // a crash left in its journal, and refuse a file shorter than the
+        // page count its header gives (`lockBtree`, "database disk image is
+        // malformed"): a cut file is caught here, before anything reads it
+        // for the screen.
+        let version: i32 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map_err(|e| corrupt(e.to_string()))?;
+        let tables: Vec<String> = self
+            .conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .and_then(|mut statement| {
+                statement
+                    .query_map([], |row| row.get(0))?
+                    .collect::<Result<Vec<String>, _>>()
+            })
+            .map_err(|e| corrupt(e.to_string()))?;
+        if version > SCHEMA_VERSION {
+            return Err(StoreError::Newer {
+                path: self.path.clone(),
+                version,
+            });
+        }
+        if !(1..=SCHEMA_VERSION).contains(&version) {
+            return Err(corrupt(format!(
+                "not a Loquax store: schema version {version}"
+            )));
+        }
+        let missing = |want: &[&'static str]| -> Option<&'static str> {
+            want.iter()
+                .find(|t| !tables.iter().any(|n| n == *t))
+                .copied()
+        };
+        if let Some(missing) = missing(&TABLES_V1) {
+            return Err(corrupt(format!("table {missing} is missing")));
+        }
+        if version >= 2 {
+            if let Some(missing) = missing(&TABLES_V2) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
+        if version >= 3 {
+            if let Some(missing) = missing(&TABLES_V3) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
+        if version >= 4 {
+            if let Some(missing) = missing(&TABLES_V4) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
+        if version >= 5 {
+            if let Some(missing) = missing(&TABLES_V5) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
+        if version < SCHEMA_VERSION {
+            return self.migrate();
+        }
+        Ok(())
+    }
+
+    /// An older schema to this one: each later schema's tables, all or
+    /// none. The version is read again under the write lock, so two loquax
+    /// opening one old file at once migrate it once.
+    fn migrate(&self) -> Result<(), StoreError> {
+        let migrate = || -> rusqlite::Result<()> {
+            self.conn.execute_batch("BEGIN IMMEDIATE")?;
+            let version: i32 = self
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+            if version < SCHEMA_VERSION {
+                let mut batch = String::new();
+                if version < 2 {
+                    batch.push_str(SCHEMA_V2);
+                }
+                if version < 3 {
+                    batch.push_str(SCHEMA_V3);
+                }
+                if version < 4 {
+                    batch.push_str(SCHEMA_V4);
+                }
+                if version < 5 {
+                    batch.push_str(SCHEMA_V5);
+                }
+                batch.push_str(SCHEMA_V6);
+                batch.push_str(&format!("PRAGMA user_version = {SCHEMA_VERSION};"));
+                if let Err(error) = self.conn.execute_batch(&batch) {
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                    return Err(error);
+                }
+            }
+            self.conn.execute_batch("COMMIT")
+        };
+        migrate().map_err(|e| failed(&self.path, e))
+    }
+
+    fn configure(&self) -> Result<(), StoreError> {
+        self.conn
+            .execute_batch(
+                "PRAGMA journal_mode = DELETE; PRAGMA synchronous = FULL; \
+                 PRAGMA foreign_keys = ON;",
+            )
+            .map_err(|e| failed(&self.path, e))
+    }
+
+    /// The largest key the store holds, from which the model counts on.
+    pub fn last_key(&self) -> Result<u64, StoreError> {
+        let last: Option<i64> = self
+            .conn
+            .query_row("SELECT MAX(seq) FROM messages", [], |row| row.get(0))
+            .map_err(|e| self.failed(e))?;
+        // Never below seq 0: imported history sits there, and the model counts
+        // on from here.
+        Ok(key_of(last.unwrap_or(0).max(0)))
+    }
+
+    /// Every conversation with its newest [`LOAD_WINDOW`] messages, the most
+    /// recent conversation first.
+    pub fn restore(&self) -> Result<Vec<Restored>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT c.peer, c.pinned, c.unread, \
+                 (SELECT MAX(seq) FROM messages m \
+                  WHERE m.identity = c.identity AND m.conversation = c.peer) AS last \
+                 FROM conversations c WHERE c.identity = ?1 \
+                 ORDER BY last DESC",
+            )
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(params![&self.identity[..]], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|e| self.failed(e))?;
+        let mut out = Vec::new();
+        for (peer, pinned, unread) in rows {
+            let peer = self.address(&peer)?;
+            let (messages, earlier) = self.page(peer, u64::MAX, None)?;
+            out.push(Restored {
+                peer,
+                pinned,
+                unread: unread.max(0) as usize,
+                messages,
+                earlier,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The [`LOAD_WINDOW`] messages of `peer`'s conversation before key
+    /// `before`, or every one from `through` on when that reaches further,
+    /// oldest first, and how many the store holds before those.
+    pub fn earlier(
+        &self,
+        peer: [u8; 16],
+        before: u64,
+        through: Option<u64>,
+    ) -> Result<(Vec<Message>, usize), StoreError> {
+        self.page(peer, before, through)
+    }
+
+    fn page(
+        &self,
+        peer: [u8; 16],
+        before: u64,
+        through: Option<u64>,
+    ) -> Result<(Vec<Message>, usize), StoreError> {
+        let before = seq_of(before);
+        // The window's oldest key: the LOAD_WINDOW-th before `before`, or
+        // none when fewer are there, then down to `through`.
+        let window_start: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT seq FROM messages WHERE identity = ?1 AND conversation = ?2 \
+                 AND seq < ?3 ORDER BY seq DESC LIMIT 1 OFFSET ?4",
+                params![
+                    &self.identity[..],
+                    &peer[..],
+                    before,
+                    (LOAD_WINDOW - 1) as i64
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| self.failed(e))?;
+        let through = through.map(seq_of);
+        let lowest = match (window_start, through) {
+            (Some(start), Some(through)) => start.min(through),
+            (Some(start), None) => start,
+            (None, _) => i64::MIN,
+        };
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT seq, id, direction, state, unproven, verification, last_leg, \
+                 received_at, utc_offset, size, content, fields FROM messages \
+                 WHERE identity = ?1 AND conversation = ?2 AND seq < ?3 AND seq >= ?4 \
+                 ORDER BY seq",
+            )
+            .map_err(|e| self.failed(e))?;
+        let mut messages = statement
+            .query_map(
+                params![&self.identity[..], &peer[..], before, lowest],
+                row_message,
+            )
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|e| self.failed(e))?;
+        let mut ledger = self
+            .conn
+            .prepare("SELECT at, utc_offset, what FROM ledger WHERE message = ?1 ORDER BY line")
+            .map_err(|e| self.failed(e))?;
+        for message in &mut messages {
+            message.ledger = ledger
+                .query_map(params![seq_of(message.activity)], |row| {
+                    Ok(LedgerEntry {
+                        at: wall_time(row.get(0)?, row.get(1)?),
+                        what: row.get(2)?,
+                    })
+                })
+                .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+                .map_err(|e| self.failed(e))?;
+        }
+        let first = messages.first().map_or(before, |m| seq_of(m.activity));
+        let earlier: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages \
+                 WHERE identity = ?1 AND conversation = ?2 AND seq < ?3",
+                params![&self.identity[..], &peer[..], first],
+                |row| row.get(0),
+            )
+            .map_err(|e| self.failed(e))?;
+        Ok((messages, earlier.max(0) as usize))
+    }
+
+    /// Make the model's writes, all or none.
+    pub fn write(&mut self, writes: &[StoreWrite]) -> Result<(), StoreError> {
+        if writes.is_empty() {
+            return Ok(());
+        }
+        let identity = self.identity;
+        let path = self.path.clone();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        for write in writes {
+            apply(&tx, &identity, write).map_err(|e| failed(&path, e))?;
+        }
+        tx.commit().map_err(|e| failed(&path, e))
+    }
+
+    /// Whether a message received with this id is already held: the
+    /// mailbox copy of one that came directly, in this run or an earlier one
+    /// (leviculum 1070). The screen holds only a window of each conversation,
+    /// so its own check cannot say this for the older ones.
+    pub fn holds_received(&self, id: &[u8; 32]) -> Result<bool, StoreError> {
+        received_key(&self.conn, &self.identity, id, None)
+            .map(|key| key.is_some())
+            .map_err(|e| self.failed(e))
+    }
+
+    /// Keep the bytes of a received message whose sender's key is not known,
+    /// for [`Store::unverified`] to hand back. Kept once: a second copy of
+    /// the same message changes nothing.
+    pub fn keep_unverified(
+        &mut self,
+        id: &[u8; 32],
+        source: &[u8; 16],
+        packed: &[u8],
+    ) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO unverified(identity, id, source, packed) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![&self.identity[..], &id[..], &source[..], packed],
+            )
+            .map(|_| ())
+            .map_err(|e| self.failed(e))
+    }
+
+    /// Every kept message still waiting on its sender's key. One whose
+    /// message was deleted is not handed back.
+    pub fn unverified(&self) -> Result<Vec<Held>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT u.id, u.source, u.packed FROM unverified u WHERE u.identity = ?1 \
+                 AND EXISTS (SELECT 1 FROM messages m WHERE m.identity = u.identity \
+                 AND m.id = u.id AND m.direction = 0 AND m.verification = 0)",
+            )
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(params![&self.identity[..]], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|e| self.failed(e))?;
+        rows.into_iter()
+            .filter_map(|(id, source, packed)| {
+                Some((
+                    <[u8; 32]>::try_from(id.as_slice()).ok()?,
+                    <[u8; 16]>::try_from(source.as_slice()).ok()?,
+                    packed,
+                ))
+            })
+            .map(Ok)
+            .collect()
+    }
+
+    /// A kept message's verdict: its row says it, whether or not the screen
+    /// holds the message, and its bytes go.
+    pub fn settle_verdict(&mut self, id: &[u8; 32], valid: bool) -> Result<(), StoreError> {
+        let signature = match valid {
+            true => Signature::Verified,
+            false => Signature::Invalid,
+        };
+        let identity = self.identity;
+        let path = self.path.clone();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        tx.execute(
+            "UPDATE messages SET verification = ?1 \
+             WHERE identity = ?2 AND id = ?3 AND direction = 0 AND verification = 0",
+            params![signature_code(signature), &identity[..], &id[..]],
+        )
+        .map_err(|e| failed(&path, e))?;
+        tx.execute(
+            "DELETE FROM unverified WHERE identity = ?1 AND id = ?2",
+            params![&identity[..], &id[..]],
+        )
+        .map_err(|e| failed(&path, e))?;
+        tx.commit().map_err(|e| failed(&path, e))
+    }
+
+    /// Every peer's latest position, by [`Fix::newer_than`], the clamp for
+    /// a fix ahead of our clock applied as at receive time.
+    pub fn positions(&self) -> Result<Vec<Fix>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT peer, via, message, fix_time, received_at, lat_e6, lon_e6, alt_e2, \
+                 speed_e2, bearing_e2, accuracy_e2, telemetry FROM positions \
+                 WHERE identity = ?1",
+            )
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(params![&self.identity[..]], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    Location {
+                        last_update: row.get(3)?,
+                        latitude_e6: row.get(5)?,
+                        longitude_e6: row.get(6)?,
+                        altitude_e2: row.get::<_, Option<i32>>(7)?.unwrap_or(0),
+                        speed_e2: row.get::<_, Option<u32>>(8)?.unwrap_or(0),
+                        bearing_e2: row.get::<_, Option<i32>>(9)?.unwrap_or(0),
+                        accuracy_e2: row.get::<_, Option<u16>>(10)?.unwrap_or(0),
+                    },
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, Vec<u8>>(11)?,
+                ))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|e| self.failed(e))?;
+        let mut latest: BTreeMap<[u8; 16], Fix> = BTreeMap::new();
+        for (peer, via, message, location, received_at, telemetry) in rows {
+            let fix = Fix {
+                peer: self.address(&peer)?,
+                via: self.address(&via)?,
+                message: message.map(key_of),
+                received_at,
+                location,
+                telemetry,
+            };
+            let newer = latest
+                .get(&fix.peer)
+                .is_none_or(|held| fix.newer_than(held));
+            if newer {
+                latest.insert(fix.peer, fix);
+            }
+        }
+        Ok(latest.into_values().collect())
+    }
+
+    /// How many positions the store holds for `peer`: the track.
+    pub fn track_len(&self, peer: [u8; 16]) -> Result<usize, StoreError> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM positions WHERE identity = ?1 AND peer = ?2",
+                params![&self.identity[..], &peer[..]],
+                |row| row.get(0),
+            )
+            .map_err(|e| self.failed(e))?;
+        Ok(count.max(0) as usize)
+    }
+
+    /// The names heard from announces in earlier runs.
+    pub fn names(&self) -> Result<Vec<([u8; 16], String)>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT peer, name FROM names WHERE identity = ?1")
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(params![&self.identity[..]], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|e| self.failed(e))?;
+        rows.into_iter()
+            .map(|(peer, name)| Ok((self.address(&peer)?, name)))
+            .collect()
+    }
+
+    /// Keep the name `peer` announced, sanitised.
+    pub fn save_name(&mut self, peer: [u8; 16], name: &str) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "INSERT INTO names(identity, peer, name) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(identity, peer) DO UPDATE SET name = excluded.name \
+                 WHERE name != excluded.name",
+                params![&self.identity[..], &peer[..], name],
+            )
+            .map(|_| ())
+            .map_err(|e| self.failed(e))
+    }
+
+    /// The messages whose text has `query` in it, ignoring case, that lie
+    /// below what the screen loaded: before `loaded_from`'s key in a
+    /// conversation it names, and none in a conversation it does not
+    /// (the screen holds all of that one). The newest first, at most
+    /// [`SEARCH_LIMIT`].
+    pub fn search(
+        &self,
+        query: &str,
+        loaded_from: &BTreeMap<[u8; 16], u64>,
+    ) -> Result<Vec<StoredHit>, StoreError> {
+        if query.is_empty() || loaded_from.is_empty() {
+            return Ok(Vec::new());
+        }
+        // The trigram index matches a substring of three characters or
+        // more; a shorter one is a scan, as the screen's matcher is.
+        let (sql, pattern) = match query.chars().count() >= 3 {
+            true => (
+                "SELECT m.seq, m.conversation, m.direction, m.received_at, m.utc_offset, \
+                 m.content FROM message_text JOIN messages m ON m.seq = message_text.rowid \
+                 WHERE message_text MATCH ?1 AND m.identity = ?2 ORDER BY m.seq DESC",
+                format!("\"{}\"", query.replace('"', "\"\"")),
+            ),
+            false => (
+                "SELECT seq, conversation, direction, received_at, utc_offset, content \
+                 FROM messages WHERE content LIKE ?1 ESCAPE '\\' AND identity = ?2 \
+                 ORDER BY seq DESC",
+                format!(
+                    "%{}%",
+                    query
+                        .replace('\\', "\\\\")
+                        .replace('%', "\\%")
+                        .replace('_', "\\_")
+                ),
+            ),
+        };
+        let mut statement = self.conn.prepare(sql).map_err(|e| self.failed(e))?;
+        let mut rows = statement
+            .query(params![pattern, &self.identity[..]])
+            .map_err(|e| self.failed(e))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| self.failed(e))? {
+            let key: i64 = row.get(0).map_err(|e| self.failed(e))?;
+            let peer: Vec<u8> = row.get(1).map_err(|e| self.failed(e))?;
+            let peer = self.address(&peer)?;
+            let below = loaded_from
+                .get(&peer)
+                .is_some_and(|&first| key_of(key) < first);
+            if !below {
+                continue;
+            }
+            let direction: i64 = row.get(2).map_err(|e| self.failed(e))?;
+            let at = wall_time(
+                row.get(3).map_err(|e| self.failed(e))?,
+                row.get(4).map_err(|e| self.failed(e))?,
+            );
+            out.push(StoredHit {
+                peer,
+                key: key_of(key),
+                outbound: direction == 1,
+                body: row.get(5).map_err(|e| self.failed(e))?,
+                at,
+            });
+            if out.len() == SEARCH_LIMIT {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    fn address(&self, bytes: &[u8]) -> Result<[u8; 16], StoreError> {
+        bytes.try_into().map_err(|_| StoreError::Corrupt {
+            path: self.path.clone(),
+            detail: format!("an address of {} bytes", bytes.len()),
+        })
+    }
+
+    fn failed(&self, error: impl fmt::Display) -> StoreError {
+        failed(&self.path, error)
+    }
+}
+
+/// A device the home node admitted: its RNS identity hash, the name it was
+/// admitted under, and when (unix seconds).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Device {
+    pub device: [u8; 16],
+    pub name: String,
+    pub admitted_at: i64,
+}
+
+/// What redeeming an admission token came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Redeemed {
+    /// The token was open; the device is admitted under this name and the
+    /// token is gone.
+    Admitted { name: String },
+    /// No such token: never issued, or used already.
+    Unknown,
+    /// The token was issued for `name` but is older than its lifetime; it
+    /// is gone now.
+    Expired { name: String },
+}
+
+/// One open admission token, as `loquax home tokens` lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenToken {
+    pub token: [u8; 16],
+    pub name: String,
+    pub created_at: i64,
+}
+
+/// One message in the home node's outbox that is still retried.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outgoing {
+    pub id: [u8; 32],
+    pub destination: [u8; 16],
+    pub packed: Vec<u8>,
+    pub created_at: i64,
+    pub propagated: bool,
+}
+
+/// What handing a message in with `/send` came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Accepted {
+    /// A new outbox row, under this archive sequence.
+    New { seq: Option<u64> },
+    /// The client's id was handed in before: this is the message it made.
+    Again { id: [u8; 32] },
+}
+
+/// What `loquax home revoke <device>` matched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Revoked {
+    /// Nothing by that name or hash.
+    None,
+    /// This one device, now removed.
+    One(Device),
+    /// More than one device matched; none was removed.
+    Ambiguous(Vec<Device>),
+}
+
+/// What `loquax home revoke-token <prefix>` matched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenRevoked {
+    /// Fewer than four hex characters, or a character that is none.
+    TooShort,
+    /// No token starts so.
+    None,
+    /// This one token, now withdrawn.
+    One(OpenToken),
+    /// More than one token starts so; none was withdrawn.
+    Ambiguous(Vec<OpenToken>),
+}
+
+/// The home node's half of the store
+/// (`docs/src/concepts/loquax-home-node.md`): the archive its clients pull,
+/// the admitted devices, the open admission tokens. Every row is scoped by
+/// our own address, as the rest of the store is.
+impl Store {
+    /// Append one archive entry and evict the oldest entries while the
+    /// archive holds more than `cap_bytes` of packed messages. The entry
+    /// just appended is never evicted by its own append, so one message
+    /// larger than the cap is still kept until the next one comes.
+    ///
+    /// The same `(kind, id)` twice is one entry: a message that came direct
+    /// and again out of the propagation node is archived once. `None` is
+    /// that second time.
+    pub fn archive_append(
+        &mut self,
+        kind: u8,
+        id: &[u8; 32],
+        packed: &[u8],
+        at: i64,
+        cap_bytes: u64,
+    ) -> Result<Option<u64>, StoreError> {
+        let identity = self.identity;
+        let path = self.path.clone();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        let seq = append_in(&tx, &identity, kind, id, packed, at, cap_bytes)
+            .map_err(|e| failed(&path, e))?;
+        tx.commit().map_err(|e| failed(&path, e))?;
+        Ok(seq)
+    }
+
+    /// Append a name entry ([`crate::home::KIND_NAME`]) for the display
+    /// name `peer` announced, heard at `at`, when it says something new: a
+    /// name that sanitises to nothing, or to the name kept for `peer`
+    /// already, appends nothing (`None`). The entry carries the name as
+    /// announced, which each client sanitises as it does an announce; the
+    /// names table keeps the sanitised one, as on any device.
+    pub fn archive_name(
+        &mut self,
+        peer: [u8; 16],
+        name: &str,
+        at: i64,
+        cap_bytes: u64,
+    ) -> Result<Option<u64>, StoreError> {
+        let Some(shown) = crate::names::sanitise(name) else {
+            return Ok(None);
+        };
+        let identity = self.identity;
+        let path = self.path.clone();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        let kept: Option<String> = tx
+            .query_row(
+                "SELECT name FROM names WHERE identity = ?1 AND peer = ?2",
+                params![&identity[..], &peer[..]],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| failed(&path, e))?;
+        if kept.as_deref() == Some(shown.as_str()) {
+            return Ok(None);
+        }
+        let packed = crate::home::wire::name_entry(&peer, name);
+        // A name may come back after another: the time makes it a new entry.
+        let mut keyed = packed.clone();
+        keyed.extend_from_slice(&at.to_be_bytes());
+        let id = leviculum_core::crypto::sha256(&keyed);
+        let seq = append_in(
+            &tx,
+            &identity,
+            crate::home::KIND_NAME,
+            &id,
+            &packed,
+            at,
+            cap_bytes,
+        )
+        .map_err(|e| failed(&path, e))?;
+        if let Some(seq) = seq {
+            tx.execute(
+                "INSERT INTO names(identity, peer, name) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(identity, peer) DO UPDATE SET name = excluded.name",
+                params![&identity[..], &peer[..], shown],
+            )
+            .map_err(|e| failed(&path, e))?;
+            // Only the newest name of a peer is kept: a client behind the
+            // cursor needs the name it shows, not each one before it.
+            let prefix = crate::home::wire::name_entry_prefix(&peer);
+            tx.execute(
+                "DELETE FROM archive WHERE identity = ?1 AND kind = ?2 AND seq <> ?3 \
+                 AND substr(packed, 1, ?4) = ?5",
+                params![
+                    &identity[..],
+                    i64::from(crate::home::KIND_NAME),
+                    i64::try_from(seq).unwrap_or(i64::MAX),
+                    i64::try_from(prefix.len()).unwrap_or(i64::MAX),
+                    &prefix[..]
+                ],
+            )
+            .map_err(|e| failed(&path, e))?;
+        }
+        tx.commit().map_err(|e| failed(&path, e))?;
+        Ok(seq)
+    }
+
+    /// Append a petname entry ([`crate::home::KIND_PETNAME`]) a client
+    /// handed in for `peer`, at `at`, when it says something new: the same
+    /// bytes as the peer's newest petname entry append nothing (`None`).
+    /// Only the newest of a peer is kept, as for names: a client behind the
+    /// cursor needs the name the reader gave last.
+    pub fn archive_petname(
+        &mut self,
+        peer: [u8; 16],
+        packed: &[u8],
+        at: i64,
+        cap_bytes: u64,
+    ) -> Result<Option<u64>, StoreError> {
+        let identity = self.identity;
+        let path = self.path.clone();
+        let kind = i64::from(crate::home::KIND_PETNAME);
+        let prefix = crate::home::wire::name_entry_prefix(&peer);
+        let prefix_len = i64::try_from(prefix.len()).unwrap_or(i64::MAX);
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        let newest: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT packed FROM archive WHERE identity = ?1 AND kind = ?2 \
+                 AND substr(packed, 1, ?3) = ?4 ORDER BY seq DESC LIMIT 1",
+                params![&identity[..], kind, prefix_len, &prefix[..]],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| failed(&path, e))?;
+        if newest.as_deref() == Some(packed) {
+            return Ok(None);
+        }
+        // A name may come back after another: the time makes it a new entry.
+        let mut keyed = packed.to_vec();
+        keyed.extend_from_slice(&at.to_be_bytes());
+        let id = leviculum_core::crypto::sha256(&keyed);
+        let seq = append_in(
+            &tx,
+            &identity,
+            crate::home::KIND_PETNAME,
+            &id,
+            packed,
+            at,
+            cap_bytes,
+        )
+        .map_err(|e| failed(&path, e))?;
+        if let Some(seq) = seq {
+            tx.execute(
+                "DELETE FROM archive WHERE identity = ?1 AND kind = ?2 AND seq <> ?3 \
+                 AND substr(packed, 1, ?4) = ?5",
+                params![
+                    &identity[..],
+                    kind,
+                    i64::try_from(seq).unwrap_or(i64::MAX),
+                    prefix_len,
+                    &prefix[..]
+                ],
+            )
+            .map_err(|e| failed(&path, e))?;
+        }
+        tx.commit().map_err(|e| failed(&path, e))?;
+        Ok(seq)
+    }
+
+    /// The archive entries after `cursor`, oldest first, up to about
+    /// `max_bytes` of packed messages but always at least one when there is
+    /// one, and whether more follow. `first` is the oldest sequence still
+    /// held, so a client whose cursor fell behind an eviction can say so.
+    pub fn archive_since(
+        &self,
+        cursor: u64,
+        max_bytes: usize,
+    ) -> Result<crate::home::wire::Page, StoreError> {
+        let cursor = i64::try_from(cursor).unwrap_or(i64::MAX);
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT seq, kind, at, packed FROM archive WHERE identity = ?1 AND seq > ?2 \
+                 ORDER BY seq",
+            )
+            .map_err(|e| self.failed(e))?;
+        let mut rows = statement
+            .query(params![&self.identity[..], cursor])
+            .map_err(|e| self.failed(e))?;
+        let mut entries = Vec::new();
+        let mut bytes = 0usize;
+        let mut more = false;
+        while let Some(row) = rows.next().map_err(|e| self.failed(e))? {
+            let packed: Vec<u8> = row.get(3).map_err(|e| self.failed(e))?;
+            if !entries.is_empty() && bytes.saturating_add(packed.len()) > max_bytes {
+                more = true;
+                break;
+            }
+            bytes = bytes.saturating_add(packed.len());
+            let seq: i64 = row.get(0).map_err(|e| self.failed(e))?;
+            let kind: i64 = row.get(1).map_err(|e| self.failed(e))?;
+            entries.push(crate::home::wire::Entry {
+                seq: seq as u64,
+                kind: u8::try_from(kind).unwrap_or(u8::MAX),
+                at: row.get(2).map_err(|e| self.failed(e))?,
+                packed,
+            });
+        }
+        let first: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT MIN(seq) FROM archive WHERE identity = ?1",
+                params![&self.identity[..]],
+                |row| row.get(0),
+            )
+            .map_err(|e| self.failed(e))?;
+        Ok(crate::home::wire::Page {
+            entries,
+            more,
+            first: first.map_or(0, |seq| seq as u64),
+        })
+    }
+
+    /// The archive's newest sequence, 0 when it is empty: what a wake
+    /// tells a watching client.
+    pub fn archive_newest(&self) -> Result<u64, StoreError> {
+        let newest: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT MAX(seq) FROM archive WHERE identity = ?1",
+                params![&self.identity[..]],
+                |row| row.get(0),
+            )
+            .map_err(|e| self.failed(e))?;
+        Ok(newest.map_or(0, |seq| seq as u64))
+    }
+
+    /// The newest sequence a client is woken for: every entry's but a
+    /// name's (1136) and a petname's (1139), which ride along with the next
+    /// pull.
+    pub fn archive_newest_waking(&self) -> Result<u64, StoreError> {
+        let newest: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT MAX(seq) FROM archive WHERE identity = ?1 AND kind NOT IN (?2, ?3)",
+                params![
+                    &self.identity[..],
+                    i64::from(crate::home::KIND_NAME),
+                    i64::from(crate::home::KIND_PETNAME)
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|e| self.failed(e))?;
+        Ok(newest.map_or(0, |seq| seq as u64))
+    }
+
+    /// The peers the archive and the outbox hold a conversation with: the
+    /// source of each received message, the destination of each sent one
+    /// and of each message a client handed in. The home node archives the
+    /// names of these alone ([`crate::home::relation`]).
+    pub fn archive_peers(&self) -> Result<std::collections::BTreeSet<[u8; 16]>, StoreError> {
+        let mut peers = std::collections::BTreeSet::new();
+        // An LXMF message packs its destination, then its source.
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT CASE kind WHEN ?2 THEN substr(packed, 17, 16) ELSE substr(packed, 1, 16) END \
+                 FROM archive WHERE identity = ?1 AND kind IN (?2, ?3) \
+                 UNION SELECT destination FROM home_outbox WHERE identity = ?1 \
+                 UNION SELECT peer FROM conversations WHERE identity = ?1",
+            )
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(
+                params![
+                    &self.identity[..],
+                    i64::from(crate::home::KIND_RECEIVED),
+                    i64::from(crate::home::KIND_SENT)
+                ],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .map_err(|e| self.failed(e))?;
+        for row in rows {
+            let bytes = row.map_err(|e| self.failed(e))?;
+            if let Ok(peer) = <[u8; 16]>::try_from(bytes.as_slice()) {
+                peers.insert(peer);
+            }
+        }
+        Ok(peers)
+    }
+
+    /// Whether this store is a home node's for our address: a device was
+    /// admitted, or the archive holds an entry. An import writes the
+    /// archive only then (1150).
+    pub fn serves_as_home_node(&self) -> Result<bool, StoreError> {
+        let found: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 WHERE EXISTS (SELECT 1 FROM home_devices WHERE identity = ?1) \
+                 OR EXISTS (SELECT 1 FROM archive WHERE identity = ?1)",
+                params![&self.identity[..]],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| self.failed(e))?;
+        Ok(found.is_some())
+    }
+
+    /// Append imported rows ([`crate::home::KIND_IMPORTED`]) in the order
+    /// given, all or none, under the cap: how many were new to the archive.
+    /// The same message twice is one entry, so a second import appends
+    /// nothing.
+    pub fn archive_imported(
+        &mut self,
+        entries: &[([u8; 32], i64, Vec<u8>)],
+        cap_bytes: u64,
+    ) -> Result<usize, StoreError> {
+        let identity = self.identity;
+        let path = self.path.clone();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        let mut added = 0;
+        for (id, at, bytes) in entries {
+            let seq = append_in(
+                &tx,
+                &identity,
+                crate::home::KIND_IMPORTED,
+                id,
+                bytes,
+                *at,
+                cap_bytes,
+            )
+            .map_err(|e| failed(&path, e))?;
+            added += usize::from(seq.is_some());
+        }
+        tx.commit().map_err(|e| failed(&path, e))?;
+        Ok(added)
+    }
+
+    /// How many bytes of packed messages the archive holds.
+    pub fn archive_bytes(&self) -> Result<u64, StoreError> {
+        let total: i64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(SUM(LENGTH(packed)), 0) FROM archive WHERE identity = ?1",
+                params![&self.identity[..]],
+                |row| row.get(0),
+            )
+            .map_err(|e| self.failed(e))?;
+        Ok(total.max(0) as u64)
+    }
+
+    /// Open one single-use admission token for a device to be called `name`.
+    pub fn issue_token(&mut self, token: &[u8; 16], name: &str, at: i64) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "INSERT INTO home_tokens(identity, token, name, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![&self.identity[..], &token[..], name, at],
+            )
+            .map(|_| ())
+            .map_err(|e| self.failed(e))
+    }
+
+    /// Redeem `token` for `device`, in one transaction: the token goes and
+    /// the device is admitted under the token's name, or nothing changes.
+    /// A device admitted again keeps one row, with the new name and time.
+    /// A token issued `ttl_secs` or longer before `at` has expired: it is
+    /// removed and refused as an unknown one is.
+    pub fn redeem_token(
+        &mut self,
+        token: &[u8; 16],
+        device: &[u8; 16],
+        at: i64,
+        ttl_secs: i64,
+    ) -> Result<Redeemed, StoreError> {
+        let identity = self.identity;
+        let path = self.path.clone();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        let open: Option<(String, i64)> = tx
+            .query_row(
+                "SELECT name, created_at FROM home_tokens WHERE identity = ?1 AND token = ?2",
+                params![&identity[..], &token[..]],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| failed(&path, e))?;
+        let Some((name, created_at)) = open else {
+            return Ok(Redeemed::Unknown);
+        };
+        tx.execute(
+            "DELETE FROM home_tokens WHERE identity = ?1 AND token = ?2",
+            params![&identity[..], &token[..]],
+        )
+        .map_err(|e| failed(&path, e))?;
+        if at.saturating_sub(created_at) >= ttl_secs {
+            tx.commit().map_err(|e| failed(&path, e))?;
+            return Ok(Redeemed::Expired { name });
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO home_devices(identity, device, name, admitted_at) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![&identity[..], &device[..], &name, at],
+        )
+        .map_err(|e| failed(&path, e))?;
+        tx.commit().map_err(|e| failed(&path, e))?;
+        Ok(Redeemed::Admitted { name })
+    }
+
+    /// Whether `device` is admitted now. Every request asks again.
+    pub fn is_admitted(&self, device: &[u8; 16]) -> Result<bool, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM home_devices WHERE identity = ?1 AND device = ?2",
+                params![&self.identity[..], &device[..]],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|row| row.is_some())
+            .map_err(|e| self.failed(e))
+    }
+
+    /// Every admitted device, the earliest admitted first.
+    pub fn devices(&self) -> Result<Vec<Device>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT device, name, admitted_at FROM home_devices WHERE identity = ?1 \
+                 ORDER BY admitted_at, name",
+            )
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(params![&self.identity[..]], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|e| self.failed(e))?;
+        rows.into_iter()
+            .map(|(device, name, admitted_at)| {
+                Ok(Device {
+                    device: self.address(&device)?,
+                    name,
+                    admitted_at,
+                })
+            })
+            .collect()
+    }
+
+    /// The admission tokens still open at `now`. Expired ones are removed
+    /// first, so the list is what a join could still redeem.
+    pub fn open_tokens(&mut self, now: i64, ttl_secs: i64) -> Result<Vec<OpenToken>, StoreError> {
+        self.conn
+            .execute(
+                "DELETE FROM home_tokens WHERE identity = ?1 AND ?2 - created_at >= ?3",
+                params![&self.identity[..], now, ttl_secs],
+            )
+            .map_err(|e| self.failed(e))?;
+        self.tokens()
+    }
+
+    /// Every token issued and not redeemed, expired or not.
+    fn tokens(&self) -> Result<Vec<OpenToken>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT token, name, created_at FROM home_tokens WHERE identity = ?1 \
+                 ORDER BY created_at, name",
+            )
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(params![&self.identity[..]], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|e| self.failed(e))?;
+        rows.into_iter()
+            .map(|(token, name, created_at)| {
+                Ok(OpenToken {
+                    token: self.address(&token)?,
+                    name,
+                    created_at,
+                })
+            })
+            .collect()
+    }
+
+    /// Withdraw the token whose hex starts with `prefix` (`loquax home
+    /// revoke-token`): at least four hex characters, as `home revoke` takes
+    /// a device's hash, and only when one token matches.
+    pub fn revoke_token(&mut self, prefix: &str) -> Result<TokenRevoked, StoreError> {
+        let lower = prefix.trim().to_ascii_lowercase();
+        if lower.len() < 4 || !lower.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(TokenRevoked::TooShort);
+        }
+        let mut matched: Vec<OpenToken> = self
+            .tokens()?
+            .into_iter()
+            .filter(|token| crate::address::to_hex(&token.token).starts_with(&lower))
+            .collect();
+        match matched.len() {
+            0 => Ok(TokenRevoked::None),
+            1 => {
+                let token = matched.remove(0);
+                self.conn
+                    .execute(
+                        "DELETE FROM home_tokens WHERE identity = ?1 AND token = ?2",
+                        params![&self.identity[..], &token.token[..]],
+                    )
+                    .map_err(|e| self.failed(e))?;
+                Ok(TokenRevoked::One(token))
+            }
+            _ => Ok(TokenRevoked::Ambiguous(matched)),
+        }
+    }
+
+    /// The message an earlier `/send` with `client_id` made, if one did.
+    pub fn outbox_by_client(&self, client_id: &[u8; 16]) -> Result<Option<[u8; 32]>, StoreError> {
+        let id: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT id FROM home_outbox WHERE identity = ?1 AND client_id = ?2",
+                params![&self.identity[..], &client_id[..]],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| self.failed(e))?;
+        id.map(|id| {
+            <[u8; 32]>::try_from(id.as_slice())
+                .map_err(|_| self.failed("a message id is not 32 bytes"))
+        })
+        .transpose()
+    }
+
+    /// Put one message a client handed in into the outbox, and its sent
+    /// entry into the archive, in one transaction. A `client_id` seen before
+    /// changes nothing and names the message it made then.
+    #[allow(clippy::too_many_arguments)]
+    pub fn outbox_accept(
+        &mut self,
+        client_id: &[u8; 16],
+        id: &[u8; 32],
+        destination: &[u8; 16],
+        packed: &[u8],
+        at: i64,
+        cap_bytes: u64,
+    ) -> Result<Accepted, StoreError> {
+        let identity = self.identity;
+        let path = self.path.clone();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        let earlier: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT id FROM home_outbox WHERE identity = ?1 AND client_id = ?2",
+                params![&identity[..], &client_id[..]],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| failed(&path, e))?;
+        if let Some(earlier) = earlier {
+            let id = <[u8; 32]>::try_from(earlier.as_slice())
+                .map_err(|_| failed(&path, "a message id is not 32 bytes"))?;
+            return Ok(Accepted::Again { id });
+        }
+        tx.execute(
+            "INSERT INTO home_outbox(identity, client_id, id, destination, packed, created_at, \
+             state, propagated) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 0)",
+            params![
+                &identity[..],
+                &client_id[..],
+                &id[..],
+                &destination[..],
+                packed,
+                at
+            ],
+        )
+        .map_err(|e| failed(&path, e))?;
+        let seq = append_in(
+            &tx,
+            &identity,
+            crate::home::KIND_SENT,
+            id,
+            packed,
+            at,
+            cap_bytes,
+        )
+        .map_err(|e| failed(&path, e))?;
+        tx.commit().map_err(|e| failed(&path, e))?;
+        Ok(Accepted::New { seq })
+    }
+
+    /// Every outbox message still retried, the oldest first.
+    pub fn outbox_open(&self) -> Result<Vec<Outgoing>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT id, destination, packed, created_at, propagated FROM home_outbox \
+                 WHERE identity = ?1 AND state = 0 ORDER BY created_at, id",
+            )
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(params![&self.identity[..]], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|e| self.failed(e))?;
+        rows.into_iter()
+            .map(|(id, destination, packed, created_at, propagated)| {
+                Ok(Outgoing {
+                    id: <[u8; 32]>::try_from(id.as_slice())
+                        .map_err(|_| self.failed("a message id is not 32 bytes"))?,
+                    destination: self.address(&destination)?,
+                    packed,
+                    created_at,
+                    propagated: propagated != 0,
+                })
+            })
+            .collect()
+    }
+
+    /// Record one state change of an outbox message: its row and the archive
+    /// entry clients see it by ([`Change::kind`], the message id as its
+    /// bytes), in one transaction.
+    pub fn outbox_record(
+        &mut self,
+        id: &[u8; 32],
+        change: Change,
+        at: i64,
+        cap_bytes: u64,
+    ) -> Result<Option<u64>, StoreError> {
+        let identity = self.identity;
+        let path = self.path.clone();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        let update = match change {
+            Change::Propagated => {
+                "UPDATE home_outbox SET propagated = 1 WHERE identity = ?1 AND id = ?2"
+            }
+            Change::Delivered => "UPDATE home_outbox SET state = 1 WHERE identity = ?1 AND id = ?2",
+            Change::Ended { .. } => {
+                "UPDATE home_outbox SET state = 2 WHERE identity = ?1 AND id = ?2"
+            }
+        };
+        tx.execute(update, params![&identity[..], &id[..]])
+            .map_err(|e| failed(&path, e))?;
+        // A state entry's bytes are the message id, which is all a client
+        // needs to find the message the change is of.
+        let seq = append_in(&tx, &identity, change.kind(), id, &id[..], at, cap_bytes)
+            .map_err(|e| failed(&path, e))?;
+        tx.commit().map_err(|e| failed(&path, e))?;
+        Ok(seq)
+    }
+
+    /// Remove the device `which` names: its name exactly, or its hash in
+    /// hex, whole or a prefix of at least four characters. More than one
+    /// match removes nothing.
+    pub fn revoke(&mut self, which: &str) -> Result<Revoked, StoreError> {
+        let which = which.trim();
+        let lower = which.to_ascii_lowercase();
+        let hex_prefix = lower.len() >= 4 && lower.chars().all(|c| c.is_ascii_hexdigit());
+        let matched: Vec<Device> = self
+            .devices()?
+            .into_iter()
+            .filter(|device| {
+                device.name == which
+                    || (hex_prefix && crate::address::to_hex(&device.device).starts_with(&lower))
+            })
+            .collect();
+        match matched.len() {
+            0 => Ok(Revoked::None),
+            1 => {
+                let device = matched
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| self.failed("a matched device vanished between two reads"))?;
+                self.conn
+                    .execute(
+                        "DELETE FROM home_devices WHERE identity = ?1 AND device = ?2",
+                        params![&self.identity[..], &device.device[..]],
+                    )
+                    .map_err(|e| self.failed(e))?;
+                Ok(Revoked::One(device))
+            }
+            _ => Ok(Revoked::Ambiguous(matched)),
+        }
+    }
+}
+
+/// One message an import brings (`crate::import`), as the store keeps it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportRow {
+    /// The LXMF message id the source names it by.
+    pub id: [u8; 32],
+    /// Written by the address the history belongs to.
+    pub outbound: bool,
+    /// The sender's clock, where the source has it.
+    pub timestamp: Option<f64>,
+    /// When the source app wrote or received it, unix seconds.
+    pub received_at: Option<i64>,
+    pub title: Vec<u8>,
+    pub content: String,
+    pub fields: Vec<leviculum_lxmf::Field>,
+    /// Where a sent message stood in the source app.
+    pub delivery: Option<DeliveryState>,
+    /// Our own verdict: [`Signature::Verified`] only where loquax checked
+    /// the signature itself.
+    pub signature: Signature,
+    /// What the source app said of the signature, shown as its word.
+    pub origin_verdict: Option<bool>,
+    /// The sender and the signed bytes, kept while the sender's key is not
+    /// known, as a received message's are (`unverified`).
+    pub held: Option<([u8; 16], Vec<u8>)>,
+}
+
+/// What importing one conversation did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ImportCounts {
+    /// Rows written.
+    pub new: usize,
+    /// Rows the store already held under the same id and direction.
+    pub held: usize,
+}
+
+/// One message as `loquax export` writes it out.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportRow {
+    pub peer: [u8; 16],
+    pub row: ImportRow,
+}
+
+/// The import's and the export's half of the store (`crate::import`,
+/// `crate::export`).
+impl Store {
+    /// Whether the store holds a message with this id and direction for our
+    /// address: the import's dedup rule, 1070's.
+    pub fn holds(&self, id: &[u8; 32], outbound: bool) -> Result<bool, StoreError> {
+        holds_in(&self.conn, &self.identity, id, outbound).map_err(|e| self.failed(e))
+    }
+
+    /// How many messages the store holds for our address.
+    pub fn message_count(&self) -> Result<usize, StoreError> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE identity = ?1",
+                params![&self.identity[..]],
+                |row| row.get(0),
+            )
+            .map_err(|e| self.failed(e))?;
+        Ok(count.max(0) as usize)
+    }
+
+    /// Write one conversation's imported messages, all or none. The rows
+    /// the store does not hold yet join the conversation's imported block,
+    /// and the whole block is laid out again below the store's lowest key in
+    /// time order, so a second import that brings older messages still
+    /// shows them first and loquax's own rows keep their keys. Each row's
+    /// ledger says where it came from, and what the source said of its
+    /// signature, in the source's name ([`origin_name`]).
+    pub fn import_conversation(
+        &mut self,
+        peer: [u8; 16],
+        origin: &str,
+        rows: &[ImportRow],
+    ) -> Result<ImportCounts, StoreError> {
+        let identity = self.identity;
+        let path = self.path.clone();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        let counts = import_in(&tx, &identity, peer, origin, rows).map_err(|e| failed(&path, e))?;
+        tx.commit().map_err(|e| failed(&path, e))?;
+        Ok(counts)
+    }
+
+    /// Every message of our address, oldest first in each conversation, with
+    /// the signed bytes the store still holds for one: what `loquax export`
+    /// writes.
+    pub fn export_rows(&self) -> Result<Vec<ExportRow>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT m.conversation, m.id, m.direction, m.state, m.verification, \
+                 m.timestamp, m.received_at, m.title, m.content, m.fields, m.origin_verdict, \
+                 u.source, u.packed FROM messages m LEFT JOIN unverified u \
+                 ON u.identity = m.identity AND u.id = m.id AND m.direction = 0 \
+                 WHERE m.identity = ?1 ORDER BY m.conversation, m.seq",
+            )
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(params![&self.identity[..]], |row| {
+                let peer: Vec<u8> = row.get(0)?;
+                let id: Option<Vec<u8>> = row.get(1)?;
+                let source: Option<Vec<u8>> = row.get(11)?;
+                let packed: Option<Vec<u8>> = row.get(12)?;
+                Ok((
+                    peer,
+                    id,
+                    ImportRow {
+                        id: [0; 32],
+                        outbound: row.get::<_, i64>(2)? == 1,
+                        delivery: row.get::<_, Option<i64>>(3)?.and_then(state_of),
+                        signature: signature_of(row.get(4)?),
+                        timestamp: row.get(5)?,
+                        received_at: row.get(6)?,
+                        title: row.get::<_, Option<Vec<u8>>>(7)?.unwrap_or_default(),
+                        content: row.get(8)?,
+                        fields: row
+                            .get::<_, Option<Vec<u8>>>(9)?
+                            .and_then(|packed| unpack_fields(&packed))
+                            .unwrap_or_default(),
+                        origin_verdict: row.get(10)?,
+                        held: source
+                            .and_then(|s| <[u8; 16]>::try_from(s.as_slice()).ok())
+                            .zip(packed),
+                    },
+                ))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|e| self.failed(e))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for (peer, id, mut row) in rows {
+            // A message with no id never reached the router: nothing names
+            // it, and the export gives it the id of the bytes it writes.
+            row.id = id
+                .and_then(|id| <[u8; 32]>::try_from(id.as_slice()).ok())
+                .unwrap_or([0; 32]);
+            out.push(ExportRow {
+                peer: self.address(&peer)?,
+                row,
+            });
+        }
+        Ok(out)
+    }
+}
+
+/// An origin tag's name as the ledger says it.
+pub fn origin_name(tag: &str) -> &str {
+    match tag {
+        "nomadnet" => "NomadNet",
+        "loquax" => "Loquax",
+        "ratspeak" => "Ratspeak",
+        other => other,
+    }
+}
+
+/// Whether the app an origin tag names keeps no signed bytes, so an
+/// imported row of it can never be checked: Ratspeak (1150).
+pub fn origin_keeps_no_signature(tag: &str) -> bool {
+    tag == "ratspeak"
+}
+
+fn holds_in(
+    conn: &Connection,
+    identity: &[u8; 16],
+    id: &[u8; 32],
+    outbound: bool,
+) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT 1 FROM messages WHERE id = ?1 AND identity = ?2 AND direction = ?3 LIMIT 1",
+        params![&id[..], &identity[..], i64::from(outbound)],
+        |_| Ok(()),
+    )
+    .optional()
+    .map(|found| found.is_some())
+}
+
+/// [`Store::import_conversation`] inside `tx`.
+fn import_in(
+    tx: &rusqlite::Transaction<'_>,
+    identity: &[u8; 16],
+    peer: [u8; 16],
+    origin: &str,
+    rows: &[ImportRow],
+) -> rusqlite::Result<ImportCounts> {
+    let mut counts = ImportCounts::default();
+    let mut fresh = Vec::new();
+    for row in rows {
+        let duplicate = fresh
+            .iter()
+            .any(|f: &ImportRow| f.id == row.id && f.outbound == row.outbound);
+        if duplicate || holds_in(tx, identity, &row.id, row.outbound)? {
+            counts.held += 1;
+        } else {
+            fresh.push(row.clone());
+        }
+    }
+    counts.new = fresh.len();
+    if fresh.is_empty() {
+        return Ok(counts);
+    }
+    // The conversation's imported block as it stands, read whole, then
+    // deleted and written again with the new rows in time order. Deleting
+    // and inserting rather than renumbering keeps the text index, whose
+    // rowid is the seq, in step through its triggers.
+    let mut block = {
+        let mut statement = tx.prepare(
+            "SELECT id, direction, state, verification, timestamp, received_at, title, \
+             content, fields, origin_verdict, origin FROM messages \
+             WHERE identity = ?1 AND conversation = ?2 AND origin IS NOT NULL",
+        )?;
+        let rows = statement
+            .query_map(params![&identity[..], &peer[..]], |row| {
+                let id: Vec<u8> = row.get(0)?;
+                Ok((
+                    ImportRow {
+                        id: <[u8; 32]>::try_from(id.as_slice()).unwrap_or([0; 32]),
+                        outbound: row.get::<_, i64>(1)? == 1,
+                        delivery: row.get::<_, Option<i64>>(2)?.and_then(state_of),
+                        signature: signature_of(row.get(3)?),
+                        timestamp: row.get(4)?,
+                        received_at: row.get(5)?,
+                        title: row.get::<_, Option<Vec<u8>>>(6)?.unwrap_or_default(),
+                        content: row.get(7)?,
+                        fields: row
+                            .get::<_, Option<Vec<u8>>>(8)?
+                            .and_then(|packed| unpack_fields(&packed))
+                            .unwrap_or_default(),
+                        origin_verdict: row.get(9)?,
+                        held: None,
+                    },
+                    row.get::<_, String>(10)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    tx.execute(
+        "DELETE FROM messages WHERE identity = ?1 AND conversation = ?2 AND origin IS NOT NULL",
+        params![&identity[..], &peer[..]],
+    )?;
+    block.extend(fresh.into_iter().map(|row| (row, origin.to_string())));
+    // The source's time order: the sender's clock, else when the source
+    // wrote it down; the id breaks a tie, so a re-run lays it out the same.
+    let when = |row: &ImportRow| {
+        row.timestamp
+            .or(row.received_at.map(|secs| secs as f64))
+            .unwrap_or(0.0)
+    };
+    block.sort_by(|(a, _), (b, _)| when(a).total_cmp(&when(b)).then(a.id.cmp(&b.id)));
+    let lowest: i64 = tx.query_row("SELECT COALESCE(MIN(seq), 1) FROM messages", [], |row| {
+        row.get(0)
+    })?;
+    let top = lowest.min(1) - 1;
+    let first = top - (block.len() as i64 - 1);
+    tx.execute(
+        "INSERT INTO conversations(identity, peer) VALUES (?1, ?2) ON CONFLICT DO NOTHING",
+        params![&identity[..], &peer[..]],
+    )?;
+    for (offset, (row, origin)) in block.iter().enumerate() {
+        let seq = first + offset as i64;
+        tx.execute(
+            "INSERT INTO messages(seq, identity, conversation, id, direction, state, \
+             verification, timestamp, received_at, size, title, content, fields, origin, \
+             origin_verdict) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![
+                seq,
+                &identity[..],
+                &peer[..],
+                &row.id[..],
+                i64::from(row.outbound),
+                row.delivery.map(state_code),
+                signature_code(row.signature),
+                row.timestamp,
+                row.received_at,
+                row.content.len() as i64,
+                (!row.title.is_empty()).then_some(&row.title[..]),
+                row.content,
+                (!row.fields.is_empty()).then(|| pack_fields(&row.fields)),
+                origin,
+                row.origin_verdict,
+            ],
+        )?;
+        let name = origin_name(origin);
+        let mut lines = vec![format!("imported from {name}")];
+        if origin_keeps_no_signature(origin) {
+            lines.push(format!("imported, no signature: {name} keeps none"));
+        }
+        if let Some(verdict) = row.origin_verdict {
+            lines.push(match verdict {
+                true => format!("{name} said: signature verified"),
+                false => format!("{name} said: signature not verified"),
+            });
+        }
+        for (line, what) in lines.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO ledger(message, line, at, utc_offset, what) \
+                 VALUES (?1, ?2, ?3, NULL, ?4)",
+                params![seq, line as i64, row.received_at, what],
+            )?;
+        }
+        if let Some((source, packed)) = &row.held {
+            tx.execute(
+                "INSERT OR IGNORE INTO unverified(identity, id, source, packed) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![&identity[..], &row.id[..], &source[..], packed],
+            )?;
+        }
+    }
+    Ok(counts)
+}
+
+/// One archive append inside `tx`, with the cap's eviction: see
+/// [`Store::archive_append`].
+fn append_in(
+    tx: &rusqlite::Transaction<'_>,
+    identity: &[u8; 16],
+    kind: u8,
+    id: &[u8; 32],
+    packed: &[u8],
+    at: i64,
+    cap_bytes: u64,
+) -> rusqlite::Result<Option<u64>> {
+    let added = tx.execute(
+        "INSERT OR IGNORE INTO archive(identity, kind, id, at, packed) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![&identity[..], i64::from(kind), &id[..], at, packed],
+    )?;
+    if added == 0 {
+        return Ok(None);
+    }
+    let seq = tx.last_insert_rowid();
+    let mut total: i64 = tx.query_row(
+        "SELECT COALESCE(SUM(LENGTH(packed)), 0) FROM archive WHERE identity = ?1",
+        params![&identity[..]],
+        |row| row.get(0),
+    )?;
+    let cap = i64::try_from(cap_bytes).unwrap_or(i64::MAX);
+    while total > cap {
+        let oldest: Option<(i64, i64)> = tx
+            .query_row(
+                "SELECT seq, LENGTH(packed) FROM archive WHERE identity = ?1 AND seq < ?2 \
+                 ORDER BY seq LIMIT 1",
+                params![&identity[..], seq],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((victim, size)) = oldest else {
+            break;
+        };
+        tx.execute("DELETE FROM archive WHERE seq = ?1", params![victim])?;
+        total -= size;
+    }
+    Ok(Some(seq as u64))
+}
+
+fn failed(path: &Path, error: impl fmt::Display) -> StoreError {
+    let detail = error.to_string();
+    // SQLite's words for a file that is not whole, wherever they surface.
+    let damaged = ["malformed", "not a database", "corrupt"];
+    match damaged.iter().any(|word| detail.contains(word)) {
+        true => StoreError::Corrupt {
+            path: path.to_path_buf(),
+            detail,
+        },
+        false => StoreError::Failed {
+            path: path.to_path_buf(),
+            detail,
+        },
+    }
+}
+
+fn apply(
+    tx: &rusqlite::Transaction<'_>,
+    identity: &[u8; 16],
+    write: &StoreWrite,
+) -> rusqlite::Result<()> {
+    match write {
+        StoreWrite::Message { peer, message } => {
+            let key = seq_of(message.activity);
+            // One row per received message: a second copy under another key
+            // is the same message, arrived again, and changes nothing.
+            if let (false, Some(id)) = (message.outbound, &message.id) {
+                if received_key(tx, identity, id, Some(key))?.is_some() {
+                    return Ok(());
+                }
+            }
+            tx.execute(
+                "INSERT INTO conversations(identity, peer) VALUES (?1, ?2) \
+                 ON CONFLICT DO NOTHING",
+                params![&identity[..], &peer[..]],
+            )?;
+            let (secs, offset) = split(message.at);
+            tx.execute(
+                "INSERT INTO messages(seq, identity, conversation, id, direction, state, \
+                 unproven, verification, last_leg, received_at, utc_offset, size, content, \
+                 fields) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+                 ON CONFLICT(seq) DO UPDATE SET id = excluded.id, state = excluded.state, \
+                 unproven = excluded.unproven, verification = excluded.verification, \
+                 last_leg = excluded.last_leg",
+                params![
+                    key,
+                    &identity[..],
+                    &peer[..],
+                    message.id.as_ref().map(|id| &id[..]),
+                    i64::from(message.outbound),
+                    message.delivery.map(state_code),
+                    message.unproven,
+                    signature_code(message.signature),
+                    message.last_leg.map(leg_code),
+                    secs,
+                    offset,
+                    message.size as i64,
+                    message.body,
+                    (!message.fields.is_empty()).then(|| pack_fields(&message.fields)),
+                ],
+            )?;
+            // The ledger only grows: the lines past what the store has.
+            let have: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM ledger WHERE message = ?1",
+                params![key],
+                |row| row.get(0),
+            )?;
+            for (line, entry) in message.ledger.iter().enumerate().skip(have as usize) {
+                let (at, offset) = split(entry.at);
+                tx.execute(
+                    "INSERT INTO ledger(message, line, at, utc_offset, what) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![key, line as i64, at, offset, entry.what],
+                )?;
+            }
+        }
+        StoreWrite::Conversation {
+            peer,
+            pinned,
+            unread,
+        } => {
+            tx.execute(
+                "INSERT INTO conversations(identity, peer, pinned, unread) \
+                 VALUES (?1, ?2, ?3, ?4) ON CONFLICT(identity, peer) DO UPDATE SET \
+                 pinned = excluded.pinned, unread = excluded.unread",
+                params![&identity[..], &peer[..], pinned, *unread as i64],
+            )?;
+        }
+        StoreWrite::ForgetMessage { key } => {
+            tx.execute(
+                "DELETE FROM messages WHERE seq = ?1 AND identity = ?2",
+                params![seq_of(*key), &identity[..]],
+            )?;
+        }
+        StoreWrite::ForgetId { id } => {
+            tx.execute(
+                "DELETE FROM messages WHERE identity = ?1 AND id = ?2",
+                params![&identity[..], &id[..]],
+            )?;
+        }
+        StoreWrite::ForgetConversation { peer } => {
+            tx.execute(
+                "DELETE FROM messages WHERE identity = ?1 AND conversation = ?2",
+                params![&identity[..], &peer[..]],
+            )?;
+            tx.execute(
+                "DELETE FROM conversations WHERE identity = ?1 AND peer = ?2",
+                params![&identity[..], &peer[..]],
+            )?;
+            tx.execute(
+                "DELETE FROM positions WHERE identity = ?1 AND peer = ?2",
+                params![&identity[..], &peer[..]],
+            )?;
+        }
+        StoreWrite::Position(fix) => {
+            let l = &fix.location;
+            tx.execute(
+                "INSERT OR IGNORE INTO positions(identity, peer, via, message, fix_time, \
+                 received_at, lat_e6, lon_e6, alt_e2, speed_e2, bearing_e2, accuracy_e2, \
+                 telemetry) \
+                 VALUES (?1, ?2, ?3, \
+                 (SELECT seq FROM messages WHERE seq = ?4 AND identity = ?1), \
+                 ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    &identity[..],
+                    &fix.peer[..],
+                    &fix.via[..],
+                    fix.message.map(seq_of),
+                    l.last_update,
+                    fix.received_at,
+                    l.latitude_e6,
+                    l.longitude_e6,
+                    l.altitude_e2,
+                    i64::from(l.speed_e2),
+                    l.bearing_e2,
+                    i64::from(l.accuracy_e2),
+                    fix.telemetry,
+                ],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// The key of the received message with this id, other than `except`.
+fn received_key(
+    conn: &Connection,
+    identity: &[u8; 16],
+    id: &[u8; 32],
+    except: Option<i64>,
+) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT seq FROM messages WHERE id = ?1 AND identity = ?2 AND direction = 0 \
+         AND seq IS NOT ?3 LIMIT 1",
+        params![&id[..], &identity[..], except],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+fn row_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
+    let id: Option<Vec<u8>> = row.get(1)?;
+    let direction: i64 = row.get(2)?;
+    let state: Option<i64> = row.get(3)?;
+    let leg: Option<i64> = row.get(6)?;
+    Ok(Message {
+        outbound: direction == 1,
+        body: row.get(10)?,
+        id: id.and_then(|id| <[u8; 32]>::try_from(id.as_slice()).ok()),
+        delivery: state.and_then(state_of),
+        signature: signature_of(row.get(5)?),
+        leg: None,
+        unproven: row.get(4)?,
+        at: wall_time(row.get(7)?, row.get(8)?),
+        size: row.get::<_, i64>(9)?.max(0) as usize,
+        ledger: Vec::new(),
+        last_leg: leg.and_then(leg_of),
+        activity: key_of(row.get(0)?),
+        // Bytes that are not a fields map were not written by us: kept out
+        // of the screen rather than misread.
+        fields: row
+            .get::<_, Option<Vec<u8>>>(11)?
+            .and_then(|packed| unpack_fields(&packed))
+            .unwrap_or_default(),
+    })
+}
+
+/// `messages.verification`: 1 verified, as the boolean of schemas 1 and 2
+/// wrote it, 0 unverified, 2 invalid.
+fn signature_code(signature: Signature) -> i64 {
+    match signature {
+        Signature::Unverified => 0,
+        Signature::Verified => 1,
+        Signature::Invalid => 2,
+    }
+}
+
+fn signature_of(code: i64) -> Signature {
+    match code {
+        0 => Signature::Unverified,
+        1 => Signature::Verified,
+        _ => Signature::Invalid,
+    }
+}
+
+fn split(at: Option<WallTime>) -> (Option<i64>, Option<i64>) {
+    match at {
+        Some(at) => (Some(at.unix_secs), Some(i64::from(at.offset_secs))),
+        None => (None, None),
+    }
+}
+
+fn wall_time(secs: Option<i64>, offset: Option<i64>) -> Option<WallTime> {
+    Some(WallTime {
+        unix_secs: secs?,
+        offset_secs: i32::try_from(offset.unwrap_or(0)).unwrap_or(0),
+    })
+}
+
+/// The store's number for a delivery state. Stable: these are on disk.
+pub(crate) fn state_code(state: DeliveryState) -> i64 {
+    match state {
+        DeliveryState::Queued => 0,
+        DeliveryState::Stamping => 1,
+        DeliveryState::InFlight => 2,
+        DeliveryState::Sent => 3,
+        DeliveryState::InMailbox => 4,
+        DeliveryState::Delivered => 5,
+        DeliveryState::Rejected => 6,
+        DeliveryState::Failed => 7,
+    }
+}
+
+pub(crate) fn state_of(code: i64) -> Option<DeliveryState> {
+    Some(match code {
+        0 => DeliveryState::Queued,
+        1 => DeliveryState::Stamping,
+        2 => DeliveryState::InFlight,
+        3 => DeliveryState::Sent,
+        4 => DeliveryState::InMailbox,
+        5 => DeliveryState::Delivered,
+        6 => DeliveryState::Rejected,
+        7 => DeliveryState::Failed,
+        _ => return None,
+    })
+}
+
+fn leg_code(leg: Leg) -> i64 {
+    match leg {
+        Leg::Direct => 0,
+        Leg::Propagated => 1,
+    }
+}
+
+fn leg_of(code: i64) -> Option<Leg> {
+    match code {
+        0 => Some(Leg::Direct),
+        1 => Some(Leg::Propagated),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const US: [u8; 16] = [0x01; 16];
+    const ALICE: [u8; 16] = [0xa1; 16];
+    const BOB: [u8; 16] = [0xb0; 16];
+
+    fn at(secs: i64) -> Option<WallTime> {
+        Some(WallTime {
+            unix_secs: secs,
+            offset_secs: 3600,
+        })
+    }
+
+    /// A message id of its own for every key.
+    fn id_of(key: u64) -> [u8; 32] {
+        let mut id = [0; 32];
+        id[..8].copy_from_slice(&key.to_be_bytes());
+        id
+    }
+
+    fn message(key: u64, outbound: bool, body: &str) -> Message {
+        Message {
+            outbound,
+            body: body.to_string(),
+            id: Some(id_of(key)),
+            delivery: outbound.then_some(DeliveryState::Delivered),
+            signature: Signature::Verified,
+            leg: None,
+            unproven: false,
+            at: at(1_000 + key as i64),
+            size: body.len(),
+            ledger: vec![LedgerEntry {
+                at: at(1_000 + key as i64),
+                what: "queued".to_string(),
+            }],
+            last_leg: outbound.then_some(Leg::Direct),
+            // The row at seq `key`, so the raw reads below can name it.
+            activity: key_of(key as i64),
+            fields: Vec::new(),
+        }
+    }
+
+    fn put(store: &mut Store, peer: [u8; 16], message: Message) {
+        store
+            .write(&[StoreWrite::Message { peer, message }])
+            .expect("write");
+    }
+
+    #[test]
+    fn a_missing_file_starts_a_fresh_store() {
+        let home = tempfile::tempdir().expect("home");
+        let store = Store::open_in(home.path(), US).expect("a fresh store");
+        assert!(store.restore().expect("restore").is_empty());
+        assert_eq!(store.last_key().expect("last key"), KEY_OF_SEQ_ZERO);
+        assert!(home.path().join(STORE_FILE).exists());
+    }
+
+    #[test]
+    fn messages_their_ledger_and_the_pin_survive_a_reopen() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let mut sent = message(1, true, "are you at the field site?");
+        put(&mut store, ALICE, sent.clone());
+        put(&mut store, ALICE, message(2, false, "yes, from ten"));
+        sent.ledger.push(LedgerEntry {
+            at: at(1_010),
+            what: "delivered (direct)".to_string(),
+        });
+        put(&mut store, ALICE, sent.clone());
+        store
+            .write(&[StoreWrite::Conversation {
+                peer: ALICE,
+                pinned: true,
+                unread: 1,
+            }])
+            .expect("pin");
+        drop(store);
+
+        let store = Store::open_in(home.path(), US).expect("reopen");
+        let restored = store.restore().expect("restore");
+        assert_eq!(restored.len(), 1);
+        let alice = &restored[0];
+        assert_eq!(alice.peer, ALICE);
+        assert!(alice.pinned);
+        assert_eq!(alice.unread, 1);
+        assert_eq!(alice.earlier, 0);
+        assert_eq!(
+            alice.messages,
+            vec![sent, message(2, false, "yes, from ten")]
+        );
+        assert_eq!(store.last_key().expect("last key"), key_of(2));
+    }
+
+    #[test]
+    fn rows_are_scoped_to_our_address() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        put(&mut store, ALICE, message(1, false, "for us"));
+        drop(store);
+        let other = Store::open_in(home.path(), [0x02; 16]).expect("open as another");
+        assert!(other.restore().expect("restore").is_empty());
+    }
+
+    #[test]
+    fn the_newest_window_loads_and_earlier_pages_follow() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let total = LOAD_WINDOW as u64 * 2 + 5;
+        let writes: Vec<StoreWrite> = (1..=total)
+            .map(|key| StoreWrite::Message {
+                peer: BOB,
+                message: message(key, key % 2 == 0, &format!("line {key}")),
+            })
+            .collect();
+        store.write(&writes).expect("write");
+        let restored = store.restore().expect("restore");
+        let bob = &restored[0];
+        assert_eq!(bob.messages.len(), LOAD_WINDOW);
+        assert_eq!(bob.earlier, total as usize - LOAD_WINDOW);
+        assert_eq!(
+            bob.messages[0].activity,
+            key_of((total - LOAD_WINDOW as u64 + 1) as i64)
+        );
+        assert_eq!(
+            bob.messages.last().map(|m| m.activity),
+            Some(key_of(total as i64))
+        );
+
+        let first = bob.messages[0].activity;
+        let (page, earlier) = store.earlier(BOB, first, None).expect("earlier");
+        assert_eq!(page.len(), LOAD_WINDOW);
+        assert_eq!(earlier, 5);
+        let (rest, earlier) = store
+            .earlier(BOB, page[0].activity, None)
+            .expect("the rest");
+        assert_eq!(rest.len(), 5);
+        assert_eq!(earlier, 0);
+        assert_eq!(rest[0].activity, key_of(1));
+
+        // Down to a key further back than one page.
+        let (through, earlier) = store.earlier(BOB, first, Some(key_of(3))).expect("through");
+        assert_eq!(through[0].activity, key_of(3));
+        assert_eq!(earlier, 2);
+    }
+
+    #[test]
+    fn a_received_message_is_one_row_however_often_it_arrives() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let direct = message(1, false, "the direct copy");
+        let id = direct.id.expect("an id");
+        assert!(!store.holds_received(&id).expect("ask"));
+        put(&mut store, ALICE, direct.clone());
+        assert!(store.holds_received(&id).expect("ask"));
+        // Its own key again is an update, not a second copy.
+        put(&mut store, ALICE, direct.clone());
+        // The mailbox copy under a later key changes nothing.
+        put(
+            &mut store,
+            ALICE,
+            Message {
+                activity: key_of(2),
+                ..direct.clone()
+            },
+        );
+        let restored = store.restore().expect("restore");
+        assert_eq!(restored[0].messages, vec![direct]);
+        assert_eq!(store.last_key().expect("last key"), key_of(1));
+        // A sent message with the same id is not a received one.
+        put(&mut store, BOB, message(3, true, "sent"));
+        assert!(!store.holds_received(&id_of(3)).expect("ask"));
+        // Nor is a row under another of our addresses.
+        let other = Store::open_in(home.path(), [0x02; 16]).expect("as another");
+        assert!(!other.holds_received(&id).expect("ask"));
+    }
+
+    #[test]
+    fn the_search_finds_only_what_lies_below_the_loaded_window() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        put(&mut store, ALICE, message(1, false, "bring the Tripod"));
+        put(&mut store, ALICE, message(2, true, "the tripod fits"));
+        put(&mut store, BOB, message(3, false, "tripod in the van"));
+        put(&mut store, ALICE, message(4, false, "no match here"));
+        // Alice's screen loaded from key 2 on; Bob's holds all of his.
+        let loaded: BTreeMap<[u8; 16], u64> = [(ALICE, key_of(2))].into_iter().collect();
+        let hits = store.search("TRIPOD", &loaded).expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].key, key_of(1));
+        assert_eq!(hits[0].peer, ALICE);
+        assert_eq!(hits[0].body, "bring the Tripod");
+        // Two characters go past the trigram index, with the same answer.
+        let short = store.search("tR", &loaded).expect("short search");
+        assert_eq!(
+            short.iter().map(|h| h.key).collect::<Vec<_>>(),
+            vec![key_of(1)]
+        );
+        // LIKE's own characters are text.
+        assert!(store.search("%", &loaded).expect("percent").is_empty());
+        // A quote does not break the query.
+        assert!(store.search("\"tri", &loaded).expect("quote").is_empty());
+        // Nothing is below the window when every conversation is whole.
+        assert!(store
+            .search("tripod", &BTreeMap::new())
+            .expect("whole")
+            .is_empty());
+    }
+
+    #[test]
+    fn deletes_remove_the_text_from_the_index_too() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        put(&mut store, ALICE, message(1, false, "secret tripod"));
+        put(&mut store, ALICE, message(2, false, "kept tripod"));
+        put(&mut store, BOB, message(3, false, "bob's tripod"));
+        store
+            .write(&[StoreWrite::ForgetMessage { key: key_of(1) }])
+            .expect("forget");
+        let all: BTreeMap<[u8; 16], u64> =
+            [(ALICE, u64::MAX), (BOB, u64::MAX)].into_iter().collect();
+        let keys = |store: &Store| -> Vec<u64> {
+            store
+                .search("tripod", &all)
+                .expect("search")
+                .iter()
+                .map(|h| h.key)
+                .collect()
+        };
+        assert_eq!(keys(&store), vec![key_of(3), key_of(2)]);
+        store
+            .write(&[StoreWrite::ForgetConversation { peer: BOB }])
+            .expect("forget bob");
+        assert_eq!(keys(&store), vec![key_of(2)]);
+        let restored = store.restore().expect("restore");
+        assert_eq!(restored.len(), 1);
+        let ledger_rows: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM ledger", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(ledger_rows, 1, "the ledger goes with its message");
+    }
+
+    #[test]
+    fn names_are_kept_and_replaced() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        store.save_name(ALICE, "Alice").expect("save");
+        store.save_name(ALICE, "Ally").expect("replace");
+        store.save_name(BOB, "Bob").expect("save");
+        drop(store);
+        let store = Store::open_in(home.path(), US).expect("reopen");
+        let mut names = store.names().expect("names");
+        names.sort();
+        assert_eq!(
+            names,
+            vec![(ALICE, "Ally".to_string()), (BOB, "Bob".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_heard_name_is_archived_once_until_it_changes() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        store
+            .archive_name(BOB, "Bob", 5, u64::MAX)
+            .expect("append")
+            .expect("Bob's name is news");
+        let first = store
+            .archive_name(ALICE, "Alice", 10, u64::MAX)
+            .expect("append");
+        assert!(first.is_some(), "a first name is news");
+        assert_eq!(
+            store
+                .archive_name(ALICE, " Alice ", 20, u64::MAX)
+                .expect("ask"),
+            None,
+            "the same name, as the clients will read it, appends nothing"
+        );
+        let blank = store
+            .archive_name(ALICE, "\u{200b}", 25, u64::MAX)
+            .expect("ask");
+        assert_eq!(blank, None, "a name that sanitises to nothing says nothing");
+        let renamed = store
+            .archive_name(ALICE, "Ally", 30, u64::MAX)
+            .expect("append");
+        assert!(renamed > first, "a new name is a new entry");
+        let back = store
+            .archive_name(ALICE, "Alice", 40, u64::MAX)
+            .expect("append");
+        assert!(back > renamed, "and the old name again is one too");
+        let page = store.archive_since(0, usize::MAX).expect("page");
+        let names: Vec<_> = page
+            .entries
+            .iter()
+            .map(|entry| {
+                assert_eq!(entry.kind, crate::home::KIND_NAME);
+                crate::home::wire::read_name_entry(&entry.packed).expect("a name entry")
+            })
+            .collect();
+        // 1136: only the newest name entry of a peer is kept, and another
+        // peer's stays.
+        assert_eq!(
+            names,
+            [(BOB, "Bob".to_string()), (ALICE, "Alice".to_string())]
+        );
+        assert_eq!(
+            page.entries[1].at, 40,
+            "the entry's time is when it was heard"
+        );
+        assert_eq!(
+            store.names().expect("names"),
+            [(ALICE, "Alice".to_string()), (BOB, "Bob".to_string())]
+        );
+    }
+
+    /// A store with some history in it, closed, and its length.
+    fn written(home: &Path) -> u64 {
+        let mut store = Store::open_in(home, US).expect("open");
+        let writes: Vec<StoreWrite> = (1..=300)
+            .map(|key| StoreWrite::Message {
+                peer: ALICE,
+                message: message(key, false, &"a long enough body ".repeat(8)),
+            })
+            .collect();
+        store.write(&writes).expect("write");
+        drop(store);
+        std::fs::metadata(home.join(STORE_FILE))
+            .expect("metadata")
+            .len()
+    }
+
+    fn refused(home: &Path) -> String {
+        match Store::open_in(home, US) {
+            Err(error @ StoreError::Corrupt { .. }) => {
+                let text = error.to_string();
+                assert!(
+                    text.contains(&home.join(STORE_FILE).display().to_string()),
+                    "the refusal names the file: {text}"
+                );
+                text
+            }
+            Err(other) => panic!("refused, but not as damaged: {other}"),
+            Ok(_) => panic!("a damaged store was opened"),
+        }
+    }
+
+    /// The positive control first: the same file, whole, opens and holds
+    /// its history; cut in half it is refused, never opened as empty.
+    #[test]
+    fn a_truncated_store_is_refused_and_left_as_it_is() {
+        let home = tempfile::tempdir().expect("home");
+        let length = written(home.path());
+        let whole = Store::open_in(home.path(), US).expect("the whole file opens");
+        assert_eq!(whole.restore().expect("restore")[0].earlier, 100);
+        drop(whole);
+
+        let path = home.path().join(STORE_FILE);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open for truncation");
+        // The last page only, which nothing reads at open: SQLite compares
+        // the file with its header's page count.
+        file.set_len(length - 4096).expect("truncate a page");
+        let text = refused(home.path());
+        assert!(text.contains("malformed"), "{text}");
+        // Half of it: SQLite finds the schema's pages gone.
+        file.set_len(length / 2).expect("truncate to half");
+        drop(file);
+        refused(home.path());
+        // Refusing wrote nothing over it.
+        assert_eq!(
+            std::fs::metadata(&path).expect("still there").len(),
+            length / 2
+        );
+    }
+
+    #[test]
+    fn an_empty_or_foreign_file_is_refused() {
+        let home = tempfile::tempdir().expect("home");
+        let path = home.path().join(STORE_FILE);
+        std::fs::write(&path, b"").expect("empty file");
+        refused(home.path());
+        std::fs::write(
+            &path,
+            b"this is a text file, not a database at all, honestly".repeat(100),
+        )
+        .expect("text file");
+        refused(home.path());
+        // Another program's SQLite file.
+        std::fs::remove_file(&path).expect("remove");
+        let foreign = Connection::open(&path).expect("foreign");
+        foreign
+            .execute_batch("CREATE TABLE notes(text TEXT); INSERT INTO notes VALUES ('x');")
+            .expect("foreign schema");
+        drop(foreign);
+        let text = refused(home.path());
+        assert!(text.contains("not a Loquax store"), "{text}");
+    }
+
+    #[test]
+    fn a_store_from_a_later_loquax_is_refused() {
+        let home = tempfile::tempdir().expect("home");
+        written(home.path());
+        let conn = Connection::open(home.path().join(STORE_FILE)).expect("open");
+        conn.execute_batch(&format!("PRAGMA user_version = {}", SCHEMA_VERSION + 1))
+            .expect("bump");
+        drop(conn);
+        assert!(matches!(
+            Store::open_in(home.path(), US),
+            Err(StoreError::Newer { .. })
+        ));
+    }
+
+    /// A write is all or none: one that fails half way leaves the store as
+    /// it was before it.
+    #[test]
+    fn a_failed_write_leaves_nothing_half_written() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        put(&mut store, ALICE, message(1, false, "before"));
+        // The second write's ledger line collides with one already there,
+        // so the transaction fails after its first message went in.
+        store
+            .conn
+            .execute(
+                "INSERT INTO ledger(message, line, what) VALUES (1, 5, 'planted')",
+                [],
+            )
+            .expect("plant");
+        let mut bad = message(1, false, "before");
+        bad.ledger = (0..6)
+            .map(|i| LedgerEntry {
+                at: None,
+                what: format!("line {i}"),
+            })
+            .collect();
+        let result = store.write(&[
+            StoreWrite::Message {
+                peer: BOB,
+                message: message(2, false, "half"),
+            },
+            StoreWrite::Message {
+                peer: ALICE,
+                message: bad,
+            },
+        ]);
+        assert!(result.is_err(), "the collision fails the write");
+        let restored = store.restore().expect("restore");
+        assert!(
+            restored.iter().all(|c| c.peer != BOB),
+            "the first half of the failed write is not in the store"
+        );
+    }
+
+    // Telemetry (loquax-map.md, slice (a), "Stored where").
+
+    fn fix(peer: [u8; 16], via: [u8; 16], message: Option<u64>, fix_time: i64) -> Fix {
+        Fix {
+            peer,
+            via,
+            message,
+            received_at: Some(fix_time + 30),
+            location: Location {
+                latitude_e6: 43_773_100,
+                longitude_e6: 11_256_000,
+                altitude_e2: -150,
+                speed_e2: 4_000_000_000,
+                bearing_e2: 27_000,
+                accuracy_e2: 65_535,
+                last_update: fix_time,
+            },
+            telemetry: vec![0x81, 0x01, 0x05],
+        }
+    }
+
+    #[test]
+    fn fields_are_kept_raw_and_come_back_with_their_message() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let mut report = message(1, false, "");
+        report.fields = vec![(0x02, vec![0xc4, 0x01, 0x80]), (0x10, vec![0xc0])];
+        put(&mut store, BOB, report.clone());
+        drop(store);
+        let store = Store::open_in(home.path(), US).expect("reopen");
+        assert_eq!(store.restore().expect("restore")[0].messages, vec![report]);
+        let raw: Vec<u8> = store
+            .conn
+            .query_row("SELECT fields FROM messages WHERE seq = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("the column");
+        assert_eq!(raw, vec![0x82, 0x02, 0xc4, 0x01, 0x80, 0x10, 0xc0]);
+    }
+
+    #[test]
+    fn a_fix_arriving_twice_is_one_row_and_the_latest_comes_back() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        put(&mut store, BOB, message(1, false, ""));
+        put(&mut store, ALICE, message(2, false, ""));
+        let direct = fix(BOB, BOB, Some(key_of(1)), 5_000);
+        let relayed = fix(BOB, ALICE, Some(key_of(2)), 5_000);
+        let older = fix(BOB, BOB, None, 4_000);
+        store
+            .write(&[
+                StoreWrite::Position(direct.clone()),
+                StoreWrite::Position(relayed),
+                StoreWrite::Position(older),
+            ])
+            .expect("write");
+        assert_eq!(
+            store.track_len(BOB).expect("track"),
+            2,
+            "the repeat is one row"
+        );
+        drop(store);
+        let store = Store::open_in(home.path(), US).expect("reopen");
+        assert_eq!(
+            store.positions().expect("positions"),
+            vec![direct],
+            "integers as they were"
+        );
+        // Scoped to our address like every table.
+        let other = Store::open_in(home.path(), [0x02; 16]).expect("as another");
+        assert!(other.positions().expect("positions").is_empty());
+    }
+
+    #[test]
+    fn deleting_a_message_keeps_its_position_and_a_conversation_takes_them() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        put(&mut store, BOB, message(1, false, ""));
+        store
+            .write(&[StoreWrite::Position(fix(BOB, BOB, Some(1), 5_000))])
+            .expect("write");
+        store
+            .write(&[StoreWrite::ForgetMessage { key: 1 }])
+            .expect("forget the message");
+        let left = store.positions().expect("positions");
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].message, None, "the reference is cleared");
+        store
+            .write(&[StoreWrite::ForgetConversation { peer: BOB }])
+            .expect("forget bob");
+        assert!(store.positions().expect("positions").is_empty());
+    }
+
+    /// The schema 1 store of slice 6, as that loquax wrote it.
+    fn v1_store(home: &Path) {
+        let conn = Connection::open(home.join(STORE_FILE)).expect("create");
+        conn.execute_batch(&format!("BEGIN; {SCHEMA} PRAGMA user_version = 1; COMMIT;"))
+            .expect("schema 1");
+        conn.execute_batch(
+            "INSERT INTO conversations(identity, peer) VALUES (X'01010101010101010101010101010101', \
+             X'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1'); \
+             INSERT INTO messages(seq, identity, conversation, direction, verification, \
+             received_at, utc_offset, size, content) VALUES (7, \
+             X'01010101010101010101010101010101', X'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1', 0, 1, \
+             1000, 3600, 5, 'older');",
+        )
+        .expect("a message");
+    }
+
+    #[test]
+    fn a_schema_1_store_migrates_in_place_and_keeps_its_history() {
+        let home = tempfile::tempdir().expect("home");
+        v1_store(home.path());
+        let mut store = Store::open_in(home.path(), US).expect("schema 1 opens");
+        assert_eq!(
+            store
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
+                .expect("version"),
+            SCHEMA_VERSION
+        );
+        let restored = store.restore().expect("restore");
+        assert_eq!(restored[0].messages[0].body, "older");
+        assert!(restored[0].messages[0].fields.is_empty());
+        put(&mut store, ALICE, message(8, false, ""));
+        store
+            .write(&[StoreWrite::Position(fix(ALICE, ALICE, Some(8), 9_000))])
+            .expect("a position in the migrated store");
+        drop(store);
+        // Opened again it is a current store, not migrated twice.
+        let store = Store::open_in(home.path(), US).expect("reopen");
+        assert_eq!(store.positions().expect("positions").len(), 1);
+    }
+
+    /// A store this loquax wrote, opened by the loquax before it: the check
+    /// of that program, which knew schema 1 only, refuses it as newer. Run
+    /// here as the same comparison against version 1.
+    #[test]
+    fn a_schema_2_store_is_newer_than_a_schema_1_reader() {
+        let home = tempfile::tempdir().expect("home");
+        drop(Store::open_in(home.path(), US).expect("fresh"));
+        let conn = Connection::open(home.path().join(STORE_FILE)).expect("open");
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, SCHEMA_VERSION);
+        assert!(
+            version > 1,
+            "store.rs's check refuses `version > SCHEMA_VERSION`"
+        );
+    }
+
+    #[test]
+    fn a_schema_2_store_without_its_positions_is_refused() {
+        let home = tempfile::tempdir().expect("home");
+        drop(Store::open_in(home.path(), US).expect("fresh"));
+        let conn = Connection::open(home.path().join(STORE_FILE)).expect("open");
+        conn.execute_batch("DROP TABLE positions").expect("drop");
+        drop(conn);
+        let text = refused(home.path());
+        assert!(text.contains("table positions is missing"), "{text}");
+    }
+
+    /// A schema 4 store, as the home node of slice 1 wrote it, migrates to
+    /// the current schema in place: its archive, devices and tokens stay, and
+    /// the outbox starts empty.
+    #[test]
+    fn a_schema_4_store_migrates_with_an_empty_outbox() {
+        let home = tempfile::tempdir().expect("home");
+        let conn = Connection::open(home.path().join(STORE_FILE)).expect("create");
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} PRAGMA user_version = 4; COMMIT;"
+        ))
+        .expect("schema 4");
+        drop(conn);
+        {
+            // Written the way slice 1 wrote them: no outbox table exists yet.
+            let conn = Connection::open(home.path().join(STORE_FILE)).expect("reopen");
+            conn.execute(
+                "INSERT INTO archive(identity, kind, id, at, packed) VALUES (?1, 0, ?2, 1, ?3)",
+                params![&US[..], &[7u8; 32][..], &b"old"[..]],
+            )
+            .expect("archive row");
+            conn.execute(
+                "INSERT INTO home_tokens(identity, token, name, created_at) VALUES (?1, ?2, 'x', 5)",
+                params![&US[..], &[8u8; 16][..]],
+            )
+            .expect("token row");
+        }
+        let mut store = Store::open_in(home.path(), US).expect("schema 4 opens");
+        assert_eq!(
+            store
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
+                .expect("version"),
+            SCHEMA_VERSION
+        );
+        assert_eq!(
+            store
+                .archive_since(0, usize::MAX)
+                .expect("page")
+                .entries
+                .len(),
+            1
+        );
+        assert_eq!(store.open_tokens(6, 100).expect("tokens").len(), 1);
+        assert_eq!(store.outbox_open().expect("outbox"), []);
+    }
+
+    /// A schema 5 store, as the home node of slice 2 wrote it before the
+    /// import existed, migrates to the current schema in place: an outbox
+    /// row still retried stays, and its messages read as our own, with no
+    /// origin.
+    #[test]
+    fn a_schema_5_store_migrates_keeping_its_outbox() {
+        let home = tempfile::tempdir().expect("home");
+        let conn = Connection::open(home.path().join(STORE_FILE)).expect("create");
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
+             PRAGMA user_version = 5; COMMIT;"
+        ))
+        .expect("schema 5");
+        conn.execute(
+            "INSERT INTO home_outbox(identity, client_id, id, destination, packed, \
+             created_at, state, propagated) VALUES (?1, ?2, ?3, ?4, ?5, 9, 0, 1)",
+            params![
+                &US[..],
+                &[1u8; 32][..],
+                &[2u8; 32][..],
+                &ALICE[..],
+                &b"packed"[..]
+            ],
+        )
+        .expect("outbox row");
+        drop(conn);
+        let store = Store::open_in(home.path(), US).expect("schema 5 opens");
+        assert_eq!(
+            store
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
+                .expect("version"),
+            SCHEMA_VERSION
+        );
+        assert_eq!(
+            store.outbox_open().expect("outbox"),
+            [Outgoing {
+                id: [2u8; 32],
+                destination: ALICE,
+                packed: b"packed".to_vec(),
+                created_at: 9,
+                propagated: true,
+            }]
+        );
+        let origins: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE origin IS NOT NULL \
+                 OR origin_verdict IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .expect("origin columns exist");
+        assert_eq!(origins, 0);
+    }
+
+    /// A schema 3 store, as the loquax before the home node wrote it,
+    /// migrates to the current schema in place: its messages stay, and the
+    /// archive starts empty.
+    #[test]
+    fn a_schema_3_store_migrates_with_an_empty_archive() {
+        let home = tempfile::tempdir().expect("home");
+        let conn = Connection::open(home.path().join(STORE_FILE)).expect("create");
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} PRAGMA user_version = 3; COMMIT;"
+        ))
+        .expect("schema 3");
+        drop(conn);
+        let mut store = Store::open_in(home.path(), US).expect("schema 3 opens");
+        put(&mut store, ALICE, message(1, false, "kept"));
+        drop(store);
+        let mut store = Store::open_in(home.path(), US).expect("reopen");
+        assert_eq!(
+            store
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
+                .expect("version"),
+            SCHEMA_VERSION
+        );
+        assert_eq!(store.restore().expect("restore")[0].messages.len(), 1);
+        assert_eq!(
+            store.archive_since(0, usize::MAX).expect("page").entries,
+            []
+        );
+        assert_eq!(
+            store
+                .archive_append(0, &[1; 32], b"m", 1, u64::MAX)
+                .expect("append"),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn a_schema_4_store_without_its_archive_is_refused() {
+        let home = tempfile::tempdir().expect("home");
+        drop(Store::open_in(home.path(), US).expect("fresh"));
+        let conn = Connection::open(home.path().join(STORE_FILE)).expect("open");
+        conn.execute_batch("DROP TABLE archive").expect("drop");
+        drop(conn);
+        let text = refused(home.path());
+        assert!(text.contains("table archive is missing"), "{text}");
+    }
+
+    /// A schema 2 store, as the loquax before leviculum 1079 wrote it,
+    /// migrates in place to this program's schema: its unverified message
+    /// keeps its row and has no bytes to be checked with.
+    #[test]
+    fn a_schema_2_store_migrates_and_its_old_unverified_messages_stay() {
+        let home = tempfile::tempdir().expect("home");
+        let conn = Connection::open(home.path().join(STORE_FILE)).expect("create");
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA} {SCHEMA_V2} PRAGMA user_version = 2; COMMIT;"
+        ))
+        .expect("schema 2");
+        drop(conn);
+        let mut store = Store::open_in(home.path(), US).expect("schema 2 opens");
+        let mut old = message(1, false, "older");
+        old.signature = Signature::Unverified;
+        put(&mut store, ALICE, old);
+        drop(store);
+        let store = Store::open_in(home.path(), US).expect("reopen");
+        assert_eq!(
+            store
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
+                .expect("version"),
+            SCHEMA_VERSION
+        );
+        assert!(store.unverified().expect("unverified").is_empty());
+        assert_eq!(
+            store.restore().expect("restore")[0].messages[0].signature,
+            Signature::Unverified
+        );
+    }
+
+    /// The bytes of an unverified message are kept until its verdict, which
+    /// its row then says across a reopen, invalid as loudly as verified; the
+    /// bytes of a deleted message are not handed back.
+    #[test]
+    fn an_unverified_message_keeps_its_bytes_until_its_verdict() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("fresh");
+        for key in [1, 2, 3] {
+            let mut received = message(key, false, "who?");
+            received.signature = Signature::Unverified;
+            put(&mut store, ALICE, received);
+            store
+                .keep_unverified(&id_of(key), &ALICE, &[key as u8; 120])
+                .expect("keep");
+        }
+        store
+            .keep_unverified(&id_of(1), &ALICE, &[9; 120])
+            .expect("kept once");
+        store
+            .write(&[StoreWrite::ForgetMessage { key: key_of(3) }])
+            .expect("forget 3");
+        let mut held = store.unverified().expect("unverified");
+        held.sort();
+        assert_eq!(
+            held,
+            vec![
+                (id_of(1), ALICE, vec![1; 120]),
+                (id_of(2), ALICE, vec![2; 120])
+            ]
+        );
+        store.settle_verdict(&id_of(1), true).expect("valid");
+        store.settle_verdict(&id_of(2), false).expect("invalid");
+        drop(store);
+        let store = Store::open_in(home.path(), US).expect("reopen");
+        assert!(store.unverified().expect("unverified").is_empty());
+        let signatures: Vec<Signature> = store.restore().expect("restore")[0]
+            .messages
+            .iter()
+            .map(|m| m.signature)
+            .collect();
+        assert_eq!(signatures, [Signature::Verified, Signature::Invalid]);
+    }
+}

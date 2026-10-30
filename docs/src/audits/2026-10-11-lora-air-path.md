@@ -104,7 +104,7 @@ listening and, when a reception cuts the window short, keeps the
 remainder owed and serves it on the next turn
 (`acquisition_jitter_ms` / `jitter_spent`,
 `leviculum-nrf/channel-access/src/lib.rs:625-701`;
-`leviculum-nrf/src/lora.rs:2274-2305`) — same shape, same reason. Our
+`leviculum-nrf/src/lora.rs:2315-2346`) — same shape, same reason. Our
 *host* serves its drawn wait as an uninterruptible sleep
 (`leviculum-std/src/interfaces/rnode.rs:3012-3027`): it cannot sense
 the medium, the modem under it can and does. On the air: equivalent
@@ -135,7 +135,7 @@ avoidance, current RSSI above its sampled noise floor plus 11 dB
 `reference/RNode_Firmware/RNode_Firmware.ino:1394-1431`,
 `CSMA_INFR_THRESHOLD_DB`, `reference/RNode_Firmware/Config.h:113`).
 Our board probes with the SX1262's CAD per attempt
-(`leviculum-nrf/src/lora.rs:2381`) and keeps **no noise floor, no
+(`leviculum-nrf/src/lora.rs:2422`) and keeps **no noise floor, no
 interference detection, and no DCD sampling at all**. Three on-air
 consequences: (a) a reference node defers to non-LoRa interference, we
 do not; (b) the reference's latched preamble holds "busy" for up to a
@@ -210,7 +210,7 @@ alone: a frame held by the lock past `HOLD_MAX_AGE_MS`
 keyed (#433); the hold is reported to the core and suppresses relayed
 announces and path responses (leviculum#493,
 `announce_allowed_on_interface`,
-`leviculum-core/src/transport.rs:10234-10256`); a propagation node stops
+`leviculum-core/src/transport.rs:10284-10306`); a propagation node stops
 originating at half the long-term cap (`OWN_TRAFFIC_SHARE_PERMILLE`,
 `leviculum-nrf/queue-budget/src/lib.rs:525`, leviculum#494). The
 reference holds silently, forever, and signals nothing over KISS — the
@@ -253,7 +253,7 @@ it aged under the lock goes out, oldest first, deaf. Ours: the host
 never lets the modem hold more than one frame (D1), sweeps frames the
 hold aged past 18 s (`pop_live_frame`,
 `leviculum-std/src/interfaces/rnode.rs:301`), and the board drops stale
-frames at dequeue (`leviculum-nrf/src/lora.rs:2140-2184`). On the air: a
+frames at dequeue (`leviculum-nrf/src/lora.rs:2180-2225`). On the air: a
 reference relay exiting a duty hold emits a burst of minutes-old
 traffic; ours emits one current frame. Class: deviation ours
 (deliberate; #433). Test: exists (the stale-drop mvr and the field
@@ -265,13 +265,13 @@ Where we match Python, verified: 2 % default cap over the interface
 bitrate (`DEFAULT_ANNOUNCE_CAP_PERCENT`,
 `leviculum-core/src/constants.rs:403`, against
 `reference/Reticulum/RNS/Reticulum.py:114`); local announces
-(`hops == 0`) bypass the cap (`leviculum-core/src/transport.rs:13139`,
+(`hops == 0`) bypass the cap (`leviculum-core/src/transport.rs:13189`,
 against `reference/Reticulum/RNS/Transport.py:1246-1250`); the queue
 holds one slot per destination, a newer emission replacing an older
-(`leviculum-core/src/transport.rs:13335-13353`, against
+(`leviculum-core/src/transport.rs:13385-13403`, against
 `reference/Reticulum/RNS/Transport.py:1267-1281`); release picks lowest
 hops, then oldest (`drain_announce_queues`,
-`leviculum-core/src/transport.rs:13495-13505`, against
+`leviculum-core/src/transport.rs:13545-13555`, against
 `reference/Reticulum/RNS/Interfaces/Interface.py:339-343`).
 
 **D12 — the cap's bitrate is the effective airtime rate, not the
@@ -286,7 +286,7 @@ function's docs). Test: exists in core.
 
 **D13 — the release draw.** After each capped emission ours adds a
 randomised draw to the holdoff (`cap_release_draw_ms`,
-`leviculum-core/src/transport.rs:11268`, applied at `:12433` and
+`leviculum-core/src/transport.rs:11318`, applied at `:12433` and
 `:12613`); Python re-arms its timer at exactly the holdoff
 (`reference/Reticulum/RNS/Interfaces/Interface.py:356-358`), so two
 saturated relays on one channel drain on two grids of the same period
@@ -300,10 +300,10 @@ is empty** (`if not queued_announces and outbound_time > ...`,
 `reference/Reticulum/RNS/Transport.py:1256-1257`); a non-empty queue
 forces queueing, so release order is always the min-hops draw. Ours
 transmits immediately whenever `now >= cap.allowed_at_ms`
-(`leviculum-core/src/transport.rs:13323`, before 9b4515b1) **without consulting the
+(`leviculum-core/src/transport.rs:13373`, before 9b4515b1) **without consulting the
 queue**, and the queue only drains on the poll cadence
-(`drain_announce_queues`, `leviculum-core/src/transport.rs:13454`,
-called from `poll`, `leviculum-core/src/transport.rs:5118`). In the
+(`drain_announce_queues`, `leviculum-core/src/transport.rs:13504`,
+called from `poll`, `leviculum-core/src/transport.rs:5135`). In the
 window between the holdoff elapsing and the next poll — up to one poll
 interval, per holdoff cycle — a fresh announce, whatever its hop count,
 overtakes every queued one and re-arms the holdoff on top of them. On the air: hop-priority
@@ -324,7 +324,7 @@ the broadcast path and the peer re-offer path alike; test
 queue entries older than `QUEUED_ANNOUNCE_LIFE` = 24 h at release time
 (`reference/Reticulum/RNS/Interfaces/Interface.py:330-337`,
 `reference/Reticulum/RNS/Reticulum.py:112`). Our drain has no age check
-(`leviculum-core/src/transport.rs:13454-13519`): an entry leaves only
+(`leviculum-core/src/transport.rs:13504-13569`): an entry leaves only
 by being sent or replaced by a newer emission. The per-destination slot
 bounds the damage, but a destination that announced once and went away
 stays queued indefinitely, and at a saturated LoRa cap (a 183-byte
@@ -350,8 +350,8 @@ claim below. Our board runs windowed RX with an explicit post-TX
 listening window of one reply airtime plus the peer's whole key-up wait
 (`post_tx_rx_window_ms`, `leviculum-nrf/channel-access/src/lib.rs:312`,
 the #423 fix), burst bounds of 16 frames / 8 s
-(`leviculum-nrf/src/lora.rs:919-924`), and a peer-turn yield after two
-empty ack windows (`leviculum-nrf/src/lora.rs:2526`). The window
+(`leviculum-nrf/src/lora.rs:952-957`), and a peer-turn yield after two
+empty ack windows (`leviculum-nrf/src/lora.rs:2569`). The window
 teardown/adoption/harvest discipline (`leviculum-nrf/rx-arming`) exists
 only because our RX is windowed; the reference has no teardown to get
 wrong. On the air: ours trades continuous listening for bounded turns;
@@ -467,7 +467,7 @@ Two asymmetries, neither a defect of ours:
    but the two rationales are the kind that get copied.
 2. **"It even reserves a fixed post-TX yield (CSMA_POST_TX_YIELD_SLOTS)"
    — wrong, the reference never uses it.**
-   `leviculum-nrf/src/lora.rs:940-941` (corrected in 35034019) claimed the reference firmware
+   `leviculum-nrf/src/lora.rs:973-974` (corrected in 35034019) claimed the reference firmware
    reserves a post-TX yield. `CSMA_POST_TX_YIELD_SLOTS` is defined at
    `reference/RNode_Firmware/Config.h:103` and referenced nowhere else
    in the firmware (checked by exhaustive grep over the mirror). The
@@ -502,13 +502,13 @@ Two asymmetries, neither a defect of ours:
    channel-access crate's derivation table
    (`leviculum-nrf/channel-access/src/lib.rs:28-59`). The unsourced
    `cadDetPeak` ladder is already honestly declared where it lives
-   (`cad_params`, `leviculum-core/src/sx126x.rs:440-508`, open on
+   (`cad_params`, `leviculum-core/src/sx126x.rs:498-566`, open on
    #351) — the audit adds nothing to it.
 
 ## The three I would fix first
 
 1. **The announce-cap queue jump (D14).** Mechanism: the immediate-send
-   branch at `leviculum-core/src/transport.rs:13323` (before 9b4515b1) tested only the
+   branch at `leviculum-core/src/transport.rs:13373` (before 9b4515b1) tested only the
    holdoff; Python additionally requires the queue empty
    (`reference/Reticulum/RNS/Transport.py:1256-1257`). One added
    condition (`&& cap.queue.is_empty()`) restores the min-hops release
@@ -518,7 +518,7 @@ Two asymmetries, neither a defect of ours:
    possible change with a mesh-visible win under exactly the load the
    propagation Leitstern cares about.
 2. **Stale cap-queue entries (D15).** Mechanism: no age check in
-   `drain_announce_queues` (`leviculum-core/src/transport.rs:13454`);
+   `drain_announce_queues` (`leviculum-core/src/transport.rs:13504`);
    add Python's `QUEUED_ANNOUNCE_LIFE` prune at release (drop entries
    older than 24 h before selection, as
    `reference/Reticulum/RNS/Interfaces/Interface.py:330-337` does).
@@ -529,7 +529,7 @@ Two asymmetries, neither a defect of ours:
    Mechanism: comment-only edits — "~2 s" → "~1 s
    (`UTIL_UPDATE_INTERVAL_MS`)" at
    `leviculum-std/src/interfaces/rnode.rs:1027` and `:873` (done in 35034019), and the
-   post-TX-yield sentence at `leviculum-nrf/src/lora.rs:940-941` (likewise)
+   post-TX-yield sentence at `leviculum-nrf/src/lora.rs:973-974` (likewise)
    rewritten to what the reference does (returns to continuous RX;
    the yield constant is unused). Test: the citation guard anchors the
    corrected lines; no behaviour moves. Cheap, and it is exactly the
@@ -546,7 +546,7 @@ split framing, `AirtimeTracker`, announce-cap bitrate); the policy
 crates `leviculum-channel-access`, `leviculum-queue-budget`,
 `leviculum-tx-spacing`, `leviculum-mute-lease` and the module contract
 of `leviculum-rx-arming`; the LNode transmit loop
-(`leviculum-nrf/src/lora.rs:1893-2560`); the core announce cap
+(`leviculum-nrf/src/lora.rs:1931-2603`); the core announce cap
 (`leviculum-core/src/transport.rs`, the cap/drain/hold paths); the CAD
 and window arithmetic in `leviculum-core/src/sx126x.rs`. Reference
 side: `RNodeInterface.py` (serial fully, Android spot-checked for the

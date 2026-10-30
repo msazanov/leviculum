@@ -6,7 +6,7 @@
 //! ([`super::postmortem`]): a magic, a write position and a ring that every
 //! log line is mirrored into. A soft reset keeps it; power-on RAM, a torn
 //! record or an older image's layout does not carry this magic. The
-//! volatile reads and writes stay in `leviculum-nrf/src/log.rs`; what they
+//! volatile reads and writes stay in `leviculum-nrf/firmware/src/log.rs`; what they
 //! decide is here:
 //!
 //! - [`must_rearm`]: a writer that finds any word but [`TAIL_MAGIC`] zeroes

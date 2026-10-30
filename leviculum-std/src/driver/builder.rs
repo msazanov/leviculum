@@ -79,6 +79,9 @@ pub struct ReticulumNodeBuilder {
     /// Instance name to connect to as a shared instance client.
     /// Mutually exclusive with share_instance.
     connect_instance_name: Option<String>,
+    /// The Reticulum config directory of the shared instance this client
+    /// joins; see [`Self::shared_instance_config_dir`].
+    shared_instance_config_dir: Option<PathBuf>,
     /// Shared-instance transport override; see
     /// [`Self::shared_instance_transport`].
     shared_instance_transport_explicit: Option<crate::interfaces::SharedInstanceTransport>,
@@ -128,6 +131,7 @@ impl ReticulumNodeBuilder {
             autoconnect_discovered_interfaces_explicit: None,
             discover_interfaces_explicit: None,
             connect_instance_name: None,
+            shared_instance_config_dir: None,
             shared_instance_transport_explicit: None,
             events_enabled: true,
             discovery_job_interval_secs_explicit: None,
@@ -805,6 +809,24 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// The Reticulum config directory of the shared instance this client
+    /// joins, where its RPC key comes from.
+    ///
+    /// A client asks the daemon over RPC (the first hop's timeout before
+    /// every link and receipt), keyed as a Python client keys it: the
+    /// directory's `rpc_key`, else the hash of its
+    /// `storage/transport_identity`, the daemon's own key
+    /// (Reticulum.py:355-356, Transport.py:218-220). Its own identity is no
+    /// substitute when it keeps its own storage, as loquax, lnpnd and every
+    /// application client do (1119). Without this call the directory is the
+    /// config file's, else the platform default, as for a Python client
+    /// started without `--config`; with no key there, the client falls back
+    /// to its own identity's.
+    pub fn shared_instance_config_dir(mut self, dir: PathBuf) -> Self {
+        self.shared_instance_config_dir = Some(dir);
+        self
+    }
+
     /// Serve or dial the shared instance over `transport`.
     ///
     /// Without this call the transport comes from the config the builder was
@@ -1146,7 +1168,32 @@ impl ReticulumNodeBuilder {
         if let Some(ref name) = self.connect_instance_name {
             node.set_connect_instance(name.clone());
         }
-        node.set_rpc_key(config.reticulum.rpc_key.clone());
+        // A client asks with its shared instance's key (1119), see
+        // `shared_instance_config_dir`; a daemon serves with its own config's.
+        let rpc_key = config.reticulum.rpc_key.clone().or_else(|| {
+            self.connect_instance_name.as_ref()?;
+            let dir = self
+                .shared_instance_config_dir
+                .take()
+                .or_else(|| {
+                    self.config_path
+                        .as_deref()
+                        .and_then(std::path::Path::parent)
+                        .map(std::path::Path::to_path_buf)
+                })
+                .unwrap_or_else(Config::default_config_dir);
+            shared_instance_rpc_key(&dir)
+        });
+        node.set_rpc_key(rpc_key);
+        // What lnsd decided about the automatic layer (#471), for
+        // `interface_stats` to serve; a node built in code has none.
+        // And where the configuration came from, for the rows no section
+        // names once the layer removed every section (#471).
+        {
+            let mut inv = crate::sync_ext::MutexRecover::lock_recover(&*node.inventory);
+            inv.set_auto_layer(config.auto_layer);
+            inv.set_config_origin(config.origin);
+        }
         node.set_storage_path(storage_path.clone());
         #[cfg(feature = "serial")]
         node.set_rnode_channels(rnode_channels);
@@ -1229,13 +1276,38 @@ fn resolve_network_identity_path(
     }
 }
 
+/// The RPC key of the shared instance whose config directory is `config_dir`,
+/// resolved as the client tools resolve it
+/// ([`crate::daemon_rpc::resolve_authkey`]), or `None` when the directory
+/// holds neither an `rpc_key` nor a readable `transport_identity`.
+fn shared_instance_rpc_key(config_dir: &std::path::Path) -> Option<Vec<u8>> {
+    let config_file = config_dir.join("config");
+    let config = config_file
+        .is_file()
+        .then(|| Config::load(&config_file).ok())
+        .flatten();
+    match crate::daemon_rpc::resolve_authkey(config_dir, config.as_ref()) {
+        Ok((key, _)) => Some(key),
+        Err(e) => {
+            tracing::debug!(
+                "no shared-instance RPC key under {} ({e}); asking with this node's own",
+                config_dir.display()
+            );
+            None
+        }
+    }
+}
+
 /// Load a network identity from a raw 64-byte file, generating and persisting a
 /// fresh one when the file is absent (Python Reticulum.py:521-542).
 fn load_or_create_network_identity(path: &std::path::Path) -> std::io::Result<Identity> {
     use leviculum_core::constants::IDENTITY_KEY_SIZE;
     match std::fs::read(path) {
-        Ok(bytes) if bytes.len() == IDENTITY_KEY_SIZE => Identity::from_private_key_bytes(&bytes)
-            .map_err(|e| std::io::Error::other(format!("{e:?}"))),
+        Ok(bytes) if bytes.len() == IDENTITY_KEY_SIZE => {
+            crate::storage::narrow_secret_mode(path)?;
+            Identity::from_private_key_bytes(&bytes)
+                .map_err(|e| std::io::Error::other(format!("{e:?}")))
+        }
         Ok(bytes) => Err(std::io::Error::other(format!(
             "network identity file has wrong size: {} (expected {IDENTITY_KEY_SIZE})",
             bytes.len()
@@ -1248,7 +1320,7 @@ fn load_or_create_network_identity(path: &std::path::Path) -> std::io::Result<Id
             let key_bytes = id
                 .private_key_bytes()
                 .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
-            std::fs::write(path, key_bytes)?;
+            crate::storage::atomic_write_secret(path, &key_bytes)?;
             tracing::info!(
                 "Network identity generated and persisted to {}",
                 path.display()
@@ -1722,6 +1794,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
+    /// 1119: the discovery network identity is a private key like the
+    /// transport identity, so it is minted 0600, not with the umask's mode.
+    #[cfg(unix)]
+    #[test]
+    fn a_minted_network_identity_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("nested/network_identity");
+        load_or_create_network_identity(&path).expect("mint");
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "network_identity mode {mode:o}");
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        load_or_create_network_identity(&path).expect("load");
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "narrowed at load, mode {mode:o}");
+    }
+
     #[test]
     fn test_build_sync_persists_identity() {
         let dir = temp_storage_path();
@@ -1835,21 +1926,17 @@ mod tests {
 
     #[test]
     fn test_python_transport_identity_compat() {
-        // Read the actual Python rnsd transport_identity file if present
-        let python_path = dirs::home_dir().map(|h| h.join(".reticulum/storage/transport_identity"));
-        let Some(path) = python_path else { return };
-        if !path.exists() {
-            return; // Skip if Python rnsd hasn't been run on this machine
-        }
-
-        let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(
-            bytes.len(),
-            64,
-            "Python transport_identity should be 64 bytes"
+        // Written by the reference rnsd, not read from the host's
+        // ~/.reticulum: see tests/fixtures/python-storage/README.md.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/python-storage/transport_identity"
         );
+        let bytes = std::fs::read(path).unwrap();
+        assert_eq!(bytes.len(), 64, "{path} should be 64 bytes");
 
-        let id = Identity::from_private_key_bytes(&bytes).unwrap();
+        let id = Identity::from_private_key_bytes(&bytes)
+            .unwrap_or_else(|e| panic!("{path} is not a private identity: {e:?}"));
         assert!(id.has_private_keys());
         // Verify the identity produces a valid hash (16 bytes)
         assert_eq!(id.hash().len(), 16);
@@ -1934,13 +2021,5 @@ mod tests {
             inner.probe_dest_hash().is_none(),
             "probe_dest_hash should be None when respond_to_probes is disabled"
         );
-    }
-
-    // Reuse the dirs module from config.rs for home dir lookup in tests
-    mod dirs {
-        use std::path::PathBuf;
-        pub(super) fn home_dir() -> Option<PathBuf> {
-            std::env::var_os("HOME").map(PathBuf::from)
-        }
     }
 }

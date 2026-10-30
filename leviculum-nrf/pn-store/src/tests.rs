@@ -12,10 +12,13 @@ extern crate std;
 use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::Cell;
 use core::cell::RefCell;
 
-use leviculum_lxmf::peering::{PeerRecord, PeerStore};
-use leviculum_lxmf::propagation_store::{PropagationStore, StoredMessage};
+use leviculum_lxmf::peering::{
+    build_offer, OfferBuilder, OfferPlan, Peer, PeerRecord, PeerStore, OFFER_BYTES_LIMIT,
+};
+use leviculum_lxmf::propagation_store::{PropagationBodyStore, PropagationStore, StoredMessage};
 use leviculum_record_log::sim::{block_on, SimNor};
 use leviculum_record_log::{RecordLog, KEY_LEN, SECTOR_SIZE};
 
@@ -86,7 +89,7 @@ async fn apply(log: &mut RecordLog<SimNor>, op: &FlushOp) {
         } => {
             log.append(key, *time, *tag, body).await.unwrap();
         }
-        FlushOp::Purge { offset, key } => {
+        FlushOp::Purge { offset, key } | FlushOp::ConfirmedPurge { offset, key } => {
             if let Some(record) = log.record_at(*offset).await.unwrap() {
                 if &record.key == key {
                     log.purge(&record).await.unwrap();
@@ -126,11 +129,206 @@ fn flush_peers(
     });
 }
 
-fn directory(store: &PnStore<SharedRegion>) -> Vec<StoredMessage> {
+fn directory<R: Region>(store: &PnStore<R>) -> Vec<StoredMessage> {
     let mut out = Vec::new();
     store.for_each(&mut |meta| out.push(*meta)).unwrap();
     out.sort_by_key(|meta| meta.sequence);
     out
+}
+
+fn ordered_directory<R: Region>(store: &PnStore<R>) -> Vec<StoredMessage> {
+    let mut out = Vec::new();
+    store
+        .for_each_ordered(&mut |meta| {
+            out.push(*meta);
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+    out
+}
+
+fn ordered_offer<R: Region>(store: &PnStore<R>, peer: &Peer, budget: usize) -> Option<OfferPlan> {
+    let mut builder = OfferBuilder::new(peer, budget);
+    store
+        .for_each_ordered(&mut |entry| builder.push(entry))
+        .unwrap();
+    builder.finish()
+}
+
+async fn seeded_ordering_log(region: &SharedRegion, pages: u32) -> RecordLog<SimNor> {
+    let mut log = fresh(pages).await;
+    let mut purge_at = 0;
+    for n in 0..32 {
+        let len = if n % 5 == 0 { 1_900 } else { FIELD_BODY };
+        let offset = log
+            .append(&key(n), n, (n % 4) as u8, &msg_body(n as u8, len))
+            .await
+            .unwrap();
+        if n == 31 {
+            purge_at = offset;
+        }
+    }
+    let purged = log.record_at(purge_at).await.unwrap().unwrap();
+    log.purge(&purged).await.unwrap();
+    log.append(&key(996), 40, 0xB0, &[0xAB; 64]).await.unwrap();
+    log.append(
+        &key(997),
+        41,
+        TAG_PEER,
+        &encode_peer_record(&full_peer(4, 0)),
+    )
+    .await
+    .unwrap();
+    log.append(&key(998), 42, 0, &[0xAB; MIN_BODY_LEN - 1])
+        .await
+        .unwrap();
+    sync(region, &mut log);
+    log
+}
+
+#[test]
+fn mapped_ordered_traversal_filters_and_feeds_bounded_offers_in_one_region_view() {
+    block_on(async {
+        let inner = SharedRegion::new(SECTORS);
+        let _log = seeded_ordering_log(&inner, SECTORS).await;
+        let scanned = PnStore::new(inner.clone(), SECTORS);
+        let mut expected = directory(&scanned);
+        let mut physical = Vec::new();
+        scanned
+            .for_each(&mut |entry| physical.push(*entry))
+            .unwrap();
+        assert_ne!(
+            physical, expected,
+            "reclaim separates physical and append order"
+        );
+        for excluded in [31, 996, 997, 998] {
+            assert!(!expected
+                .iter()
+                .any(|entry| entry.transient_id == key(excluded)));
+        }
+        let reads = Rc::new(Cell::new(0));
+        let mut store = PnStore::new(
+            CountingRegion {
+                inner,
+                reads: reads.clone(),
+            },
+            SECTORS,
+        );
+        let masked = expected[1].transient_id;
+        assert!(store.purge(&masked).unwrap());
+        expected.retain(|entry| entry.transient_id != masked);
+        store
+            .append(&key(999), 43, 3, &msg_body(1, FIELD_BODY))
+            .unwrap();
+        assert!(store.contains(&key(999)).unwrap());
+        reads.set(0);
+        assert_eq!(ordered_directory(&store), expected);
+        assert_eq!(
+            reads.get(),
+            1,
+            "page collection and walk share one mapped view"
+        );
+        assert_eq!(store.ordered_traversal_heap_bound(), SECTORS as usize * 8);
+        let mut visited = 0;
+        store
+            .for_each_ordered(&mut |entry| {
+                assert_eq!(*entry, expected[0]);
+                visited += 1;
+                ControlFlow::Break(())
+            })
+            .unwrap();
+        assert_eq!(visited, 1);
+        assert_eq!(reads.get(), 2);
+
+        let mut peer = full_peer(7, 0).into_peer();
+        peer.stamp_cost = 2;
+        peer.stamp_cost_flexibility = 0;
+        for cursor in [
+            0,
+            expected[0].sequence,
+            expected[expected.len() / 2].sequence,
+        ] {
+            peer.cursor = cursor;
+            for transfer_limit in [1, 4] {
+                peer.transfer_limit_kb = transfer_limit;
+                for sync_limit in [1, 8] {
+                    peer.sync_limit_kb = sync_limit;
+                    for budget in [0, 35, 70, 127, OFFER_BYTES_LIMIT] {
+                        let before = reads.get();
+                        assert_eq!(
+                            ordered_offer(&store, &peer, budget),
+                            build_offer(&peer, &expected, budget)
+                        );
+                        assert_eq!(reads.get(), before + 1);
+                    }
+                }
+            }
+        }
+        store.op_done(false);
+        assert!(ordered_directory(&store)
+            .iter()
+            .any(|entry| entry.transient_id == masked));
+    });
+}
+
+#[test]
+fn confirmed_purges_keep_owned_targets_until_authoritative_commit() {
+    {
+        block_on(async {
+            let region = SharedRegion::new(SECTORS);
+            let mut log = fresh(SECTORS).await;
+            for n in [1, 2] {
+                log.append(&key(n), n, 3, &msg_body(n as u8, FIELD_BODY))
+                    .await
+                    .unwrap();
+            }
+            sync(&region, &mut log);
+            let mut store = PnStore::new(region.clone(), SECTORS);
+            assert_eq!(
+                store.purge_confirmed(&key(99)).unwrap(),
+                ConfirmedPurge::Absent
+            );
+            store
+                .append(&key(3), 3, 0, &msg_body(3, FIELD_BODY))
+                .unwrap();
+            assert_eq!(
+                store.purge_confirmed(&key(3)).unwrap(),
+                ConfirmedPurge::Committed
+            );
+            assert_eq!(
+                store.pending_ops(),
+                0,
+                "RAM-only removal owes no flash write"
+            );
+
+            assert!(store.purge(&key(2)).unwrap());
+            assert!(matches!(store.peek_op(), Some(FlushOp::Purge { .. })));
+            store.op_done(false);
+            assert_eq!(
+                store.purge_confirmed(&key(1)).unwrap(),
+                ConfirmedPurge::Queued
+            );
+            let explicit = store.peek_op().cloned().unwrap();
+            let (offset, owned_id) = match &explicit {
+                FlushOp::ConfirmedPurge { offset, key } => (*offset, *key),
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(owned_id, key(1));
+            assert!(!store.contains(&owned_id).unwrap());
+            assert!(!store.confirmed_target_deleted(offset, &owned_id));
+            assert_eq!(store.peek_op(), Some(&explicit));
+            assert!(!store.confirmed_target_deleted(offset, &owned_id));
+
+            // The device commits but its reply is an I/O failure. The owned
+            // target is retired once; only authoritative bytes prove deletion.
+            apply(&mut log, &explicit).await;
+            sync(&region, &mut log);
+            assert_eq!(store.op_done(false), Some(explicit));
+            assert!(store.confirmed_target_deleted(offset, &owned_id));
+            assert!(!store.contains(&owned_id).unwrap());
+            assert!(store.contains(&key(2)).unwrap());
+        });
+    }
 }
 
 #[test]
@@ -696,7 +894,9 @@ fn flush_front(
             tag,
             body,
         } => block_on(log.append(key, *time, *tag, body)).is_ok(),
-        FlushOp::Purge { .. } => unreachable!("only appends in these tests"),
+        FlushOp::Purge { .. } | FlushOp::ConfirmedPurge { .. } => {
+            unreachable!("only appends in these tests")
+        }
     };
     sync(region, log);
     assert_eq!(settle_message_op(role, ok), Some(op));
@@ -1985,4 +2185,17 @@ fn a_failure_on_a_link_without_an_entry_retires_nothing() {
     assert_eq!(inbound, vec![1, 2, 1]);
     assert!(retire_failed_transfer(&mut inbound, &1));
     assert_eq!(inbound, vec![1, 2]);
+}
+
+#[derive(Clone)]
+struct CountingRegion {
+    inner: SharedRegion,
+    reads: Rc<Cell<usize>>,
+}
+
+impl Region for CountingRegion {
+    fn with_bytes<T>(&self, f: impl FnOnce(&[u8]) -> T) -> T {
+        self.reads.set(self.reads.get() + 1);
+        self.inner.with_bytes(f)
+    }
 }

@@ -36,11 +36,22 @@
 # once. A second local patch (tag `max-btdev-24`, its header carries the
 # measurement) raises the constant to 24, the number periculum's
 # `MAX_CONTROLLERS` validates rooms against; measured 2026-10-13, ble_room_20
-# green three of three on it. It is applied last.
+# green three of three on it. It is applied third.
+#
+# AND WHY THE EVENT LOOP NEEDS A PATCH TOO
+#
+# `mainloop_remove_fd` (src/shared/mainloop.c) freed an fd's data at once,
+# also from inside a callback `mainloop_run` was still dispatching, while the
+# loop's local copy of that epoll batch still held the pointer. Under timer-fd
+# churn a later entry of the batch then read released memory and btvirt died:
+# measured 2026-10-24 with scripts/btvirt-churn.sh, 50 unexpected exits in
+# 3625 iterations. A third local patch (tag `deferred-fd-free`, its header
+# carries the measurement) keeps removed data until the batch ends. It is
+# applied last.
 #
 # WHAT IT LEAVES BEHIND, AND WHY THE SIDECAR IS NOT OPTIONAL
 #
-#   /usr/local/bin/btvirt             the emulator, all three patches applied
+#   /usr/local/bin/btvirt             the emulator, all four patches applied
 #   /usr/local/bin/btvirt.provenance  what it was built from, one line
 #
 # periculum's ble_room runner prints the sidecar's first non-comment line as
@@ -50,8 +61,8 @@
 # difference between a result and an anecdote. Keep the line's shape: the
 # runner quotes at most 160 characters of it.
 #
-# Idempotent: a host whose sidecar names all three patches is left untouched,
-# so `just install-ci` stays a one-command re-run; a sidecar missing either
+# Idempotent: a host whose sidecar names all four patches is left untouched,
+# so `just install-ci` stays a one-command re-run; a sidecar missing any
 # local patch is a bench provisioned before that patch existed, and is
 # rebuilt. So is a source tree that already has a fix, which is how a future
 # bluez shipping it is handled: see patch_state below.
@@ -92,10 +103,17 @@ LOCAL_PATCH_SUBJECT="emulator: report a legacy advertiser every advertising inte
 LOCAL_PATCH_FILE="$REPO_DIR/scripts/patches/bluez-local-emulator-legacy-adv-every-interval.patch"
 
 # The controller ceiling, cut against the tree the two above leave behind and
-# applied last.
+# applied third.
 MAX_PATCH_TAG=max-btdev-24
 MAX_PATCH_SUBJECT="emulator: hold twenty-four controllers instead of sixteen"
 MAX_PATCH_FILE="$REPO_DIR/scripts/patches/bluez-local-emulator-max-btdev-24.patch"
+
+# The event loop's deferred free, cut against the tree the three above leave
+# behind (it touches src/shared/mainloop.c, they touch emulator/btdev.c) and
+# applied last.
+FREE_PATCH_TAG=deferred-fd-free
+FREE_PATCH_SUBJECT="emulator: defer freeing a removed fd until the dispatch batch ends"
+FREE_PATCH_FILE="$REPO_DIR/scripts/patches/bluez-local-emulator-deferred-fd-free.patch"
 
 say() { echo "[install-btvirt] $*"; }
 
@@ -121,7 +139,7 @@ provenance_names_patch() {
 }
 
 # And a local patch, by its tag. Separate from the above so that --check
-# can say which of the three a bench lacks.
+# can say which of the four a bench lacks.
 provenance_names_tag() {
     local line
     line=$(origin_line) || return 1
@@ -168,14 +186,15 @@ check() {
     if ! provenance_names_patch; then
         say "UNPATCHED: $PROVENANCE does not name $PATCH_SHORT"
         say "           origin=\"$line\""
-        say "           expected: bluez <version> + upstream $PATCH_SHORT + local $LOCAL_PATCH_TAG + local $MAX_PATCH_TAG; ..."
+        say "           expected: bluez <version> + upstream $PATCH_SHORT + local $LOCAL_PATCH_TAG, $MAX_PATCH_TAG, $FREE_PATCH_TAG; ..."
         return 1
     fi
     local tag subject
-    for tag in "$LOCAL_PATCH_TAG" "$MAX_PATCH_TAG"; do
+    for tag in "$LOCAL_PATCH_TAG" "$MAX_PATCH_TAG" "$FREE_PATCH_TAG"; do
         provenance_names_tag "$tag" && continue
         subject=$LOCAL_PATCH_SUBJECT
         [ "$tag" = "$MAX_PATCH_TAG" ] && subject=$MAX_PATCH_SUBJECT
+        [ "$tag" = "$FREE_PATCH_TAG" ] && subject=$FREE_PATCH_SUBJECT
         say "WITHOUT $tag: $PROVENANCE names $PATCH_SHORT but not this local patch"
         say "           origin=\"$line\""
         say "           ($subject); run: bash scripts/install-btvirt.sh"
@@ -221,7 +240,7 @@ check() {
 #   no         neither. Refuse: building an unknown emulator is the failure
 #              this whole script exists to prevent.
 #
-# All three patches go through it, in order, each judged against the tree the
+# All four patches go through it, in order, each judged against the tree the
 # one before it left.
 patch_state() {
     local srcdir="$1" logdir="$2" file="$3"
@@ -291,20 +310,26 @@ apply_patch() {
 # the lines its hunks declare (`make_fixture <dest> <patch> overlay`). The
 # two patches' hunks touch disjoint line ranges of the synthesised file, and
 # the self-test asserts the upstream post-image survives the overlay.
+#
+# The file synthesised is the one the patch's `--- a/` line names, so the
+# event-loop patch gets a src/shared/mainloop.c beside the btdev.c the others
+# share; an overlay onto a file no earlier patch synthesised starts empty.
 make_fixture() {
-    local dest="$1" file="${2:-$PATCH_FILE}" mode="${3:-new}" base=
-    mkdir -p "$dest/emulator" || return 1
-    if [ "$mode" = overlay ]; then
-        base="$dest/emulator/btdev.c.base"
-        mv "$dest/emulator/btdev.c" "$base" || return 1
+    local dest="$1" file="${2:-$PATCH_FILE}" mode="${3:-new}" base='' target
+    target=$(sed -n 's|^--- a/||p' "$file" | head -1)
+    [ -n "$target" ] || return 1
+    mkdir -p "$dest/$(dirname "$target")" || return 1
+    if [ "$mode" = overlay ] && [ -e "$dest/$target" ]; then
+        base="$dest/$target.base"
+        mv "$dest/$target" "$base" || return 1
     fi
-    awk -v base="$base" '
+    awk -v base="$base" -v target="$target" '
         BEGIN {
             if (base != "")
                 while ((getline line < base) > 0)
                     pre[++max] = line
         }
-        /^--- a\/emulator\/btdev\.c$/ { seen = 1; next }
+        $0 == "--- a/" target { seen = 1; next }
         !seen { next }
         /^@@ / {
             split($2, range, ",")          # $2 is "-1589,9"
@@ -326,22 +351,24 @@ make_fixture() {
             for (i = 1; i <= max; i++)
                 print (i in pre) ? pre[i] : "\t/* not part of any hunk */"
         }
-    ' "$file" >"$dest/emulator/btdev.c" || return 1
+    ' "$file" >"$dest/$target" || return 1
     [ -z "$base" ] || rm -f "$base"
-    [ -s "$dest/emulator/btdev.c" ]
+    [ -s "$dest/$target" ]
 }
 
 # The sidecar, exactly as it lands on disk: stdout here is the file there.
 # A function so that the self-test can read what a real install would write
 # without being root, and so the writer and the checker above cannot drift
 # apart unnoticed. The third line is the one periculum quotes; it stays
-# inside the runner's 160-character window as long as it keeps this shape.
+# inside the runner's 160-character window as long as it keeps this shape,
+# which is why the local tags share one `+ local`: with one each, the fourth
+# patch pushed the line to 165 characters.
 provenance_text() {
     local version="$1" md5="$2" today="$3"
     printf '%s\n%s\n%s\n' \
         "# written by scripts/install-btvirt.sh on $today" \
-        "# source: apt-get source bluez ($version), patch -p1 < $(basename "$PATCH_FILE") ($PATCH_SHA), then < $(basename "$LOCAL_PATCH_FILE") < $(basename "$MAX_PATCH_FILE")" \
-        "bluez $version + upstream $PATCH_SHORT + local $LOCAL_PATCH_TAG + local $MAX_PATCH_TAG; built $today, md5 $md5"
+        "# source: apt-get source bluez ($version), patch -p1 < $(basename "$PATCH_FILE") ($PATCH_SHA), then < $(basename "$LOCAL_PATCH_FILE") < $(basename "$MAX_PATCH_FILE") < $(basename "$FREE_PATCH_FILE")" \
+        "bluez $version + upstream $PATCH_SHORT + local $LOCAL_PATCH_TAG, $MAX_PATCH_TAG, $FREE_PATCH_TAG; built $today, md5 $md5"
 }
 
 SUDO=""
@@ -361,7 +388,8 @@ install_btvirt() {
     # Idempotence, checked before anything is fetched or compiled.
     if [ -x "$BTVIRT_BIN" ] && provenance_names_patch \
             && provenance_names_tag "$LOCAL_PATCH_TAG" \
-            && provenance_names_tag "$MAX_PATCH_TAG"; then
+            && provenance_names_tag "$MAX_PATCH_TAG" \
+            && provenance_names_tag "$FREE_PATCH_TAG"; then
         local line
         line=$(origin_line)
         say "already patched, nothing to do"
@@ -370,7 +398,7 @@ install_btvirt() {
     fi
 
     local f
-    for f in "$PATCH_FILE" "$LOCAL_PATCH_FILE" "$MAX_PATCH_FILE"; do
+    for f in "$PATCH_FILE" "$LOCAL_PATCH_FILE" "$MAX_PATCH_FILE" "$FREE_PATCH_FILE"; do
         if ! [ -r "$f" ]; then
             say "ERROR: vendored patch missing: $f"
             return 1
@@ -432,7 +460,9 @@ install_btvirt() {
         || ! apply_patch "$srcdir" "$workdir" "$LOCAL_PATCH_FILE" \
             "$LOCAL_PATCH_TAG" "$LOCAL_PATCH_SUBJECT" \
         || ! apply_patch "$srcdir" "$workdir" "$MAX_PATCH_FILE" \
-            "$MAX_PATCH_TAG" "$MAX_PATCH_SUBJECT"; then
+            "$MAX_PATCH_TAG" "$MAX_PATCH_SUBJECT" \
+        || ! apply_patch "$srcdir" "$workdir" "$FREE_PATCH_FILE" \
+            "$FREE_PATCH_TAG" "$FREE_PATCH_SUBJECT"; then
         say "       the source above is bluez $version"
         return 1
     fi
@@ -514,8 +544,9 @@ self_test() {
     }
 
     write_good_note() {
-        printf '# a comment the reader must skip\n\nbluez 5.82-1.1 + upstream %s (%s) + local %s + local %s; built 2026-10-10, md5 %s\n' \
+        printf '# a comment the reader must skip\n\nbluez 5.82-1.1 + upstream %s (%s) + local %s + local %s + local %s; built 2026-10-10, md5 %s\n' \
             "$PATCH_SHORT" "$PATCH_SUBJECT" "$LOCAL_PATCH_TAG" "$MAX_PATCH_TAG" \
+            "$FREE_PATCH_TAG" \
             "$(md5sum "$bin" | cut -d' ' -f1)" >"$note"
     }
 
@@ -679,6 +710,53 @@ self_test() {
             fi
             state=$(patch_state "$trimmed" "$logs" "$MAX_PATCH_FILE")
             is no "$state" "an unrelated tree refuses $MAX_PATCH_TAG"
+
+            # The event loop's deferred free, last. It touches
+            # src/shared/mainloop.c, so the overlay synthesises that file
+            # beside the thrice-patched btdev.c.
+            if ! make_fixture "$src" "$FREE_PATCH_FILE" overlay; then
+                bad "could not overlay $FREE_PATCH_FILE on the patched tree"
+            else
+                state=$(patch_state "$src" "$logs" "$FREE_PATCH_FILE")
+                is appliable "$state" "thrice-patched tree takes $FREE_PATCH_TAG"
+                if apply_patch "$src" "$logs" "$FREE_PATCH_FILE" \
+                        "$FREE_PATCH_TAG" "$FREE_PATCH_SUBJECT" \
+                        >/dev/null 2>&1; then
+                    ok "the event-loop patch applies"
+                else
+                    bad "the event-loop patch does not apply to its own pre-image"
+                fi
+                # What it does, by its post-image: dispatch skips removed
+                # data, removal during dispatch queues instead of freeing,
+                # and the queue is released after the batch.
+                for want in \
+                        'if (data->removed)' \
+                        'removed_list = data;' \
+                        'free_removed();'; do
+                    if grep -qF "$want" "$src/src/shared/mainloop.c"; then
+                        ok "event-loop patched tree carries: $want"
+                    else
+                        bad "event-loop patched tree lacks: $want"
+                    fi
+                done
+                # btdev.c is not its file; all three earlier patches stay.
+                for want in \
+                        'cc.handle = cpu_to_le16(conn->link->handle);' \
+                        'le_adv_broadcast_start(dev);' \
+                        '#define MAX_BTDEV_ENTRIES 24'; do
+                    if grep -qF "$want" "$src/emulator/btdev.c"; then
+                        ok "survives the event-loop patch: $want"
+                    else
+                        bad "gone after the event-loop patch: $want"
+                    fi
+                done
+                state=$(patch_state "$src" "$logs" "$FREE_PATCH_FILE")
+                is applied "$state" "event-loop-patched tree reads as applied"
+            fi
+            mkdir -p "$trimmed/src/shared"
+            head -40 "$src/src/shared/mainloop.c" >"$trimmed/src/shared/mainloop.c"
+            state=$(patch_state "$trimmed" "$logs" "$FREE_PATCH_FILE")
+            is no "$state" "an unrelated tree refuses $FREE_PATCH_TAG"
         fi
     fi
 
@@ -704,8 +782,13 @@ self_test() {
     else
         bad "sidecar comment does not name $(basename "$MAX_PATCH_FILE")"
     fi
+    if echo "$text" | sed -n 2p | grep -qF "$(basename "$FREE_PATCH_FILE")"; then
+        ok "sidecar comment names the event-loop patch file"
+    else
+        bad "sidecar comment does not name $(basename "$FREE_PATCH_FILE")"
+    fi
     if echo "$origin" | grep -qE \
-        "^bluez 5\.82-1\.1 \+ upstream $PATCH_SHORT \+ local $LOCAL_PATCH_TAG \+ local $MAX_PATCH_TAG; built 2026-09-27, md5 [0-9a-f]{32}$"
+        "^bluez 5\.82-1\.1 \+ upstream $PATCH_SHORT \+ local $LOCAL_PATCH_TAG, $MAX_PATCH_TAG, $FREE_PATCH_TAG; built 2026-09-27, md5 [0-9a-f]{32}$"
     then
         ok "origin line has the shape periculum reads"
     else
@@ -744,6 +827,14 @@ self_test() {
     printf 'bluez 5.82-1.1 + upstream %s + local %s; built 2026-10-10, md5 %s\n' \
         "$PATCH_SHORT" "$LOCAL_PATCH_TAG" "$(md5sum "$bin" | cut -d' ' -f1)" >"$note"
     expect 1 "origin line naming both earlier patches without $MAX_PATCH_TAG"
+
+    # A bench provisioned before the event-loop patch: the three earlier
+    # patches, md5 and mtime honest. It must fail, or the room would keep
+    # running on an emulator that dies under timer-fd churn.
+    printf 'bluez 5.82-1.1 + upstream %s + local %s + local %s; built 2026-10-13, md5 %s\n' \
+        "$PATCH_SHORT" "$LOCAL_PATCH_TAG" "$MAX_PATCH_TAG" \
+        "$(md5sum "$bin" | cut -d' ' -f1)" >"$note"
+    expect 1 "origin line naming the three earlier patches without $FREE_PATCH_TAG"
 
     write_good_note
     expect 0 "patched sidecar describing this binary"

@@ -1,0 +1,9 @@
+[package]
+name = "leviculum-rtc-pcf8563"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lew Palm"]
+license = "AGPL-3.0-or-later"
+description = "PCF8563 real-time clock register codec: BCD time registers, voltage-low and century bits, unix seconds for 2000-2199. Host-testable"
+
+[dependencies]

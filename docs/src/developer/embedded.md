@@ -46,13 +46,13 @@ timer expired  ─► handle_timeout()            ├─► TickOutput { actions
 The three entry points (signatures in the
 [reference](rust-api-spec.md#nodecorer-c-s)):
 
-- `handle_packet(iface, data)` — `leviculum-core/src/node/mod.rs:1036`. Feed one
+- `handle_packet(iface, data)` — `leviculum-core/src/node/mod.rs:1070`. Feed one
   received frame, tagged with the [`InterfaceId`](rust-api-spec.md#core-tickoutput-and-action)
   it arrived on.
-- `handle_timeout()` — `leviculum-core/src/node/mod.rs:2693`. Run periodic
+- `handle_timeout()` — `leviculum-core/src/node/mod.rs:2727`. Run periodic
   maintenance (path expiry, announce rebroadcasts, keepalives, retransmissions).
   Call it at or before `next_deadline`.
-- `next_deadline()` (`leviculum-core/src/node/mod.rs:2723`). The earliest timer
+- `next_deadline()` (`leviculum-core/src/node/mod.rs:2757`). The earliest timer
   deadline in milliseconds, or `None` if no timer is pending. Sleep until this,
   or until a packet arrives, whichever comes first.
 
@@ -66,8 +66,8 @@ The shape is: compute the next deadline, wait for whichever of "a packet on any
 interface" or "the deadline" happens first, call the matching entry point,
 dispatch the resulting actions. This is exactly the `leviculum-nrf` T114 main
 loop: the deadline comes from `next_deadline`
-(`leviculum-nrf/src/bin/t114.rs:772-777`) and the wait from Embassy's `select4`
-(`leviculum-nrf/src/bin/t114.rs:830-853`). The board selects over ten event
+(`leviculum-nrf/src/node_loop.rs:857-862`) and the wait from Embassy's `select4`
+(`leviculum-nrf/src/node_loop.rs:915-938`). The board selects over ten event
 sources; the loop below narrows that to the three interfaces (serial, LoRa,
 BLE) and the timer:
 
@@ -143,7 +143,7 @@ drains the `EventReceiver`.
 triple — RNG, [`Clock`](rust-api-spec.md#platform-traits), and
 [`Storage`](rust-api-spec.md#platform-traits) — in its `build` call. The T114
 firmware builds its node the same way (`NodeCoreBuilder`,
-`leviculum-nrf/src/bin/t114.rs:168-192`):
+`leviculum-nrf/src/node_loop.rs:336-360`):
 
 ```rust
 // Adapted from the T114 builder cited above.
@@ -180,7 +180,7 @@ Three traits decouple the core from your hardware. Their signatures are in the
 
 A monotonic millisecond clock. The whole trait is one required method. The
 nRF52 implementation wraps Embassy's timer
-(`leviculum-nrf/src/clock.rs`):
+(`leviculum-nrf/firmware/src/clock.rs`):
 
 ```rust
 use leviculum_core::traits::Clock;
@@ -248,7 +248,7 @@ Key-value persistence for the path table, link table, announce caches,
 identities, ratchets, and dedup hashes (`leviculum-core/src/traits.rs:610`). It
 is a large trait; you do not write it from scratch:
 
-- `NoStorage` (`leviculum-core/src/traits.rs:1069`) — zero-sized, every lookup
+- `NoStorage` (`leviculum-core/src/traits.rs:1072`) — zero-sized, every lookup
   returns nothing. Use it for a stateless node or a smoke test.
 - `EmbeddedStorage` (`leviculum-core/src/embedded_storage.rs:91`,
   `EmbeddedStorage::new()` at `:344`) — `heapless`-backed, fixed-capacity, the

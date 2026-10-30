@@ -27,30 +27,21 @@ pub type LoRaBusy = peripherals::P0_17;
 /// SX1262 DIO1 interrupt output
 pub type LoRaDio1 = peripherals::P0_20;
 
-/// SX1262 SPI frequency in Hz (Meshtastic uses 4 MHz; RNode uses 16 MHz)
-pub const LORA_SPI_FREQ_HZ: u32 = 4_000_000;
-/// SX1262 TCXO voltage supplied via DIO3 (volts)
-pub const LORA_TCXO_VOLTAGE: f32 = 1.8;
-/// SX1262 max TX power (dBm)
-pub const LORA_MAX_POWER_DBM: i8 = 22;
-// The OCP current limit is not here. It is written as part of the
-// transmit-power sequence, which has to stay in one host-testable piece
-// (`leviculum_core::sx126x::OCP_HIGH_POWER`); this constant was never read by
-// anything and a second copy of the number is a second thing to keep in step.
-/// SX1262 uses DIO2 as internal RF switch (no external RXEN/TXEN pins)
-pub const LORA_DIO2_AS_RF_SWITCH: bool = true;
-/// SX1262 BUSY polling timeout (ms, from RNode firmware)
-pub const LORA_BUSY_TIMEOUT_MS: u32 = 100;
+// The SX1262's other facts live where they are read: the SPI clock in
+// `lora::init`, the TCXO select byte in `CONFIG.lora_tcxo_voltage_reg`
+// (1.8 V), the power ceiling and the OCP limit in the transmit-power
+// sequence (`leviculum_core::sx126x`, +22 dBm), the BUSY timeout in
+// `sx1262.rs`. DIO2 drives the RF switch, there are no RXEN/TXEN pins.
+// A copy of any of them here would be a second number to keep in step.
 
 // Green LED
 /// Green indicator LED (active LOW)
 pub type LedPin = peripherals::P1_03;
 
 // NeoPixel (2x SK6812)
-/// NeoPixel data pin (GRB, 800 kHz WS2812 protocol)
+/// NeoPixel data pin (GRB, 800 kHz WS2812 protocol). Nothing drives the
+/// two LEDs yet.
 pub type NeoPixelPin = peripherals::P0_14;
-/// Number of addressable NeoPixel LEDs
-pub const NEOPIXEL_COUNT: usize = 2;
 
 // UART (NFC pins repurposed as GPIO)
 /// UART RX (header P1, NFC pin repurposed)
@@ -97,6 +88,32 @@ pub type TftReset = peripherals::P0_02;
 pub type TftBacklight = peripherals::P0_15;
 /// TFT power enable
 pub type TftPowerEn = peripherals::P0_03;
+
+/// The display's wiring for [`crate::st7789`], built from the aliases
+/// above, so the binary can only hand over this board's pins.
+#[cfg(feature = "bsp-t114")]
+#[allow(clippy::too_many_arguments)]
+pub fn tft_wiring(
+    spi: Peri<'static, peripherals::SPI3>,
+    sck: Peri<'static, TftSck>,
+    mosi: Peri<'static, TftMosi>,
+    cs: Peri<'static, TftCs>,
+    dc: Peri<'static, TftDc>,
+    rst: Peri<'static, TftReset>,
+    vtft: Peri<'static, TftPowerEn>,
+    leda: Peri<'static, TftBacklight>,
+) -> crate::st7789::TftWiring {
+    crate::st7789::TftWiring {
+        spi,
+        sck: sck.into(),
+        mosi: mosi.into(),
+        cs: cs.into(),
+        dc: dc.into(),
+        rst: rst.into(),
+        vtft: vtft.into(),
+        leda: leda.into(),
+    }
+}
 
 // QSPI Flash: NONE. There are deliberately no pin aliases here, and
 // `CONFIG.qspi_part` is `None`, so `bin/t114.rs` never configures P1.14,
@@ -173,19 +190,36 @@ pub const CONFIG: super::BoardConfig = super::BoardConfig {
     usb_pid: 0x0001,
     usb_manufacturer: "leviculum",
     usb_product: "leviculum T114",
-    log_prefix: "T114",
     identity_flash_page: 0xEC000,
     radio_config_flash_page: 0xEB000,
     telemetry_flash_page: 0xEA000,
     lora_tcxo_voltage_reg: 0x02, // 1.8 V
-    lora_spi_freq_hz: LORA_SPI_FREQ_HZ,
-    lora_max_power_dbm: LORA_MAX_POWER_DBM,
     // No QSPI part on this board. See the block above.
     qspi_part: None,
 };
+
+/// The name each interface reports, indexed by interface id: what
+/// `/status` and `lnstatus` print per interface, what `[TRANSPORT]` lines
+/// and the node's interface table say. The LoRa entry names this board's
+/// radio, an SX1262, which is why the table is the board's and not the
+/// orchestration crate's. The binary hands it to
+/// `leviculum_firmware::iface_bytes::set_names` once at boot.
+pub const IFACE_NAMES: [&str; leviculum_firmware::iface_bytes::IFACE_COUNT] =
+    ["serial_usb", "lora_sx1262", "ble"];
 
 /// Panic-LED descriptor — port, pin, active-low flag — for `set_panic_led`.
 /// LED1 (green) on P1.03, active low.
 pub const PANIC_LED_PORT: u8 = 1;
 pub const PANIC_LED_PIN: u8 = 3;
 pub const PANIC_LED_ACTIVE_LOW: bool = true;
+
+// Module names, for the spawn lines (D7 of order 1085: every board says
+// `<task> task spawned (<module>)` with the module from its board file).
+/// The status panel.
+pub const DISPLAY_MODULE: &str = "ST7789";
+/// The GNSS receiver on UARTE0.
+pub const GNSS_MODULE: &str = "L76K";
+/// The baud the L76K ships at (Quectel factory default), where the
+/// presence machine's sweep starts; the boot line `[GNSS_PRESENCE]
+/// state=detecting` names it (D2 of order 1085).
+pub const GNSS_BAUD: u32 = 9600;

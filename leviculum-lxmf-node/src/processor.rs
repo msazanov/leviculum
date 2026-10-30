@@ -1055,6 +1055,14 @@ impl LxmfHelperProcessor {
                     .map(|v| node_config.transfer_limit_kb = v)
                     .is_ok(),
                 "sync_limit_kb" => value.parse().map(|v| node_config.sync_limit_kb = v).is_ok(),
+                // A board's serve ceiling on a host helper, so a host cell can
+                // drive a board-sized node with a stock client
+                // (`PropagationNodeConfig::serve_limit_bytes`). Ours only:
+                // the reference bounds a fetch by the client's limit alone.
+                "serve_limit_bytes" => value
+                    .parse()
+                    .map(|v| node_config.serve_limit_bytes = Some(v))
+                    .is_ok(),
                 "max_peers" => value.parse().map(|v| peering.max_peers = v).is_ok(),
                 "autopeer" => value.parse().map(|v| peering.autopeer = v).is_ok(),
                 "autopeer_maxdepth" => value.parse().map(|v| peering.autopeer_maxdepth = v).is_ok(),
@@ -1080,7 +1088,10 @@ impl LxmfHelperProcessor {
                 return;
             }
         }
-        let store = match FilePropagationStore::open(&self.config.pn_store_dir, store_limit) {
+        // With its writer, as lnpnd runs it (order 1081).
+        let store = match FilePropagationStore::open(&self.config.pn_store_dir, store_limit)
+            .and_then(FilePropagationStore::write_behind)
+        {
             Ok(store) => store,
             Err(e) => {
                 self.emitter.error(&format!("pn store: {e}"));

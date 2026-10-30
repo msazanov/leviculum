@@ -36,13 +36,10 @@ use tokio::signal::unix::{signal, SignalKind};
 static ALLOC: leviculum_std::heap_accounting::CountingAllocator =
     leviculum_std::heap_accounting::CountingAllocator;
 
-/// `--version`, with `+heapacct` in an instrumented build: the soak node's
-/// journal and `dpkg -l` must not be the only places that tell the two
-/// apart, which is lnsd's rule (`leviculum-cli/build.rs`) too.
-#[cfg(feature = "heap-accounting")]
-const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+heapacct");
-#[cfg(not(feature = "heap-accounting"))]
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// `--version`: the crate version, the build id, `+heapacct` in an
+/// instrumented build and the commit in parentheses, composed by build.rs the
+/// way `leviculum-cli/build.rs` composes lnsd's.
+const VERSION: &str = env!("LEVICULUM_VERSION");
 
 #[derive(Parser, Debug)]
 #[command(
@@ -52,7 +49,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
     long_about = "Runs an LXMF propagation node (a store-and-forward mailbox) \
                   on a running Reticulum shared instance.\n\n\
                   lnpnd attaches to a daemon that is already running (lnsd, or \
-                  Python's rnsd) the way lnmsg and lblogd do; it does not start \
+                  Python's rnsd) the way loquax and lblogd do; it does not start \
                   a Reticulum stack of its own. Clients (Sideband, meshchat, \
                   lxmd-based tools) configure the destination hash this prints \
                   at startup as their propagation node.\n\n\
@@ -217,7 +214,7 @@ struct Args {
     from_static_only: bool,
 }
 
-/// Same derivation `lnmsg`, `lncp` and `lnstatus` use: the instance name
+/// Same derivation `loquax`, `lncp` and `lnstatus` use: the instance name
 /// comes from the daemon's own config file unless overridden.
 fn instance_name(config_dir: &Path) -> String {
     let config_file = config_dir.join("config");
@@ -413,14 +410,14 @@ fn peering_config(effective: &Effective) -> leviculum_lxmf::PeeringConfig {
 
 fn resolve(args: &Args, file: &RawConfig) -> Result<Effective, lnpnd::config::ConfigError> {
     // `enable_node = no` would ask for an lxmd that is only a mailbox;
-    // that job is lnmsg's. Refusing beats silently running the role the
+    // that job is loquax's. Refusing beats silently running the role the
     // config said not to run.
     if file.get_bool("propagation", "enable_node")? == Some(false) {
         return Err(lnpnd::config::ConfigError::BadValue {
             section: "propagation",
             key: "enable_node",
             value: "no (lnpnd is the propagation node; for a mailbox-only \
-                    daemon use lxmd, or lnmsg for a client)"
+                    daemon use lxmd, or loquax for a client)"
                 .to_string(),
         });
     }
@@ -646,6 +643,13 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
         store_free_kb(&store),
         effective.store_limit_kb
     );
+    // From here on the durable writes run on the store's own writer thread,
+    // not in the hooks that hold the core lock (order 1081); the re-pricing
+    // above ran before, inline, while nothing else was waiting.
+    let store = match store.write_behind() {
+        Ok(store) => store,
+        Err(error) => return failure(format!("message store writer: {error}")),
+    };
 
     let auth_allowed = if effective.auth_required {
         let allowed = load_hash_file(&config_dir.join("allowed"));
@@ -705,6 +709,13 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
     // this daemon has no application event channel (Codeberg #419).
     let mut node = match lnpnd::node_builder(engine, data_dir.join("storage"))
         .connect_to_shared_instance(&instance)
+        // The daemon's RPC key is under its config directory, not this
+        // node's identity (1119).
+        .shared_instance_config_dir(
+            args.rnsconfig
+                .clone()
+                .unwrap_or_else(Config::default_config_dir),
+        )
         .build()
         .await
     {

@@ -46,6 +46,7 @@
 //! ("Deliberately not").
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -253,6 +254,33 @@ pub struct Board {
     /// "control only" cannot be arrived at by forgetting something.
     #[serde(default)]
     pub not_flashable: Option<String>,
+    /// How the ESP32 ROM's serial loader is reached on this board: the chip
+    /// and the line speed its USB-UART bridge holds. A hardware fact, so it
+    /// may stand beside `not_flashable` — the ThinkNode M9's entry states it
+    /// before any bundle carries an image for the board (Codeberg #473).
+    #[serde(default)]
+    pub esp: Option<EspRom>,
+}
+
+/// What `[board.<name>.esp]` states, for [`crate::esp`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EspRom {
+    /// `--chip`, one of [`crate::esp::CHIPS`], and the same string as the
+    /// board's `family`.
+    pub chip: String,
+    /// The fastest rate the board's bridge carries without losing bytes,
+    /// one of [`crate::esp::BAUDS`]. 230400 on the M9's CH340K, measured.
+    pub baud: u32,
+}
+
+impl EspRom {
+    pub fn params(&self) -> crate::esp::Params {
+        crate::esp::Params {
+            chip: self.chip.clone(),
+            baud: self.baud,
+        }
+    }
 }
 
 /// What writing an image to one board takes — the remaining three axes and
@@ -743,6 +771,31 @@ fn validate_catalogue(catalogue: &Catalogue, path: &Path) -> Result<(), Error> {
             }
             (None, Some(_)) | (Some(_), None) => {}
         }
+        // The ROM loader's facts. `family` is informational everywhere else,
+        // but here the two would name the chip twice, and a pair that
+        // disagrees has no right answer.
+        if let Some(esp) = &board.esp {
+            if !crate::esp::CHIPS.contains(&esp.chip.as_str()) {
+                return Err(bad(format!(
+                    "board {name}: esp.chip {:?} is not one the ROM-loader transport knows ({})",
+                    esp.chip,
+                    crate::esp::CHIPS.join(", ")
+                )));
+            }
+            if esp.chip != board.family {
+                return Err(bad(format!(
+                    "board {name}: esp.chip {:?} and family {:?} name different chips",
+                    esp.chip, board.family
+                )));
+            }
+            if !crate::esp::BAUDS.contains(&esp.baud) {
+                return Err(bad(format!(
+                    "board {name}: esp.baud {} is not a rate the ROM loader and the flashers \
+                     share",
+                    esp.baud
+                )));
+            }
+        }
         let Some(flashing) = board.flashing() else {
             continue;
         };
@@ -926,6 +979,35 @@ fn exists(
     })
 }
 
+/// The roots [`locate`] walks after `--bundle`, in order. [`locate`] reads
+/// them from the process; a test builds them under a `TempDir`, so the
+/// outcome never depends on what the host has installed. The system root is
+/// deliberately not an environment variable: only this argument moves it,
+/// and the binary never passes one.
+#[derive(Debug, Clone)]
+pub struct BundleRoots {
+    /// `$LNFLASH_BUNDLE`.
+    pub env: Option<OsString>,
+    /// The directory holding the executable.
+    pub beside_binary: Option<PathBuf>,
+    /// [`SYSTEM_BUNDLE`] in production.
+    pub system: PathBuf,
+}
+
+impl BundleRoots {
+    /// The roots of this process: its environment, its executable, and the
+    /// distro path.
+    pub fn from_process() -> Self {
+        BundleRoots {
+            env: std::env::var_os(BUNDLE_ENV),
+            beside_binary: std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(Path::to_path_buf)),
+            system: PathBuf::from(SYSTEM_BUNDLE),
+        }
+    }
+}
+
 /// Find the bundle: `--bundle`, then `$LNFLASH_BUNDLE`, then next to the
 /// executable, then the system path. Returns the directory holding
 /// `manifest.toml`.
@@ -934,20 +1016,23 @@ fn exists(
 /// and as the unpacked tarball root containing `firmware/`, because a user
 /// who points `--bundle` at the directory they just `cd`'d into is right.
 pub fn locate(explicit: Option<&Path>) -> Result<PathBuf, Error> {
+    locate_with(&BundleRoots::from_process(), explicit)
+}
+
+/// [`locate`] over the given roots instead of the process's own.
+pub fn locate_with(roots: &BundleRoots, explicit: Option<&Path>) -> Result<PathBuf, Error> {
     let mut tried = Vec::new();
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(path) = explicit {
         candidates.push(path.to_path_buf());
     }
-    if let Some(from_env) = std::env::var_os(BUNDLE_ENV) {
+    if let Some(from_env) = &roots.env {
         candidates.push(PathBuf::from(from_env));
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            candidates.push(dir.to_path_buf());
-        }
+    if let Some(dir) = &roots.beside_binary {
+        candidates.push(dir.clone());
     }
-    candidates.push(PathBuf::from(SYSTEM_BUNDLE));
+    candidates.push(roots.system.clone());
 
     for candidate in candidates {
         for dir in [candidate.clone(), candidate.join(FIRMWARE_DIR)] {
@@ -958,6 +1043,22 @@ pub fn locate(explicit: Option<&Path>) -> Result<PathBuf, Error> {
         }
     }
     Err(Error::NoBundle(tried))
+}
+
+/// What to tell the operator when `--bundle` named a path that holds no
+/// bundle and the walk went on to a later root: the run must not use some
+/// other bundle silently. `None` when there was no `--bundle` or it was the
+/// one found.
+pub fn passed_over(explicit: Option<&Path>, found: &Path) -> Option<String> {
+    let explicit = explicit?;
+    if found == explicit || found == explicit.join(FIRMWARE_DIR) {
+        return None;
+    }
+    Some(format!(
+        "no bundle at {}; using the one at {}",
+        explicit.display(),
+        found.display()
+    ))
 }
 
 pub fn hex_digest(bytes: &[u8]) -> String {
@@ -1743,28 +1844,185 @@ convert = "hex-to-uf2"
         );
     }
 
+    /// Roots under `base` where nothing exists yet, so a walk reads no path
+    /// the host owns (a host with the lnflash package has a real bundle at
+    /// [`SYSTEM_BUNDLE`]).
+    fn roots_under(base: &Path) -> BundleRoots {
+        BundleRoots {
+            env: Some(base.join("env").into_os_string()),
+            beside_binary: Some(base.join("beside")),
+            system: base.join("system"),
+        }
+    }
+
     #[test]
     fn the_bundle_is_found_both_as_the_manifest_dir_and_as_the_tarball_root() {
+        let roots = roots_under(TempDir::new().unwrap().path());
         let f = Fixture::new();
-        let found = locate(Some(f.dir.path())).unwrap();
+        let found = locate_with(&roots, Some(f.dir.path())).unwrap();
         assert_eq!(found, f.dir.path());
 
         let outer = TempDir::new().unwrap();
         let inner = outer.path().join(FIRMWARE_DIR);
         fs::create_dir(&inner).unwrap();
         fs::write(inner.join(MANIFEST_NAME), "").unwrap();
-        assert_eq!(locate(Some(outer.path())).unwrap(), inner);
+        assert_eq!(locate_with(&roots, Some(outer.path())).unwrap(), inner);
     }
 
     #[test]
     fn a_bundle_that_is_nowhere_names_everywhere_it_looked() {
-        let missing = TempDir::new().unwrap().path().join("gone");
-        match locate(Some(&missing)) {
+        let base = TempDir::new().unwrap();
+        let roots = roots_under(base.path());
+        let missing = base.path().join("gone");
+        match locate_with(&roots, Some(&missing)) {
             Err(Error::NoBundle(tried)) => {
-                assert!(tried.iter().any(|t| t.contains("gone")));
-                assert!(tried.iter().any(|t| t.contains(SYSTEM_BUNDLE)));
+                let spelled = |p: PathBuf| p.display().to_string();
+                let mut expected = Vec::new();
+                for root in ["gone", "env", "beside", "system"] {
+                    let dir = base.path().join(root);
+                    expected.push(spelled(dir.clone()));
+                    expected.push(spelled(dir.join(FIRMWARE_DIR)));
+                }
+                assert_eq!(tried, expected);
             }
             other => panic!("expected NoBundle, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_refusal_main_prints_says_no_bundle_and_names_every_root() {
+        // main prints this Display behind "lnflash: ". The CLI test cannot
+        // hold the binary to it on a host with the lnflash package
+        // installed, because there the walk finds /usr/share/lnflash.
+        let base = TempDir::new().unwrap();
+        let roots = roots_under(base.path());
+        let missing = base.path().join("gone");
+        let err = locate_with(&roots, Some(&missing)).unwrap_err().to_string();
+        assert!(err.starts_with("no bundle found; looked in "), "{err}");
+        for root in ["gone", "env", "beside", "system"] {
+            let dir = base.path().join(root);
+            assert!(err.contains(&dir.display().to_string()), "{err}");
+            assert!(
+                err.contains(&dir.join(FIRMWARE_DIR).display().to_string()),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_process_roots_end_at_the_distro_path() {
+        // The only fact the TempDir roots above cannot carry: production
+        // walks to /usr/share/lnflash. Building the roots reads no file.
+        assert_eq!(
+            BundleRoots::from_process().system,
+            PathBuf::from(SYSTEM_BUNDLE)
+        );
+        assert_eq!(SYSTEM_BUNDLE, "/usr/share/lnflash");
+    }
+
+    #[test]
+    fn an_explicit_bundle_that_was_passed_over_is_named() {
+        let base = TempDir::new().unwrap();
+        let roots = roots_under(base.path());
+        fs::create_dir(&roots.system).unwrap();
+        fs::write(roots.system.join(MANIFEST_NAME), "").unwrap();
+        let missing = base.path().join("gone");
+        let found = locate_with(&roots, Some(&missing)).unwrap();
+        let note = passed_over(Some(&missing), &found).unwrap();
+        assert!(note.contains(&missing.display().to_string()), "{note}");
+        assert!(note.contains(&roots.system.display().to_string()), "{note}");
+
+        // Found where it was pointed, as the manifest dir or the tarball
+        // root, or not pointed at all: nothing to say.
+        assert_eq!(passed_over(Some(&roots.system), &found), None);
+        assert_eq!(
+            passed_over(Some(base.path()), &base.path().join(FIRMWARE_DIR)),
+            None
+        );
+        assert_eq!(passed_over(None, &found), None);
+    }
+
+    #[test]
+    fn the_walk_reaches_the_system_root_last() {
+        // The positive control for the test above: the same roots with a
+        // bundle planted only under the system one. A host with the lnflash
+        // package installed is this case at /usr/share/lnflash.
+        let base = TempDir::new().unwrap();
+        let roots = roots_under(base.path());
+        fs::create_dir(&roots.system).unwrap();
+        fs::write(roots.system.join(MANIFEST_NAME), "").unwrap();
+        let missing = base.path().join("gone");
+        assert_eq!(locate_with(&roots, Some(&missing)).unwrap(), roots.system);
+
+        // And every earlier root still wins over it.
+        let beside = roots.beside_binary.clone().unwrap();
+        fs::create_dir(&beside).unwrap();
+        fs::write(beside.join(MANIFEST_NAME), "").unwrap();
+        assert_eq!(locate_with(&roots, Some(&missing)).unwrap(), beside);
+    }
+
+    // -----------------------------------------------------------------
+    // The ESP32 ROM loader's facts (Codeberg #473)
+    // -----------------------------------------------------------------
+
+    /// The compiled-in catalogue plus one control-only ESP32-S3 board shaped
+    /// like the ThinkNode M9's future entry, with `esp_lines` as its
+    /// `[board.m9.esp]` body.
+    fn with_esp_board(family: &str, esp_lines: &str) -> Result<Catalogue, Error> {
+        let block = format!(
+            "[board.m9]\nfamily = \"{family}\"\ncandidate_usb = [\"1a86:7522\"]\n\
+             not_flashable = \"no bundle carries an image for it yet\"\n\n\
+             [board.m9.esp]\n{esp_lines}\n\n[board.t114]\nfamily    = \"nrf52840\""
+        );
+        Catalogue::builtin_with("[board.t114]\nfamily    = \"nrf52840\"", &block)
+    }
+
+    #[test]
+    fn an_esp_board_states_its_rom_loader_beside_not_flashable() {
+        let catalogue = with_esp_board("esp32s3", "chip = \"esp32s3\"\nbaud = 230400").unwrap();
+        let board = catalogue.board("m9").unwrap();
+        assert!(board.flashing().is_none(), "still control-only");
+        let params = board.esp.as_ref().unwrap().params();
+        assert_eq!(
+            params,
+            crate::esp::Params {
+                chip: "esp32s3".into(),
+                baud: 230_400
+            }
+        );
+        // And no board that states nothing gains an esp section.
+        assert!(catalogue.board("t114").unwrap().esp.is_none());
+    }
+
+    #[test]
+    fn an_esp_section_that_contradicts_the_family_will_not_load() {
+        match with_esp_board("esp32s3", "chip = \"esp32c3\"\nbaud = 230400") {
+            Err(Error::Invalid { message, .. }) => {
+                assert!(message.contains("name different chips"), "{message}")
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_esp_rate_the_loader_does_not_share_or_an_unknown_chip_will_not_load() {
+        match with_esp_board("esp32s3", "chip = \"esp32s3\"\nbaud = 250000") {
+            Err(Error::Invalid { message, .. }) => assert!(message.contains("250000"), "{message}"),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+        match with_esp_board("esp8266", "chip = \"esp8266\"\nbaud = 115200") {
+            Err(Error::Invalid { message, .. }) => {
+                assert!(message.contains("ROM-loader transport knows"), "{message}")
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+        // A misspelt key is a parse error, not a silently default rate.
+        assert!(matches!(
+            with_esp_board(
+                "esp32s3",
+                "chip = \"esp32s3\"\nbaud = 230400\nbuad = 921600"
+            ),
+            Err(Error::Toml { .. })
+        ));
     }
 }

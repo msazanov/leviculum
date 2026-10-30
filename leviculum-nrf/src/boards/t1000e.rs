@@ -97,11 +97,9 @@ pub type LoRaBusy = peripherals::P0_07;
 /// "DIO1" again in RadioLib's idiom; the LR1110 raises interrupts on DIO9.
 pub type LoRaIrq = peripherals::P1_01;
 
-/// LR1110 SPI frequency in Hz (4 MHz, as on every board here; the LR1110
-/// takes up to 16 MHz).
-pub const LORA_SPI_FREQ_HZ: u32 = 4_000_000;
-/// The top of the PA table below, +22 dBm on the HP PA.
-pub const LORA_MAX_POWER_DBM: i8 = 22;
+// The SPI clock is `lora::init`'s, 4 MHz as on every board here (the
+// LR1110 takes up to 16 MHz). The power ceiling is the top of the PA
+// table below, +22 dBm on the HP PA.
 
 /// The LR1110's transceiver facts, as `leviculum_lr11xx` takes them.
 /// Foreign-firmware hints, every field: see the module doc for the source
@@ -344,7 +342,6 @@ pub const CONFIG: super::BoardConfig = super::BoardConfig {
     usb_pid: 0x0004,
     usb_manufacturer: "leviculum",
     usb_product: "leviculum T1000-E",
-    log_prefix: "T1000",
     identity_flash_page: 0xEC000,
     radio_config_flash_page: 0xEB000,
     telemetry_flash_page: 0xEA000,
@@ -355,11 +352,18 @@ pub const CONFIG: super::BoardConfig = super::BoardConfig {
     // (datasheet §13.3.6, Table 13-35), so even a misreading would ask for
     // the right voltage.
     lora_tcxo_voltage_reg: 0x00,
-    lora_spi_freq_hz: LORA_SPI_FREQ_HZ,
-    lora_max_power_dbm: LORA_MAX_POWER_DBM,
     // No external flash on this board: the variant names none.
     qspi_part: None,
 };
+
+/// The name each interface reports, indexed by interface id: what
+/// `/status` and `lnstatus` print per interface, what `[TRANSPORT]` lines
+/// and the node's interface table say. The LoRa entry names this board's
+/// radio, an LR1110, which is why the table is the board's and not the
+/// orchestration crate's. The binary hands it to
+/// `leviculum_firmware::iface_bytes::set_names` once at boot.
+pub const IFACE_NAMES: [&str; leviculum_firmware::iface_bytes::IFACE_COUNT] =
+    ["serial_usb", "lora_lr1110", "ble"];
 
 /// Panic-LED descriptor — port, pin, active-low flag — for `set_panic_led`.
 /// The one LED on P0.24, **active high**.

@@ -1,0 +1,587 @@
+//! The engine's shell: the driver it runs inside, the channels to the
+//! frontend, the mining thread and its runtime.
+//!
+//! [`Engine`] is the core and holds its own queues; what this module adds is
+//! everything that needs a process: a [`CoreProcessor`] for the driver's
+//! `StdNodeCore` that moves those queues onto `mpsc` channels around every
+//! hook, the [`InProcessOutbox`] the frontend holds, [`attach`], and the
+//! stamp worker thread that runs [`super::mine`] on a current-thread tokio
+//! runtime with `OsRng`.
+
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+
+use std::sync::Arc;
+
+use leviculum_core::identity::Identity;
+use leviculum_core::node::NodeEvent;
+use leviculum_core::transport::TickOutput;
+use leviculum_core::{DestinationHash, LinkId, RequestPolicy};
+use leviculum_std::driver::{CoreProcessor, ReticulumNodeBuilder, StdNodeCore};
+use leviculum_std::ReticulumNode;
+use tokio::sync::mpsc::UnboundedSender;
+
+use super::{Engine, StampAnswer, StampJob};
+use crate::clock;
+use crate::effects::{Effects, Terminal};
+use crate::outbox::{Command, Outbox, OutboxEvent, OutboxGone};
+
+/// The engine as the driver sees it, with the frontend's and the miner's
+/// ends of its queues.
+struct Processor {
+    engine: Engine,
+    commands: Receiver<Command>,
+    events: Sender<OutboxEvent>,
+    stamps: Sender<StampJob>,
+    stamp_answers: Receiver<StampAnswer>,
+    /// On a home node: its home destination, and where requests to it go.
+    home: Option<(DestinationHash, UnboundedSender<HomeRequest>)>,
+}
+
+/// One request a client sent the home destination, with the identity the
+/// link was identified with when it was. Taken off the processor tap, which
+/// never drops an event, and answered by the home node's loop
+/// (`crate::home::daemon`), off the core lock.
+#[derive(Debug, Clone)]
+pub struct HomeRequest {
+    pub link_id: LinkId,
+    pub request_id: [u8; 16],
+    pub path: String,
+    pub data: Vec<u8>,
+    pub remote: Option<[u8; 16]>,
+}
+
+/// What the attached engine is.
+pub enum Role {
+    /// The messenger: our identity's delivery destination, the router.
+    Messenger,
+    /// A client of the home node whose LXMF address this is
+    /// ([`Engine::client`]): no delivery destination at all.
+    Client { address: [u8; 16] },
+    /// The home node: the messenger's engine, handing every received message
+    /// out packed for the archive, plus the home destination `loquax.home`
+    /// with its five request handlers, whose requests go to `requests`.
+    Home {
+        requests: UnboundedSender<HomeRequest>,
+    },
+}
+
+impl Processor {
+    /// A request to the home destination goes to the home node's loop. The
+    /// remote identity is read here, under the lock the event came with.
+    fn forward_home_request(&self, core: &StdNodeCore, event: &NodeEvent) {
+        let Some((home, requests)) = &self.home else {
+            return;
+        };
+        let NodeEvent::RequestReceived {
+            link_id,
+            destination_hash,
+            request_id,
+            path,
+            data,
+            ..
+        } = event
+        else {
+            return;
+        };
+        if destination_hash != home {
+            return;
+        }
+        let remote = core
+            .get_remote_identity(link_id)
+            .map(|identity| *identity.hash());
+        let _ = requests.send(HomeRequest {
+            link_id: *link_id,
+            request_id: *request_id,
+            path: path.clone(),
+            data: data.clone(),
+            remote,
+        });
+    }
+}
+
+impl Processor {
+    /// Move what the frontend and the miner sent into the engine's queues.
+    /// Neither blocks; a gone sender has simply nothing more to send.
+    fn take_inputs(&mut self) {
+        // An error is either empty or disconnected, and a disconnected
+        // frontend means the node is being torn down: both end the drain.
+        while let Ok(command) = self.commands.try_recv() {
+            self.engine.submit(command);
+        }
+        while let Ok(answer) = self.stamp_answers.try_recv() {
+            self.engine.stamp_answered(answer);
+        }
+    }
+
+    /// Hand on what the hook produced.
+    fn flush(&mut self) {
+        while let Some(event) = self.engine.next_event() {
+            // A dropped receiver means the frontend has already finished;
+            // the engine keeps running until the node stops, and has nothing
+            // to say about it.
+            let _ = self.events.send(event);
+        }
+        while let Some(job) = self.engine.next_stamp_job() {
+            if let Err(std::sync::mpsc::SendError(job)) = self.stamps.send(job) {
+                self.engine.stamp_undelivered(&job);
+            }
+        }
+    }
+}
+
+impl CoreProcessor for Processor {
+    fn on_event(&mut self, core: &mut StdNodeCore, event: &NodeEvent) -> TickOutput {
+        self.forward_home_request(core, event);
+        let out = self.engine.on_event(core, event);
+        self.flush();
+        out
+    }
+
+    fn on_tick(&mut self, core: &mut StdNodeCore, now_ms: u64) -> TickOutput {
+        self.take_inputs();
+        let out = self.engine.on_tick(core, now_ms);
+        self.flush();
+        out
+    }
+}
+
+/// The frontend's end of the in-process engine.
+pub struct InProcessOutbox {
+    commands: Sender<Command>,
+    events: Receiver<OutboxEvent>,
+}
+
+impl InProcessOutbox {
+    /// Cut this end off the engine, as the engine's death does: every call
+    /// after this answers [`OutboxGone`]. For the tests of what a frontend
+    /// does then, which cannot otherwise kill an engine on purpose.
+    #[doc(hidden)]
+    pub fn sever(&mut self) {
+        self.commands = std::sync::mpsc::channel().0;
+        self.events = std::sync::mpsc::channel().1;
+    }
+}
+
+impl Outbox for InProcessOutbox {
+    fn submit(&self, command: Command) -> Result<(), OutboxGone> {
+        self.commands.send(command).map_err(|_| OutboxGone)
+    }
+
+    fn try_next_event(&mut self) -> Result<Option<OutboxEvent>, OutboxGone> {
+        match self.events.try_recv() {
+            Ok(event) => Ok(Some(event)),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => Err(OutboxGone),
+        }
+    }
+}
+
+/// What attaching to a shared instance needs to know. `N` is where the stamp
+/// worker's progress lines go: the CLI's [`Terminal`] writes them to stderr,
+/// a full-screen frontend has to catch them before they land on its screen.
+pub struct AttachConfig<N = Terminal> {
+    /// The shared instance to join, i.e. which daemon.
+    pub instance: String,
+    /// That daemon's Reticulum config directory, whose key the node asks the
+    /// daemon's RPC with
+    /// ([`ReticulumNodeBuilder::shared_instance_config_dir`]): this node's
+    /// own identity is not the daemon's key (1119). `None` is the platform
+    /// default.
+    pub config_dir: Option<PathBuf>,
+    /// Where this client keeps its node state (learned identities, paths).
+    ///
+    /// Deliberately not the daemon's storage directory: `lncp` and `lnstatus`
+    /// share that safely because a client with `enable_transport(false)`
+    /// writes no paths, announces or packet hashes — this one registers a
+    /// destination and learns identities, so it gets its own. The caller
+    /// creates it: a directory is the shell's, and `main` names the path in
+    /// the error when it cannot.
+    pub storage_dir: PathBuf,
+    /// The persistent identity whose delivery destination is our address.
+    pub identity: Identity,
+    /// The name recipients see as the sender: it goes out in the delivery
+    /// announce `Engine::announce` sends, and a reference client shows it
+    /// next to every message from us. Resolved by
+    /// [`crate::display_name::from_process`], which never yields an empty one.
+    pub display_name: Vec<u8>,
+    /// Where the stamp worker's progress lines go.
+    pub notices: N,
+}
+
+/// What attaching a leaf needs to know: [`AttachConfig`] without the
+/// shared instance, and with the one node the leaf talks to instead.
+pub struct LeafConfig<N = Terminal> {
+    /// The home node's TCP server, `host:port`: an lnsd `TCPServerInterface`
+    /// or an rnsd one. A name is looked up again on every reconnect.
+    pub server: String,
+    /// Where this leaf keeps its node state: as [`AttachConfig::storage_dir`],
+    /// and here also the node's transport identity, since no daemon holds one.
+    pub storage_dir: PathBuf,
+    /// The identity the engine runs on.
+    pub identity: Identity,
+    /// The name recipients see, as [`AttachConfig::display_name`].
+    pub display_name: Vec<u8>,
+    /// Where the stamp worker's progress lines go.
+    pub notices: N,
+}
+
+/// `host:port` as the leaf dials it: the host as written (a name, an IPv4
+/// address, or an IPv6 one in brackets, which come off) and the port. The
+/// error says what is wrong in words a user typed the address in.
+pub fn parse_server(text: &str) -> Result<(String, u16), String> {
+    let text = text.trim();
+    let Some((host, port)) = text.rsplit_once(':') else {
+        return Err(format!(
+            "'{text}' has no port: write the home node's address as host:port, e.g. \
+             192.168.1.20:4242"
+        ));
+    };
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if host.is_empty() {
+        return Err(format!("'{text}' has no host before the port"));
+    }
+    if host.contains(':') && !text.starts_with('[') {
+        return Err(format!(
+            "'{text}': an IPv6 address goes in brackets, as [{host}]:port"
+        ));
+    }
+    match port.parse::<u16>() {
+        Ok(port) if port > 0 => Ok((host.to_string(), port)),
+        _ => Err(format!("'{port}' is not a port: a number from 1 to 65535")),
+    }
+}
+
+/// Where the attached node's traffic goes.
+enum Upstream {
+    /// A running daemon's shared instance, by name, and its config directory.
+    Shared {
+        instance: String,
+        config_dir: Option<PathBuf>,
+    },
+    /// One TCP client interface to this host and port, the node's only one.
+    Tcp { host: String, port: u16 },
+}
+
+/// Why attaching failed.
+#[derive(Debug)]
+pub enum AttachError {
+    /// No daemon answered. The message names the instance, because the usual
+    /// cause is the right daemon running under a different name.
+    ///
+    /// Both the build and the start of a shared-instance client fail this way,
+    /// and they are one error to a user: the IPC socket is the only thing
+    /// either step reaches for. Which of the two noticed is in `detail`.
+    NoDaemon { instance: String, detail: String },
+    /// A leaf's own node did not come up. `server` is what it was to dial.
+    NoServer { server: String, detail: String },
+}
+
+impl core::fmt::Display for AttachError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NoDaemon { instance, detail } => write!(
+                f,
+                "could not join the Reticulum shared instance named '{instance}'.\n  \
+                 Loquax talks to a daemon that is already running; it does not start a \
+                 Reticulum stack of its own.\n  \
+                 Start one with `lnsd` (or Python's `rnsd`), or name another instance \
+                 with --instance / --config.\n  \
+                 The stack said: {detail}"
+            ),
+            Self::NoServer { server, detail } => write!(
+                f,
+                "could not start a node that talks to the home node at {server}.\n  \
+                 The stack said: {detail}"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for AttachError {}
+
+/// A running client node and the outbox that talks to its engine.
+pub struct Attached {
+    node: Arc<ReticulumNode>,
+    /// The frontend's end of the seam.
+    pub outbox: InProcessOutbox,
+}
+
+impl Attached {
+    /// The node, for what talks to the network beside the engine: the home
+    /// node's answers and a client's pulls (`crate::home`).
+    pub fn node(&self) -> Arc<ReticulumNode> {
+        Arc::clone(&self.node)
+    }
+
+    /// Stop the node. Best effort: the send outcome is already decided by the
+    /// time anything calls this. A task still holding the node (a pull cut
+    /// off at exit) leaves it to be torn down with the process.
+    pub async fn stop(self) {
+        if let Ok(mut node) = Arc::try_unwrap(self.node) {
+            let _ = node.stop().await;
+        }
+    }
+}
+
+/// Attach to a running shared instance with an LXMF engine installed.
+pub async fn attach<N: Effects + Send + 'static>(
+    config: AttachConfig<N>,
+) -> Result<Attached, AttachError> {
+    attach_as(config, Role::Messenger).await
+}
+
+/// [`attach`] in a given [`Role`].
+pub async fn attach_as<N: Effects + Send + 'static>(
+    config: AttachConfig<N>,
+    role: Role,
+) -> Result<Attached, AttachError> {
+    let AttachConfig {
+        instance,
+        config_dir,
+        storage_dir,
+        identity,
+        display_name,
+        notices,
+    } = config;
+    let joined = Joined {
+        storage_dir,
+        identity,
+        display_name,
+        notices,
+    };
+    attach_through(
+        joined,
+        role,
+        Upstream::Shared {
+            instance,
+            config_dir,
+        },
+    )
+    .await
+}
+
+/// Attach as a leaf: an in-process node with transport off and one TCP
+/// client interface to `config.server`, no daemon and no shared instance.
+/// The phone's way to its home node (`docs/drafts/loquax-android-2026-10.md`,
+/// option A). The node is up once this returns; the TCP connection comes up
+/// on its own and reconnects when it drops, so an unreachable server is no
+/// error here but a home node request that finds no path.
+pub async fn attach_leaf<N: Effects + Send + 'static>(
+    config: LeafConfig<N>,
+    role: Role,
+) -> Result<Attached, AttachError> {
+    let LeafConfig {
+        server,
+        storage_dir,
+        identity,
+        display_name,
+        notices,
+    } = config;
+    let (host, port) =
+        parse_server(&server).map_err(|detail| AttachError::NoServer { server, detail })?;
+    let joined = Joined {
+        storage_dir,
+        identity,
+        display_name,
+        notices,
+    };
+    attach_through(joined, role, Upstream::Tcp { host, port }).await
+}
+
+/// What both attaches hand the engine and the node.
+struct Joined<N> {
+    storage_dir: PathBuf,
+    identity: Identity,
+    display_name: Vec<u8>,
+    notices: N,
+}
+
+async fn attach_through<N: Effects + Send + 'static>(
+    config: Joined<N>,
+    role: Role,
+    upstream: Upstream,
+) -> Result<Attached, AttachError> {
+    let fail = |detail: String| match &upstream {
+        Upstream::Shared { instance, .. } => AttachError::NoDaemon {
+            instance: instance.clone(),
+            detail,
+        },
+        Upstream::Tcp { host, port } => AttachError::NoServer {
+            server: format!("{host}:{port}"),
+            detail,
+        },
+    };
+    // The home destination is the identity's too, so it is minted before
+    // the engine takes the identity.
+    let home = match &role {
+        Role::Home { requests } => {
+            let copy = config
+                .identity
+                .private_key_bytes()
+                .ok()
+                .and_then(|bytes| Identity::from_private_key_bytes(&bytes).ok())
+                .ok_or_else(|| fail("the home identity has no private key".to_string()))?;
+            let mut destination = crate::home::destination(copy).map_err(fail)?;
+            destination.set_accepts_links(true);
+            Some((destination, requests.clone()))
+        }
+        _ => None,
+    };
+    let (commands_tx, commands_rx) = std::sync::mpsc::channel::<Command>();
+    let (events_tx, events_rx) = std::sync::mpsc::channel::<OutboxEvent>();
+    let (stamps_tx, stamps_rx) = std::sync::mpsc::channel::<StampJob>();
+    let (answers_tx, answers_rx) = std::sync::mpsc::channel::<StampAnswer>();
+
+    // Proof-of-work, off the core lock and off the runtime's workers: mining
+    // is pure CPU that can run for minutes at a cost the *peer* chooses. Its
+    // own thread with its own current-thread runtime, exactly as
+    // `leviculum-lxmf-node` does it (`leviculum-lxmf-node/src/main.rs:224-255`),
+    // because the generator is async. Dormant unless a peer advertises a stamp
+    // cost, which most do not.
+    let notices = config.notices;
+    std::thread::spawn(move || run_stamp_worker(&stamps_rx, &answers_tx, notices));
+
+    let engine = match role {
+        Role::Messenger => Engine::new(config.identity, config.display_name),
+        Role::Client { address } => Engine::client(address),
+        Role::Home { .. } => Engine::new(config.identity, config.display_name).handing_out_packed(),
+    };
+    let processor = Processor {
+        engine,
+        commands: commands_rx,
+        events: events_tx,
+        stamps: stamps_tx,
+        stamp_answers: answers_rx,
+        home: home
+            .as_ref()
+            .map(|(destination, requests)| (*destination.hash(), requests.clone())),
+    };
+
+    let builder = ReticulumNodeBuilder::new().enable_transport(false);
+    let builder = match &upstream {
+        Upstream::Shared {
+            instance,
+            config_dir,
+        } => {
+            let builder = builder.connect_to_shared_instance(instance);
+            match config_dir {
+                Some(dir) => builder.shared_instance_config_dir(dir.clone()),
+                None => builder,
+            }
+        }
+        // The interface as a config section, not `add_tcp_client`: that
+        // takes a socket address, and a home node behind a dynamic DNS name
+        // has to be looked up again on each reconnect, which the TCP
+        // client does for a name in `target_host`. Nothing else in the
+        // config: no shared instance to serve, no discovery, no other
+        // interface. A leaf is never a transport node.
+        Upstream::Tcp { host, port } => {
+            let mut config = leviculum_std::Config::default();
+            config.interfaces.insert(
+                "Home Node".to_string(),
+                leviculum_std::config::InterfaceConfig {
+                    name: "Home Node".to_string(),
+                    interface_type: "TCPClientInterface".to_string(),
+                    target_host: Some(host.clone()),
+                    target_port: Some(*port),
+                    ..Default::default()
+                },
+            );
+            builder
+                .config(config)
+                .share_instance(false)
+                .discover_interfaces(false)
+        }
+    };
+    let mut node = builder
+        .storage_path(config.storage_dir)
+        .core_processor(processor)
+        // The engine consumes events on the processor tap; nothing here ever
+        // takes the driver's application receiver, so enabling it would only
+        // fill a queue with no reader (Codeberg #419).
+        .without_events()
+        .build()
+        .await
+        .map_err(|e| fail(e.to_string()))?;
+    node.start().await.map_err(|e| fail(e.to_string()))?;
+
+    // Registered after the start, as a page server registers its own
+    // (`lblogd/src/node.rs`): the handlers admit every link, and the home
+    // node's loop checks the identity on each request itself.
+    if let Some((destination, _)) = home {
+        let hash = *destination.hash();
+        node.register_destination(destination);
+        for path in [
+            crate::home::JOIN_PATH,
+            crate::home::SYNC_PATH,
+            crate::home::SEND_PATH,
+            crate::home::MARK_PATH,
+            crate::home::PETNAME_PATH,
+            crate::home::WATCH_PATH,
+        ] {
+            node.register_request_handler(hash, path, RequestPolicy::AllowAll);
+        }
+    }
+
+    Ok(Attached {
+        node: Arc::new(node),
+        outbox: InProcessOutbox {
+            commands: commands_tx,
+            events: events_rx,
+        },
+    })
+}
+
+/// The terminal's miner: one job at a time, each on tokio's clock with a
+/// fresh `OsRng` draw source.
+fn run_stamp_worker(
+    jobs: &Receiver<StampJob>,
+    answers: &Sender<StampAnswer>,
+    mut notices: impl Effects,
+) {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(_) => return,
+    };
+    let clock = clock::Tokio::new();
+    while let Ok(job) = jobs.recv() {
+        let answer = runtime.block_on(super::mine(job, rand_core::OsRng, &clock, &mut notices));
+        if answers.send(answer).is_err() {
+            return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_server_is_host_and_port() {
+        let ok = |text: &str, host: &str, port: u16| {
+            assert_eq!(parse_server(text), Ok((host.to_string(), port)), "{text}");
+        };
+        ok("192.168.1.20:4242", "192.168.1.20", 4242);
+        ok(" home.example.org:4965 ", "home.example.org", 4965);
+        ok("[fd00::1]:4242", "fd00::1", 4242);
+        let refused = |text: &str, words: &str| {
+            let error = parse_server(text).expect_err(text);
+            assert!(error.contains(words), "{text}: {error}");
+        };
+        refused("192.168.1.20", "has no port");
+        refused(":4242", "has no host");
+        refused("fd00::1:4242", "in brackets");
+        refused("home:0", "not a port");
+        refused("home:65536", "not a port");
+        refused("home:http", "not a port");
+    }
+}

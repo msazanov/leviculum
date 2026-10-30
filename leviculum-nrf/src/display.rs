@@ -1,8 +1,10 @@
 //! 1.3" OLED status display on the WisMesh Pocket V2 (RAK19026 VC baseboard).
 //!
 //! Builds an I²C bus on TWISPI0 with SDA on P0.13 / SCL on P0.14, runtime-
-//! probes for an OLED at 0x3C (and 0x3D as fallback), and drives an SSD1306
-//! status screen at ~1 Hz.
+//! probes for an OLED at 0x3C (and 0x3D as fallback), and hands an SSD1306
+//! to `leviculum_firmware::display` (#469 980), which composes the status
+//! page at ~1 Hz and owns the panel's power; this file is the bus, the
+//! probe and the panel's `Panel` seam.
 //!
 //! Chip-detection follows Meshtastic's `src/detect/ScanI2CTwoWire.cpp:52-87`
 //! exactly: send register address `0x00`, read one byte, mask the lower
@@ -12,18 +14,14 @@
 //! 0.9's TWIM. SH1106 hardware is uncommon on RAK19026 VC and adding it
 //! is a follow-up.
 
-extern crate alloc;
-
-use core::sync::atomic::Ordering;
-
+use display_interface::DisplayError;
 use embassy_executor::Spawner;
-use embassy_futures::select::{select, Either};
 use embassy_nrf::peripherals;
 use embassy_nrf::twim::{self, Twim};
 use embassy_nrf::{bind_interrupts, Peri};
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{Duration, Timer};
 
-use leviculum_screen::{ident_short, BatteryStatus, FrameKey, GnssStatus, StatusModel};
+use ssd1306::mode::BufferedGraphicsMode;
 use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
 use static_cell::StaticCell;
 
@@ -140,7 +138,7 @@ pub async fn display_task(
         format_args!("OLED probe: {:?} at 0x{:02X}", detected.kind, detected.addr),
     );
 
-    let mut display = match detected.kind {
+    let display = match detected.kind {
         DetectedKind::Ssd1306 => {
             let interface = I2CDisplayInterface::new_custom_address(twim, detected.addr);
             let mut d = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
@@ -168,174 +166,47 @@ pub async fn display_task(
         }
     };
 
-    let id_short = ident_short(&identity_hash);
+    leviculum_firmware::display::run(
+        Ssd1306Panel(display),
+        leviculum_firmware::clock::EmbassyClock,
+        "leviculum RAK4631",
+        &identity_hash,
+        crate::panel_facts::status_facts,
+    )
+    .await
+}
 
-    // Receivers for shared baseboard state — held outside the loop so the
-    // last value survives between producer updates.
-    #[cfg(feature = "gnss")]
-    let mut gnss_rx = crate::baseboard::GNSS_FIX
-        .receiver()
-        .expect("gnss watch capacity");
-    // Presence consumer (#240). A `None` receiver means the capacity
-    // accounting in baseboard.rs is wrong — surface it, render as
-    // "init" forever rather than panicking the display task.
-    #[cfg(feature = "gnss")]
-    let mut presence_rx = {
-        let rx = crate::baseboard::GNSS_PRESENCE.receiver();
-        if rx.is_none() {
-            crate::log::log_fmt(
-                "[DISP] ",
-                format_args!("GNSS_PRESENCE watch capacity exhausted"),
-            );
-        }
-        rx
-    };
-    #[cfg(feature = "battery")]
-    let mut bat_rx = crate::baseboard::BATTERY_STATE
-        .receiver()
-        .expect("battery watch capacity");
+/// The SSD1306 in buffered-graphics mode, on the I2C bus the probe found
+/// it on: its buffer is the frame, its flush sends what changed.
+type Ssd1306Display = Ssd1306<
+    I2CInterface<Twim<'static>>,
+    DisplaySize128x64,
+    BufferedGraphicsMode<DisplaySize128x64>,
+>;
 
-    // Display power state. The panel boots lit and goes dark on its own
-    // `DISPLAY_WAKE_MS` after boot or after the last press; any press,
-    // raised by `crate::button` on `DISPLAY_WAKE`, lights it again
-    // (`leviculum_screen::power::DisplayWake`).
-    let mut wake = leviculum_screen::power::DisplayWake::new(Instant::now().as_millis());
-    let mut display_on = true;
-    // A press the dark-display wait below took off the signal, handed to
-    // the next iteration.
-    let mut pressed = false;
+/// The Pocket V2's panel behind `leviculum_firmware::seams::Panel`, with
+/// power control (`set_display_on`).
+struct Ssd1306Panel(Ssd1306Display);
 
-    // Frame key (see `leviculum_screen::FrameKey`) — when nothing
-    // relevant has changed since last render, we skip the I²C flush
-    // entirely.
-    let mut last_key: Option<FrameKey> = None;
-    let mut tick: u32 = 0;
+impl leviculum_firmware::seams::Panel for Ssd1306Panel {
+    type Target = Ssd1306Display;
+    type Error = DisplayError;
+    const WIDTH: u32 = 128;
 
-    loop {
-        tick = tick.wrapping_add(1);
-        let heartbeat = (tick / 5) & 1 != 0; // toggles every 5 seconds
+    fn frame(&mut self) -> &mut Ssd1306Display {
+        &mut self.0
+    }
 
-        // A press restarts the minute and lights a dark display; without
-        // one, a lit display goes dark once the minute is up. An unchanged
-        // request is not sent and a failed one keeps the old state:
-        // `leviculum_screen::power::apply_power`.
-        pressed |= crate::baseboard::DISPLAY_WAKE.try_take().is_some();
-        let now_ms = Instant::now().as_millis();
-        let request = if core::mem::take(&mut pressed) {
-            wake.press(now_ms, display_on)
-        } else {
-            wake.timeout(now_ms, display_on)
-        };
-        if let Some(req) = request {
-            match leviculum_screen::power::apply_power(req, &mut display_on, |on| {
-                display.set_display_on(on)
-            }) {
-                None => {}
-                Some(Err(e)) => crate::log::log_fmt(
-                    "[DISP] ",
-                    format_args!("set_display_on({}) failed: {:?}", req, e),
-                ),
-                Some(Ok(())) => crate::log::log_fmt(
-                    "[DISP] ",
-                    format_args!("display power → {}", if req { "on" } else { "off" }),
-                ),
-            }
-        }
+    fn flush(&mut self) -> impl core::future::Future<Output = Result<(), DisplayError>> {
+        core::future::ready(self.0.flush())
+    }
 
-        // While the screen is off there is no point computing or flushing
-        // a frame. Wait for a press, so a dark display lights as soon as
-        // the button task reports one, or a second, whichever is first.
-        if !display_on {
-            let woke = select(
-                Timer::after(Duration::from_secs(1)),
-                crate::baseboard::DISPLAY_WAKE.wait(),
-            )
-            .await;
-            pressed = matches!(woke, Either::Second(()));
-            continue;
-        }
+    fn has_power_control(&self) -> bool {
+        true
+    }
 
-        let rx = crate::lora::LORA_RX_COUNT.load(Ordering::Relaxed);
-        let tx = crate::lora::LORA_TX_COUNT.load(Ordering::Relaxed);
-
-        #[cfg(feature = "battery")]
-        let battery = match bat_rx.try_get() {
-            Some(b) if b.voltage_mv > 0 => BatteryStatus::Data {
-                percent: b.percent,
-                voltage_mv: b.voltage_mv,
-            },
-            _ => BatteryStatus::NoData,
-        };
-        #[cfg(not(feature = "battery"))]
-        let battery = BatteryStatus::FeatureOff;
-
-        // The presence tri-state (#240) drives the GPS line: NoHardware
-        // renders "check wiring", and the fix/search label follows the
-        // hysteresis-held policy state rather than the raw per-sentence
-        // receiver flag, so the display agrees with what consumers of
-        // GNSS_PRESENCE act on. Sats/coords still come from the
-        // GNSS_FIX snapshot. Before the first settle (watch empty) the
-        // line stays in the historical "init" state.
-        #[cfg(feature = "gnss")]
-        let gnss = match presence_rx.as_mut().and_then(|rx| rx.try_get()) {
-            Some(p) if p.state == crate::baseboard::GnssPresence::NoHardware => {
-                GnssStatus::NoHardware
-            }
-            Some(p) => {
-                let f = gnss_rx
-                    .try_get()
-                    .unwrap_or(crate::baseboard::GnssFix::empty());
-                GnssStatus::Data {
-                    sats: f.sat_in_use,
-                    valid: p.state == crate::baseboard::GnssPresence::Fix,
-                    coords: f.latitude.zip(f.longitude),
-                }
-            }
-            None => GnssStatus::NoData,
-        };
-        #[cfg(not(feature = "gnss"))]
-        let gnss = GnssStatus::FeatureOff;
-
-        let model = StatusModel {
-            title: "leviculum RAK4631",
-            id_short: id_short.as_str(),
-            rx,
-            tx,
-            battery,
-            gnss,
-            // Same source as the `links=` field of the `BLE_COUNTERS`
-            // log line, so the screen and the capture can never
-            // disagree. Not behind a cfg: `ble` is an ungated module
-            // and both BSP features pull `softdevice`, so no
-            // configuration of this crate builds without BLE — the
-            // painter's `None` arm exists for a board that one day has
-            // none, not for a feature combination reachable today.
-            // `MAX_LINKS` is 4, so the saturation never bites.
-            ble_peers: Some(crate::ble::HVN_DRAIN.claimed().min(u8::MAX as usize) as u8),
-            pn_fill: crate::pn::fill_indicator(),
-            heartbeat,
-        };
-
-        let key = model.key();
-        if last_key.as_ref() == Some(&key) {
-            // Nothing meaningful changed since last render and the
-            // heartbeat phase is the same. Skip the I²C flush entirely.
-            Timer::after(Duration::from_secs(1)).await;
-            continue;
-        }
-
-        // The SSD1306's buffered-graphics mode is itself the paint
-        // target; the shared painter clears, draws the six lines, and
-        // sets the heartbeat dot at (128-3, 0) = (125, 0), exactly as
-        // the in-loop drawing here always did.
-        let _ = model.paint(&mut display, 128);
-
-        if let Err(e) = display.flush() {
-            crate::log::log_fmt("[DISP] ", format_args!("flush failed: {:?}", e));
-        }
-        last_key = Some(key);
-
-        Timer::after(Duration::from_secs(1)).await;
+    fn set_power(&mut self, on: bool) -> Result<(), DisplayError> {
+        self.0.set_display_on(on)
     }
 }
 

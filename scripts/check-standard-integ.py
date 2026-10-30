@@ -2,7 +2,7 @@
 """`just standard` runs every integration-test target in the tree (#408).
 
 `standard` named its integration suites one at a time until 408, and 94 of
-the workspace's 139 `tests/` targets were in no line of it. lnmsg's
+the workspace's 139 `tests/` targets were in no line of it. loquax's
 python_interop among them went red on master for eight commits while the land
 gate's `just standard` passed it twice (401). The repair is
 scripts/standard-integ.sh, which computes its selection from the tree and
@@ -22,6 +22,16 @@ each of them:
      `standard` silently stopped running: the synthetic omission the
      fixtures below plant.
   3. The call. `standard` itself must run scripts/standard-integ.sh.
+  4. The features. The computed run is one plain `cargo test --test ...`
+     list with no `--features`, and cargo refuses the whole invocation when
+     one of its targets declares `required-features`. Every such target must
+     be claimed by a recipe that passes the feature (land gate 1f9036f8,
+     2026-10-26: loquax/tui_snapshot, 0 tests executed).
+  5. The forge gate. scripts/ci-gate-integ.sh computes its own selection
+     and refuses the same targets for the same reason (forge pipeline 573,
+     2026-10-26: red on loquax/tui_snapshot since 994). It must exclude them
+     by the rule this script serves it (`--gated`), and `ci-gate` must run
+     the recipe each one is claimed by, or the forge tests it nowhere.
 
 Plus the prerequisite file both runners read (scripts/integ-prerequisites.txt):
 every target it names must exist, so a renamed suite cannot keep a skip
@@ -35,6 +45,10 @@ behave.
 
 Usage:
   python3 scripts/check-standard-integ.py [--justfile PATH]
+  python3 scripts/check-standard-integ.py --gated
+      print `<dir>/<target><TAB><features><TAB><recipe or ->` for every
+      test target with required features, and check nothing: the rule
+      scripts/ci-gate-integ.sh excludes by
 """
 
 import argparse
@@ -48,6 +62,10 @@ import tempfile
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROOT = "standard"
 RUNNER = "scripts/standard-integ.sh"
+FORGE = "ci-gate"
+FORGE_RUNNER = "scripts/ci-gate-integ.sh"
+# The line of FORGE_RUNNER that excludes the targets with required features.
+FORGE_RULE = "check-standard-integ.py --gated"
 ELSEWHERE = "scripts/standard-integ-elsewhere.txt"
 PREREQUISITES = "scripts/integ-prerequisites.txt"
 
@@ -127,7 +145,8 @@ def enumerated_targets():
 
 
 def metadata_targets():
-    """cargo's answer: {`<dir>/<name>`} for every target of kind `test`."""
+    """cargo's answer: {`<dir>/<name>`: [required features]} for every target
+    of kind `test`."""
     proc = subprocess.run(
         ["cargo", "metadata", "--no-deps", "--format-version", "1"],
         cwd=REPO_DIR,
@@ -136,12 +155,12 @@ def metadata_targets():
     )
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or "cargo metadata failed")
-    out = set()
+    out = {}
     for package in json.loads(proc.stdout)["packages"]:
         member = os.path.relpath(os.path.dirname(package["manifest_path"]), REPO_DIR)
         for target in package["targets"]:
             if "test" in target["kind"]:
-                out.add(f"{member}/{target['name']}")
+                out[f"{member}/{target['name']}"] = target.get("required-features") or []
     return out
 
 
@@ -151,10 +170,20 @@ def claim_matches(claim, target):
     )
 
 
-def findings(justfile, enumerated, metadata, elsewhere, prerequisites):
-    """One line per way `standard` can miss a target.
+def claimed_by(claims, target):
+    """The recipe of the first claim covering `target`, or None."""
+    for _, fields in claims:
+        if len(fields) >= 2 and claim_matches(fields[0], target):
+            return fields[1]
+    return None
 
-    `elsewhere` and `prerequisites` are (path shown in messages, data_lines).
+
+def findings(justfile, enumerated, metadata, elsewhere, prerequisites, forge_runner):
+    """One line per way `standard` or the forge gate can miss a target.
+
+    `metadata` is {`<dir>/<name>`: [required features]}; `elsewhere` and
+    `prerequisites` are (path shown in messages, data_lines); `forge_runner`
+    is the text of scripts/ci-gate-integ.sh.
     """
     recipes = dump_recipes(justfile)
     with open(justfile, encoding="utf-8") as handle:
@@ -162,6 +191,8 @@ def findings(justfile, enumerated, metadata, elsewhere, prerequisites):
     if ROOT not in recipes:
         raise RuntimeError(f"no `{ROOT}` recipe in {justfile}")
     reach = reached(recipes, ROOT)
+    gated = {t: f for t, f in metadata.items() if f}
+    metadata = set(metadata)
     out = []
 
     # 1. The enumeration against cargo's own list.
@@ -208,6 +239,38 @@ def findings(justfile, enumerated, metadata, elsewhere, prerequisites):
                 f"takes the target."
             )
 
+    # 2b. A target with required features is claimed, never computed.
+    claims = [fields[0] for _, fields in lines if fields]
+    for target in sorted(gated):
+        if not any(claim_matches(claim, target) for claim in claims):
+            out.append(
+                f"{target} requires the feature(s) `{', '.join(gated[target])}`; "
+                f"the computed run of {RUNNER} enables none, so `cargo test "
+                f"--test` refuses the whole invocation (land gate 1f9036f8, "
+                f"2026-10-26). Claim it in {ELSEWHERE} from a recipe that "
+                f"passes the feature."
+            )
+
+    # 2c. The forge gate excludes them by the same rule and runs their recipe.
+    if gated and FORGE_RULE not in forge_runner:
+        out.append(
+            f"{FORGE_RUNNER} no longer runs `{FORGE_RULE}`, so it hands "
+            f"{', '.join(sorted(gated))} to a `cargo test` without the feature, "
+            f"which refuses the whole forge gate (pipeline 573, 2026-10-26)."
+        )
+    forge_body = recipe_body(source, FORGE) or ""
+    for target in sorted(gated):
+        recipe = claimed_by(lines, target)
+        if recipe is None:
+            continue
+        if not re.search(r"(^|\s)" + re.escape(recipe) + r"(\s|$)", forge_body):
+            out.append(
+                f"{target} requires the feature(s) `{', '.join(gated[target])}`, "
+                f"so {FORGE_RUNNER} leaves it to recipe `{recipe}`, and "
+                f"`{FORGE}` does not run `{recipe}`: the forge tests {target} "
+                f"nowhere. Add `{{{{just_executable()}}}} {recipe}` to `{FORGE}`."
+            )
+
     # 3. The call itself.
     body = recipe_body(source, ROOT) or ""
     if RUNNER not in body:
@@ -242,53 +305,87 @@ mvr:
 orphan:
     cargo test -p a --test lonely
 
-standard: fast
+tui:
+    {{manifest}} g -- cargo test -p a --features tui --test gated
+
+standard: fast tui
     {{manifest}} x -- cargo test -p a --test interop
     bash scripts/standard-integ.sh
+
+ci-gate:
+    {{just_executable()}} mvr
+    bash scripts/ci-gate-integ.sh
+    {{just_executable()}} tui
 """
+
+FIXTURE_FORGE_RUNNER = 'GATED="$(python3 scripts/check-standard-integ.py --gated)"\n'
 
 
 def selftest():
     """Plant each failure on a fixture and require the checker to name it."""
-    targets = {"a/mvr", "a/interop", "a/plain", "b/one", "b/two"}
+    targets = {"a/mvr", "a/interop", "a/plain", "b/one", "b/two", "a/gated"}
+    meta = {t: [] for t in targets}
+    gated = dict(meta, **{"a/gated": ["tui"]})
     good_claims = [
         (1, ["a/mvr", "mvr", "cargo", "test", "-p", "a", "--test", "mvr"]),
         (2, ["a/interop", "standard", "cargo", "test", "-p", "a", "--test", "interop"]),
     ]
+    gated_claim = (3, ["a/gated", "tui", "cargo", "test", "-p", "a", "--features", "tui", "--test", "gated"])
     prereqs = [(1, ["reference/x", "a/interop"])]
+    forge = FIXTURE_FORGE_RUNNER
     cases = [
-        ("clean fixture", FIXTURE_JUSTFILE, targets, targets, good_claims, prereqs, None),
+        ("clean fixture", FIXTURE_JUSTFILE, targets, meta, good_claims, prereqs, None),
         (
             "omission: the line a claim stands for is gone",
             FIXTURE_JUSTFILE.replace("    {{manifest}} x -- cargo test -p a --test interop\n", ""),
-            targets, targets, good_claims, prereqs, "no longer holds",
+            targets, meta, good_claims, prereqs, "no longer holds",
         ),
         (
             "standard stops calling the runner",
             FIXTURE_JUSTFILE.replace("    bash scripts/standard-integ.sh\n", ""),
-            targets, targets, good_claims, prereqs, "does not run scripts/standard-integ.sh",
+            targets, meta, good_claims, prereqs, "does not run scripts/standard-integ.sh",
         ),
         (
             "claim cites a recipe standard does not reach",
-            FIXTURE_JUSTFILE, targets, targets,
+            FIXTURE_JUSTFILE, targets, meta,
             good_claims + [(3, ["b/one", "orphan", "cargo", "test"])],
             prereqs, "does not run, so b/one",
         ),
         (
             "claim names a missing target",
-            FIXTURE_JUSTFILE, targets, targets,
+            FIXTURE_JUSTFILE, targets, meta,
             good_claims + [(3, ["c/*", "standard", "standard-integ.sh"])],
             prereqs, "matches no test target",
         ),
         (
             "cargo has a target the enumeration misses",
-            FIXTURE_JUSTFILE, targets, targets | {"b/declared"}, good_claims,
+            FIXTURE_JUSTFILE, targets, dict(meta, **{"b/declared": []}), good_claims,
             prereqs, "cargo knows the test target b/declared",
         ),
         (
             "prerequisite names a missing target",
-            FIXTURE_JUSTFILE, targets, targets, good_claims,
+            FIXTURE_JUSTFILE, targets, meta, good_claims,
             prereqs + [(2, ["reference/x", "a/gone"])], "names a/gone",
+        ),
+        (
+            "a target with required features is left to the computed run",
+            FIXTURE_JUSTFILE, targets, gated, good_claims, prereqs,
+            "a/gated requires the feature(s) `tui`",
+        ),
+        (
+            "the same target claimed by the recipe that passes the feature",
+            FIXTURE_JUSTFILE, targets, gated, good_claims + [gated_claim], prereqs, None,
+        ),
+        (
+            "ci-gate stops running the recipe of a gated target",
+            FIXTURE_JUSTFILE.replace("    {{just_executable()}} tui\n", ""),
+            targets, gated, good_claims + [gated_claim], prereqs,
+            "`ci-gate` does not run `tui`: the forge tests a/gated nowhere",
+        ),
+        (
+            "the forge runner drops the required-features rule",
+            FIXTURE_JUSTFILE, targets, gated, good_claims + [gated_claim], prereqs,
+            "scripts/ci-gate-integ.sh no longer runs",
         ),
     ]
     failed = []
@@ -297,7 +394,8 @@ def selftest():
             path = os.path.join(tmp, "Justfile")
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(text)
-            got = findings(path, enumerated, metadata, ("fixture", claims), ("fixture", pre))
+            runner = "" if "drops the required-features rule" in label else forge
+            got = findings(path, enumerated, metadata, ("fixture", claims), ("fixture", pre), runner)
             if expect is None and got:
                 failed.append(f"{label}: expected no finding, got {got}")
             elif expect is not None and not any(expect in line for line in got):
@@ -308,7 +406,19 @@ def selftest():
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--justfile", default=os.path.join(REPO_DIR, "Justfile"))
+    parser.add_argument("--gated", action="store_true")
     args = parser.parse_args()
+
+    if args.gated:
+        try:
+            claims = data_lines(os.path.join(REPO_DIR, ELSEWHERE))
+            for target, features in sorted(metadata_targets().items()):
+                if features:
+                    print(f"{target}\t{','.join(features)}\t{claimed_by(claims, target) or '-'}")
+        except RuntimeError as error:
+            print(f"check-standard-integ: could not list gated targets: {error}", file=sys.stderr)
+            return 1
+        return 0
 
     try:
         broken = selftest()
@@ -331,6 +441,7 @@ def main():
             metadata_targets(),
             (ELSEWHERE, data_lines(os.path.join(REPO_DIR, ELSEWHERE))),
             (PREREQUISITES, data_lines(os.path.join(REPO_DIR, PREREQUISITES))),
+            open(os.path.join(REPO_DIR, FORGE_RUNNER), encoding="utf-8").read(),
         )
     except RuntimeError as error:
         print(f"check-standard-integ: could not check: {error}", file=sys.stderr)
@@ -343,7 +454,8 @@ def main():
         return 1
     print(
         f"check-standard-integ: {len(enumerated)} test targets, cargo agrees; "
-        f"every claim in {ELSEWHERE} is backed by its recipe; `{ROOT}` runs {RUNNER}"
+        f"every claim in {ELSEWHERE} is backed by its recipe; `{ROOT}` runs {RUNNER}; "
+        f"`{FORGE}` runs the recipe of every target with required features"
     )
     return 0
 

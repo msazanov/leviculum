@@ -18,6 +18,10 @@
 //! - `/page/echo.mu`   — query fields round-trip as a `var_*` msgpack map.
 //! - an unregistered path — a clean [`FetchError::Timeout`], never a hang.
 //!
+//! Every session runs without an lnomad app dir (`connect_to_with_app_dir`
+//! with `None`): `connect_to` would mint and keep the browser identity in the
+//! host's `~/.config/lnomad`.
+//!
 //! ## Running
 //!
 //! ```sh
@@ -224,9 +228,13 @@ async fn lnomad_discovers_node_via_lnsd_shared_instance() {
     let (page, dest_info) = start_page_node(page_rns_port, page_cmd_port, daemon_tcp_port).await;
 
     let session_storage = tempfile::tempdir().expect("session storage");
-    let mut session = Session::connect_to(&instance_name, session_storage.path().to_path_buf())
-        .await
-        .expect("connect lnomad session to lnsd");
+    let mut session = Session::connect_to_with_app_dir(
+        &instance_name,
+        session_storage.path().to_path_buf(),
+        None,
+    )
+    .await
+    .expect("connect lnomad session to lnsd");
 
     run_discovery_suite(&mut session, &page, &dest_info.hash).await;
 
@@ -260,9 +268,13 @@ async fn lnomad_fetches_pages_via_lnsd_shared_instance() {
     let (page, dest_info) = start_page_node(page_rns_port, page_cmd_port, daemon_tcp_port).await;
 
     let session_storage = tempfile::tempdir().expect("session storage");
-    let mut session = Session::connect_to(&instance_name, session_storage.path().to_path_buf())
-        .await
-        .expect("connect lnomad session to lnsd");
+    let mut session = Session::connect_to_with_app_dir(
+        &instance_name,
+        session_storage.path().to_path_buf(),
+        None,
+    )
+    .await
+    .expect("connect lnomad session to lnsd");
 
     run_page_suite(&mut session, &page, &dest_info.hash).await;
 
@@ -293,9 +305,13 @@ async fn lnomad_fetches_pages_via_rnsd_shared_instance() {
     let (page, dest_info) = start_page_node(page_rns_port, page_cmd_port, daemon_rns_port).await;
 
     let session_storage = tempfile::tempdir().expect("session storage");
-    let mut session = Session::connect_to(&instance_name, session_storage.path().to_path_buf())
-        .await
-        .expect("connect lnomad session to rnsd");
+    let mut session = Session::connect_to_with_app_dir(
+        &instance_name,
+        session_storage.path().to_path_buf(),
+        None,
+    )
+    .await
+    .expect("connect lnomad session to rnsd");
 
     run_page_suite(&mut session, &page, &dest_info.hash).await;
 
@@ -323,9 +339,13 @@ async fn lnomad_discovers_node_via_rnsd_shared_instance() {
     let (page, dest_info) = start_page_node(page_rns_port, page_cmd_port, daemon_rns_port).await;
 
     let session_storage = tempfile::tempdir().expect("session storage");
-    let mut session = Session::connect_to(&instance_name, session_storage.path().to_path_buf())
-        .await
-        .expect("connect lnomad session to rnsd");
+    let mut session = Session::connect_to_with_app_dir(
+        &instance_name,
+        session_storage.path().to_path_buf(),
+        None,
+    )
+    .await
+    .expect("connect lnomad session to rnsd");
 
     run_discovery_suite(&mut session, &page, &dest_info.hash).await;
 

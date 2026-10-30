@@ -35,7 +35,11 @@ serialised interop tests can simply be longer than the bound.
 
 The test binaries are built UNCONSTRAINED first (`cargo test --workspace
 --no-run`): the question is what the tests do on a slow host, not how long
-rustc takes on one. The release binaries the mvr tests spawn are not built
+rustc takes on one. That build has no binary for a target with
+`required-features` (loquax's tui_snapshot), so each of those is built on its
+own with its features, from the list `scripts/check-standard-integ.py --gated`
+reads out of `cargo metadata` (1067: `--only tui_snapshot` used to exit 0
+having run nothing). An `--only` that matches no built binary is an error. The release binaries the mvr tests spawn are not built
 here; `just test-under-quota` builds them first (`build-integ-bins`).
 
 Doctests are not run: rustdoc compiles each one at test time, which under the
@@ -91,16 +95,46 @@ def survey_dir(quota: str) -> Path:
     return Path(state) / "leviculum-ci" / "under-quota" / commit / tag
 
 
-def build() -> list[dict]:
-    """Build every test binary, return one entry per executable."""
+def gated_targets() -> list[tuple[str, str, str]]:
+    """(member dir, target, comma-joined features) of every test target with
+    required features: the list scripts/ci-gate-integ.sh excludes by."""
     out = subprocess.run(
-        ["cargo", "test", "--workspace", "--no-run", "--message-format=json"],
+        [sys.executable, "scripts/check-standard-integ.py", "--gated"],
         cwd=REPO,
-        stdout=subprocess.PIPE,
+        capture_output=True,
         text=True,
     )
     if out.returncode != 0:
-        sys.exit(f"test-under-quota: cargo test --no-run exited {out.returncode}")
+        sys.exit(f"test-under-quota: check-standard-integ.py --gated exited "
+                 f"{out.returncode}: {out.stderr.strip()}")
+    targets = []
+    for line in out.stdout.splitlines():
+        if not line.strip():
+            continue
+        path, features, _recipe = line.split("\t")
+        member, name = path.rsplit("/", 1)
+        targets.append((member, name, features))
+    return targets
+
+
+def build() -> list[dict]:
+    """Build every test binary, return one entry per executable."""
+    bins = {}
+    invocations = [["--workspace"]] + [
+        ["--manifest-path", f"{member}/Cargo.toml", "--features", features, "--test", name]
+        for member, name, features in gated_targets()
+    ]
+    for sel in invocations:
+        for b in build_one(sel):
+            bins[b["key"]] = b
+    return list(bins.values())
+
+
+def build_one(sel: list[str]) -> list[dict]:
+    cmd = ["cargo", "test", *sel, "--no-run", "--message-format=json"]
+    out = subprocess.run(cmd, cwd=REPO, stdout=subprocess.PIPE, text=True)
+    if out.returncode != 0:
+        sys.exit(f"test-under-quota: {' '.join(cmd)} exited {out.returncode}")
     bins = []
     for line in out.stdout.splitlines():
         try:
@@ -204,6 +238,13 @@ def cmd_run(args) -> int:
     bins = build()
     pending = 0
     reds = 0
+    if args.only:
+        unmatched = [o for o in args.only if not any(o in b["key"] for b in bins)]
+        if unmatched:
+            # A narrowed run that runs nothing would read green.
+            print(f"test-under-quota: --only {', '.join(unmatched)} matches no built "
+                  f"test binary", file=sys.stderr)
+            return 2
     for b in sorted(bins, key=lambda b: b["key"]):
         if args.only and not any(o in b["key"] for o in args.only):
             continue
@@ -287,7 +328,8 @@ def main() -> int:
     r.add_argument("--shard-timeout", type=float, default=600.0,
                    help="a shard still running after this is killed and its "
                         "unfinished tests reported as `timeout`")
-    r.add_argument("--only", action="append", help="substring of a target key")
+    r.add_argument("--only", action="append",
+                   help="substring of a target key; exit 2 if it matches none")
     p = sub.add_parser("report", help="table of slow and red tests")
     p.add_argument("--quota", default="25%")
     p.add_argument("--threshold", type=float, default=10.0)

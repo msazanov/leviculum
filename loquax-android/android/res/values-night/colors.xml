@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The dark theme's colours, picked when the phone's dark setting is on;
+     the names and the contrast rule of values/colors.xml. -->
+<resources>
+    <color name="background">#17181b</color>
+    <!-- 15.0:1 and 7.7:1 on the background. -->
+    <color name="text">#ececec</color>
+    <color name="text_secondary">#a9abb0</color>
+    <!-- 8.8:1 on the background. -->
+    <color name="accent">#81c784</color>
+    <!-- The top bar and the compose field: text 12.6:1, hint 6.5:1. -->
+    <color name="bar">#26272b</color>
+    <!-- Our bubble: body 6.2:1, time and the delivery mark 5.0:1. -->
+    <color name="bubble_ours">#3b6b45</color>
+    <color name="bubble_ours_text">#ffffff</color>
+    <color name="bubble_ours_meta">#dbeadd</color>
+    <!-- Theirs, a step lighter than the background: body 11.0:1, time 5.7:1. -->
+    <color name="bubble_theirs">#303134</color>
+    <color name="bubble_theirs_text">#ececec</color>
+    <color name="bubble_theirs_meta">#a9abb0</color>
+    <!-- The failed mark: its circle 4.8:1 on our bubble, the sign 7.2:1 on it. -->
+    <color name="failed_ground">#ffdad6</color>
+    <color name="failed_mark">#93000a</color>
+    <!-- The send button: 4.6:1 on the background, its arrow 3.9:1 on it. -->
+    <color name="send">#4f8f5b</color>
+    <color name="on_send">#ffffff</color>
+    <!-- The unread count: 6.2:1. -->
+    <color name="badge">#3b6b45</color>
+    <color name="badge_text">#ffffff</color>
+    <!-- The list's failed mark (1130): its circle 13.7:1 on the background,
+         the sign 7.2:1 on it. -->
+    <color name="list_failed_ground">#ffdad6</color>
+    <color name="list_failed_mark">#93000a</color>
+    <!-- The long press (1137): text 11.6:1 and delete 8.1:1 on the panels,
+         our reaction's circle 3.6:1 on them. -->
+    <color name="dim">#b3000000</color>
+    <color name="panel">#2c2d31</color>
+    <color name="failed_mark_on_panel">#ffb4ab</color>
+    <color name="reaction_ours">#4f8f5b</color>
+    <!-- A selected message's row: the accent at a quarter. -->
+    <color name="selected_row">#4081c784</color>
+</resources>

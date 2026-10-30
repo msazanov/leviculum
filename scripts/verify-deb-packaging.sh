@@ -13,7 +13,8 @@
 #
 # Usage:
 #   scripts/verify-deb-packaging.sh [ARCH]
-# ARCH defaults to amd64. Pass arm64 to check the cross-built packages.
+# ARCH defaults to amd64. Pass arm64 or armhf to check the cross-built
+# packages.
 # Architectures with no .deb present are reported as SKIP, not failure,
 # so a host without the zig cross toolchain still verifies what it built.
 #
@@ -63,7 +64,9 @@ contains() {
 # or nothing when there is none.
 find_deb() {
     local pkg="$1"
-    ls -1t "$DEB_DIR/${pkg}"_*_"${ARCH}".deb 2>/dev/null | head -n1
+    # `|| true`: an unmatched glob makes ls exit 2, and under pipefail that
+    # status would end the run instead of reaching the SKIP its caller prints.
+    ls -1t "$DEB_DIR/${pkg}"_*_"${ARCH}".deb 2>/dev/null | head -n1 || true
 }
 
 # ---------------------------------------------------------------------
@@ -364,6 +367,68 @@ fi
 rm -rf "$CTRL_DIR"
 echo
 
+check_package loquax loquax loquax
+# A client of a running shared instance, with the terminal frontend built in
+# (1000), which is what the package is for. The subcommand's help line is
+# read off the bytes, so an arm64 package is checked from an amd64 host too.
+# One unit since 1153, Loquax Mailbox's, and it must come switched off: the
+# mailbox answers for a person's identity, so installing the messenger may
+# neither start it nor enable it. cargo-deb renders `enable = false` as dh's
+# no-enable fragment, which re-enables only a unit that was enabled before
+# (`debian-installed`, then `was-enabled`); the enabling fragment has no
+# `debian-installed` test and enables on a fresh install.
+contains "$CONTENTS" "loquax-mailbox.service" "ships the Loquax Mailbox unit"
+LOQUAX_POSTINST="$(cat "$CTRL_DIR/postinst")"
+case "$LOQUAX_POSTINST" in
+*"_dh_action=start"* | *"deb-systemd-invoke start loquax-mailbox.service"* | \
+    *"deb-systemd-invoke restart loquax-mailbox.service"*)
+    fail "postinst starts loquax-mailbox on install (systemd-units start must be false)" ;;
+*) pass "postinst does not start loquax-mailbox on install" ;;
+esac
+contains "$LOQUAX_POSTINST" "deb-systemd-helper debian-installed loquax-mailbox.service" \
+    "postinst enables loquax-mailbox only where it was enabled before"
+contains "$LOQUAX_POSTINST" "deb-systemd-invoke try-restart loquax-mailbox.service" \
+    "postinst try-restarts on upgrade, so a running mailbox survives one"
+contains "$LOQUAX_POSTINST" "chmod 0700 \"\$STATE_DIR\"" \
+    "postinst keeps the mailbox's state directory at 0700"
+# The marker is the `Tui` subcommand's doc comment in loquax/src/main.rs,
+# compiled in only with the feature; it has to follow that comment.
+check_loquax_tui() {
+    local deb tmp
+    deb="$(find_deb loquax)"
+    [ -n "$deb" ] || return 0
+    tmp="$(mktemp -d)"
+    dpkg-deb -x "$deb" "$tmp"
+    if grep -qaF 'The terminal messenger, as plain `loquax`: conversations, messages and a compose line' "$tmp/usr/bin/loquax"; then
+        pass "loquax is built with its tui"
+    else
+        fail "loquax is built without --features tui; \`loquax tui\` is missing"
+    fi
+    rm -rf "$tmp"
+}
+check_loquax_tui
+rm -rf "$CTRL_DIR"
+echo
+
+# amd64 only: packaged from the firmware bundle (scripts/build-lnflash-deb.sh).
+if [ "$ARCH" = amd64 ]; then
+    check_package lnflash lnflash lnflash
+    # The bundle sits where lnflash looks last (SYSTEM_BUNDLE), with its
+    # manifest at the top; build-lnflash-deb.sh has already let the packaged
+    # binary check every checksum in it at that path.
+    contains "$CONTENTS" " ./usr/share/lnflash/manifest.toml" \
+        "ships the bundle manifest at /usr/share/lnflash"
+    contains "$CONTENTS" "_license-agreement.txt" \
+        "ships the SoftDevice licence beside the blob"
+    if printf '%s' "$CONTENTS" | grep -q 'systemd'; then
+        fail "lnflash ships a systemd unit, which it must not"
+    else
+        pass "ships no systemd unit"
+    fi
+    rm -rf "$CTRL_DIR"
+    echo
+fi
+
 check_package lblogd lblogd lblogd
 contains "$CONFFILES" "/etc/lblogd/config.toml" "registers /etc/lblogd/config.toml as a conffile"
 contains "$CONTENTS" "/etc/lblogd/config.toml" "ships the default config"
@@ -413,7 +478,7 @@ echo
 echo "== systemd units"
 if command -v systemd-analyze >/dev/null 2>&1; then
     for unit in packaging/debian/lnsd.service packaging/lblogd/lblogd.service \
-        packaging/lnpnd/lnpnd.service; do
+        packaging/lnpnd/lnpnd.service packaging/loquax/loquax-mailbox.service; do
         # `verify` resolves the unit against the *build host*, which has
         # neither the units these order themselves after nor (necessarily)
         # the binary they start. Both are properties of the host, not of
@@ -439,7 +504,7 @@ fi
 # typo here would leave a service that installs cleanly, starts, and
 # immediately fails with status=203/EXEC.
 for pair in "packaging/debian/lnsd.service:leviculum" "packaging/lblogd/lblogd.service:lblogd" \
-    "packaging/lnpnd/lnpnd.service:lnpnd"; do
+    "packaging/lnpnd/lnpnd.service:lnpnd" "packaging/loquax/loquax-mailbox.service:loquax"; do
     unit="${pair%%:*}"
     pkg="${pair##*:}"
     deb="$(find_deb "$pkg")"
@@ -486,11 +551,11 @@ echo
 # ---------------------------------------------------------------------
 
 echo "== unit identity across architectures"
-for pair in "leviculum:lnsd" "lblogd:lblogd" "lnpnd:lnpnd"; do
+for pair in "leviculum:lnsd" "lblogd:lblogd" "lnpnd:lnpnd" "loquax:loquax-mailbox"; do
     pkg="${pair%%:*}"
     unit_name="${pair##*:}"
-    amd="$(ls -1t "$DEB_DIR/${pkg}"_*_amd64.deb 2>/dev/null | head -n1)"
-    arm="$(ls -1t "$DEB_DIR/${pkg}"_*_arm64.deb 2>/dev/null | head -n1)"
+    amd="$(ls -1t "$DEB_DIR/${pkg}"_*_amd64.deb 2>/dev/null | head -n1 || true)"
+    arm="$(ls -1t "$DEB_DIR/${pkg}"_*_arm64.deb 2>/dev/null | head -n1 || true)"
     if [ -z "$amd" ] || [ -z "$arm" ]; then
         skip "need both architectures' ${pkg} .debs to compare ${unit_name}.service"
         continue

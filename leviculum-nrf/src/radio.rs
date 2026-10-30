@@ -54,7 +54,6 @@ pub type Spi = SpiDevice<'static, CriticalSectionRawMutex, Spim<'static>, Output
 
 pub use part::{
     bring_up, configure_lora, new, Error, FrontEnd, Radio, Ready, RxStatus, TxPowerProgram,
-    IFACE_NAME,
 };
 
 #[cfg(not(feature = "radio-lr11xx"))]
@@ -69,9 +68,6 @@ mod part {
 
     /// What `configure_lora` programmed for the transmit power.
     pub type TxPowerProgram = leviculum_core::sx126x::TxPowerProgram;
-
-    /// The interface name the board binaries register for this carrier.
-    pub const IFACE_NAME: &str = "lora_sx1262";
 
     /// What the SX1262 takes from the board beyond its bus and its three lines.
     pub struct FrontEnd {
@@ -109,9 +105,14 @@ mod part {
         }
     }
 
-    /// Reset and initialise the chip.
+    /// Reset and initialise the chip. Each step names itself in the boot
+    /// record before it is taken (`LoraPhase`, #469); `init_radio` names
+    /// its own.
     pub async fn bring_up(radio: &mut Radio, freq_hz: u32) -> Result<Ready, Error> {
+        use leviculum_firmware::boot_trace::{lora_phase, LoraPhase};
+        lora_phase(LoraPhase::Reset);
         radio.reset().await;
+        lora_phase(LoraPhase::BusyWait);
         let _ = radio.wait_busy().await;
         radio.init_radio(freq_hz).await.map(Ready)
     }
@@ -142,9 +143,6 @@ mod part {
     /// The radio this build drives.
     pub type Radio =
         leviculum_lr11xx::Lr11xx<super::Spi, Output<'static>, Input<'static>, Input<'static>>;
-
-    /// The interface name the board binaries register for this carrier.
-    pub const IFACE_NAME: &str = "lora_lr11xx";
 
     /// The board's transceiver description: TCXO, RF switch, regulator, LF
     /// clock, PA table. Lives in the board file next to its `BoardConfig`
@@ -180,8 +178,13 @@ mod part {
 
     /// Reset and initialise the chip. The frequency is not needed here: the
     /// LR11xx calibrates its image band in `configure_lora`.
+    /// The driver's steps are its own crate's, so the boot record gets the
+    /// two this side can see (`LoraPhase`, #469).
     pub async fn bring_up(radio: &mut Radio, _freq_hz: u32) -> Result<Ready, Error> {
+        use leviculum_firmware::boot_trace::{lora_phase, LoraPhase};
+        lora_phase(LoraPhase::Reset);
         radio.reset().await?;
+        lora_phase(LoraPhase::Init);
         radio.init_radio().await.map(Ready)
     }
 

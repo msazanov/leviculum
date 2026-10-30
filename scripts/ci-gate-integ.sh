@@ -34,6 +34,19 @@
 # a host that has the submodules it runs them. The interop suite is a third
 # of the integration runtime (353 tests, ~190 s).
 #
+# A SECOND KIND OF EXCLUSION: a target that declares `required-features`.
+# The run below is one `cargo test --workspace --test ...` with no
+# `--features`, and cargo refuses the WHOLE invocation when one of its targets
+# needs a feature it does not enable (forge pipeline 573, 2026-10-26: red on
+# loquax/tui_snapshot since 994 added it). scripts/standard-integ.sh had the
+# same wall and the same remedy: such a target is run by the recipe that
+# passes the feature, named in scripts/standard-integ-elsewhere.txt. The rule
+# is read from `cargo metadata` by scripts/check-standard-integ.py `--gated`,
+# the parser the standard gate already trusts, and a gated target with no
+# recipe is a refusal here rather than a target no gate runs. `ci-gate` runs
+# those recipes by name after this script, and check-standard-integ holds it
+# to that.
+#
 # Each excluded test name is checked against the target's own `--list` before
 # the run, so a renamed test is a red gate naming the line, never a skip that
 # matches nothing while the line's reason outlives the test it described.
@@ -108,6 +121,23 @@ in Cargo.toml is no longer parsable by the sed in scripts/integ-targets.sh."
 
 EXCLUDED_LIST="$(printf '%s\n' "$EXCLUDED" | sed '/^[[:space:]]*$/d')"
 
+# `<dir>/<target><TAB><features><TAB><recipe or ->`, one per target with
+# required features.
+GATED="$(python3 scripts/check-standard-integ.py --gated)" ||
+    die "could not read the targets with required-features from cargo metadata
+(python3 scripts/check-standard-integ.py --gated)."
+GATED_LIST="$(printf '%s\n' "$GATED" | awk -F'\t' 'NF { print $1 }')"
+while IFS=$'\t' read -r target features recipe; do
+    [ -n "$target" ] || continue
+    [ "$recipe" != "-" ] ||
+        die "$target requires the feature(s) $features, which this run does not enable,
+and scripts/standard-integ-elsewhere.txt names no recipe that runs it. Claim
+it there from a recipe that passes the feature, and run that recipe in
+'ci-gate', or no gate tests it."
+done <<EOF
+$GATED
+EOF
+
 # Both directions of drift. A stale exclusion is not cosmetic: the entry is
 # what carries the reason a suite is out of the push gate, so an entry naming
 # a target that no longer exists means the reason is describing nothing.
@@ -129,9 +159,10 @@ the others without a word. Give the surviving one a different name, or run
 it from a second invocation here."
 done <<EOF
 $EXCLUDED_LIST
+$GATED_LIST
 EOF
 
-SELECTED="$(printf '%s\n' "$ALL" | grep -vxF -f <(printf '%s\n' "$EXCLUDED_LIST"))"
+SELECTED="$(printf '%s\n' "$ALL" | grep -vxF -f <(printf '%s\n' "$EXCLUDED_LIST" "$GATED_LIST" | sed '/^$/d'))"
 # Names, deduplicated: two packages may legitimately both have a `cli` target,
 # and `--test cli` selects both, which is what we want.
 NAMES="$(printf '%s\n' "$SELECTED" | sed 's|.*/||' | sort -u)"
@@ -143,6 +174,12 @@ while read -r entry; do
     say "excluded: $entry ($(printf '%s\n' "$UNMET" | awk -F'\t' -v t="$entry" '$1 == t && $2 == "-" { print $3 }' | paste -sd' ') absent, scripts/integ-prerequisites.txt)"
 done <<EOF
 $EXCLUDED_LIST
+EOF
+while IFS=$'\t' read -r target features recipe; do
+    [ -n "$target" ] || continue
+    say "excluded: $target (requires features: $features; run by recipe $recipe)"
+done <<EOF
+$GATED
 EOF
 
 ARGS=()

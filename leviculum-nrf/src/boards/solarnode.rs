@@ -69,17 +69,12 @@ pub type LoRaDio1 = peripherals::P0_03;
 /// in [`super`].
 pub type LoRaRxEnable = peripherals::P0_05;
 
-/// SX1262 SPI frequency in Hz (4 MHz, as on the T114 and the RAK4631).
-pub const LORA_SPI_FREQ_HZ: u32 = 4_000_000;
-/// SX1262 TCXO voltage supplied via DIO3 (volts).
-/// `SX126X_DIO3_TCXO_VOLTAGE 1.8` in the variant, the same value the
-/// T114 uses.
-pub const LORA_TCXO_VOLTAGE: f32 = 1.8;
-/// SX1262 max TX power (dBm). Same die, same +22 dBm.
-pub const LORA_MAX_POWER_DBM: i8 = 22;
-/// DIO2 drives the RF switch — but unlike the other two boards it does
-/// not drive all of it. See [`LoRaRxEnable`].
-pub const LORA_DIO2_AS_RF_SWITCH: bool = true;
+// The TCXO runs at 1.8 V (`CONFIG.lora_tcxo_voltage_reg`;
+// `SX126X_DIO3_TCXO_VOLTAGE 1.8` in the variant, the same value the T114
+// uses). DIO2 drives the RF switch, but unlike the other two boards it
+// does not drive all of it: see [`LoRaRxEnable`]. The SPI clock is
+// `lora::init`'s, the power ceiling the transmit-power sequence's
+// (`leviculum_core::sx126x`, same die, same +22 dBm).
 
 // LEDs (on the carrier board)
 /// Green LED, **active HIGH** (`PIN_LED1` = index 12 = P0.19).
@@ -178,16 +173,16 @@ pub type GnssReset = peripherals::P1_03;
 /// it gates a GNSS *header* supply through Q7; the analogue here is
 /// this pin and nothing else.
 pub type GnssEnable = peripherals::P1_05;
-/// GNSS UART baud rate. The L76K ships at 9600
-/// (`seeed_solar_node/variant.h`, `#define GPS_BAUDRATE 9600`, the same
-/// value the T114's variant carries), which is where the presence
-/// machine's sweep starts.
-///
-/// Unlike the other boards in this tree there is **no PPS line broken
-/// out**: the carrier exposes wakeup, reset and enable only, and P0.31
-/// is the battery ADC. So this board is an NMEA-only time source
-/// (#166), which is the weaker of the two kinds.
-pub const GNSS_BAUD: u32 = 9600;
+
+// The L76K ships at 9600 baud (`seeed_solar_node/variant.h`,
+// `#define GPS_BAUDRATE 9600`, the same value the T114's variant carries),
+// which is where the presence machine's sweep starts by itself
+// (`leviculum_gnss_presence::BAUD_SWEEP`).
+//
+// Unlike the other boards in this tree there is **no PPS line broken
+// out**: the carrier exposes wakeup, reset and enable only, and P0.31
+// is the battery ADC. So this board is an NMEA-only time source
+// (#166), which is the weaker of the two kinds.
 
 // Grove / I²C, on the NFC pins
 /// Grove SDA (`D14` = P0.09, NFC1).
@@ -391,16 +386,22 @@ pub const CONFIG: super::BoardConfig = super::BoardConfig {
     usb_pid: 0x0003,
     usb_manufacturer: "leviculum",
     usb_product: "leviculum SolarNode",
-    log_prefix: "SOLAR",
     identity_flash_page: 0xEC000,
     radio_config_flash_page: 0xEB000,
     telemetry_flash_page: 0xEA000,
     lora_tcxo_voltage_reg: 0x02, // 1.8 V
-    lora_spi_freq_hz: LORA_SPI_FREQ_HZ,
-    lora_max_power_dbm: LORA_MAX_POWER_DBM,
     // Asked once at boot, mounted by nothing. See the QSPI block above.
     qspi_part: Some(&crate::qspi::P25Q16H),
 };
+
+/// The name each interface reports, indexed by interface id: what
+/// `/status` and `lnstatus` print per interface, what `[TRANSPORT]` lines
+/// and the node's interface table say. The LoRa entry names this board's
+/// radio, an SX1262 (the Wio-SX1262 module), which is why the table is the board's and not the
+/// orchestration crate's. The binary hands it to
+/// `leviculum_firmware::iface_bytes::set_names` once at boot.
+pub const IFACE_NAMES: [&str; leviculum_firmware::iface_bytes::IFACE_COUNT] =
+    ["serial_usb", "lora_sx1262", "ble"];
 
 /// Panic-LED descriptor — port, pin, active-low flag — for `set_panic_led`.
 /// Green LED on P0.19, **active high**.

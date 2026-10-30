@@ -171,6 +171,37 @@ fn boot_sequence_on_a_silent_module() {
     assert_eq!(uart.acks, vec![("pair-probe", AckOutcome::Timeout)]);
 }
 
+#[test]
+fn the_ag3352_locks_sleep_first_and_takes_its_own_answer() {
+    let mut m = AirohaInit::ag3352();
+    let out = poll(&mut m, true, 1, 0);
+    assert!(matches!(
+        &out[..],
+        [Output::Send { step: "pair-sleep-lock", frame }] if *frame == b"$PAIR382,1*2E\r\n"
+    ));
+    let mut sends = Vec::new();
+    for i in 1..40u64 {
+        for o in poll(&mut m, true, i as u32 + 1, i * 100) {
+            if let Output::Send { step, .. } = o {
+                sends.push(step);
+            }
+        }
+        if sends.contains(&"pair-probe") {
+            break;
+        }
+    }
+    assert_eq!(sends, ["pair-probe"]);
+    assert!(on_bytes(&mut m, PROBE_ANSWER_LINE, 4_000).is_empty());
+    let out = on_bytes(&mut m, b"$PAIR021,AG3352,V1.0.0*00\r\n", 4_010);
+    assert!(matches!(
+        &out[..],
+        [Output::AckResult {
+            step: "pair-probe",
+            outcome: AckOutcome::Ack
+        }]
+    ));
+}
+
 // One-shot: once the last step is out, nothing ever again.
 #[test]
 fn silent_after_the_last_step() {

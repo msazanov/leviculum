@@ -3,7 +3,7 @@
 //! The core already does the front half: it registers
 //! `rnstransport.remote.management`, gates `/status` behind the USB-loaded
 //! allow-list, and raises `NodeEvent::RequestReceived` for a request that
-//! passed both (`leviculum-core/src/node/mod.rs:792`). Until this module
+//! passed both (`leviculum-core/src/node/mod.rs:794`). Until this module
 //! nothing on the board answered that event, so a query got path, link,
 //! accepted identify — and then a timeout.
 //!
@@ -22,26 +22,24 @@
 //!
 //! What IS shared is the part that decides the wire format:
 //! [`leviculum_core::status_bundle`] owns the key set, the key order and the
-//! encoding, tested byte-for-byte against the reference packer. This module
-//! only fills in the board's three rows. When `leviculum-std`'s builder is
-//! next touched, that is the seam to move it onto.
+//! encoding, tested byte-for-byte against the reference packer, and
+//! [`leviculum_core::node::remote_status`] owns which event is a `/status`
+//! request (exact management destination and path, decided before any row is
+//! built) and how the answer leaves (a packet, or a response Resource only
+//! when the packet refuses the size). This module only fills in the board's
+//! three rows. When `leviculum-std`'s builder is next touched, that is the
+//! seam to move it onto.
 
 use alloc::vec::Vec;
 
+use leviculum_core::node::remote_status::{send_status_response, status_request, StatusSendError};
 use leviculum_core::node::{NodeCore, NodeEvent};
-use leviculum_core::status_bundle::{
-    encode_status_response, request_wants_link_stats, InterfaceStatus, StatusBundle,
-};
+use leviculum_core::status_bundle::{encode_status_response, InterfaceStatus, StatusBundle};
 use leviculum_core::traits::{Clock, Storage};
 use leviculum_core::transport::TickOutput;
-use leviculum_core::{LinkId, RequestError};
 use rand_core::CryptoRngCore;
 
-use crate::iface_bytes::{self, IFACE_COUNT, NAMES};
-
-/// The request path served, as Python registers it
-/// (`Transport.py:253-259`).
-const STATUS_PATH: &str = "/status";
+use leviculum_firmware::iface_bytes::{self, names, IFACE_COUNT};
 
 /// Answer every `/status` request in `events`, merging the sends into `out`.
 ///
@@ -58,30 +56,29 @@ pub fn handle_events<R, C, S>(
     S: Storage,
 {
     for event in events {
-        let NodeEvent::RequestReceived {
-            link_id,
-            destination_hash,
-            request_id,
-            path,
-            data,
-            ..
-        } = event
-        else {
+        let Some(request) = status_request(event, node.remote_mgmt_dest_hash()) else {
             continue;
         };
-        if path != STATUS_PATH || node.remote_mgmt_dest_hash() != Some(destination_hash) {
-            continue;
-        }
         // The core checked the allow-list before raising the event, so a
         // request that reaches here is from an identity the operator loaded
         // over USB.
-        let include_lstats = request_wants_link_stats(data);
+        let include_lstats = request.include_link_stats;
         let response = build_response(node, include_lstats);
         crate::log::log_fmt(
             "[REMOTE_STATUS] ",
             format_args!("answered len={} lstats={}", response.len(), include_lstats),
         );
-        respond(node, link_id, request_id, &response, out);
+        // The two failure lines are the ones the board printed before the
+        // send moved into core, so a capture reads the same either way.
+        match send_status_response(node, &request, &response) {
+            Ok(send) => out.merge(send),
+            Err(StatusSendError::Resource(e)) => {
+                crate::log::log_fmt("[REMOTE_STATUS] ", format_args!("resource failed: {:?}", e))
+            }
+            Err(StatusSendError::Packet(e)) => {
+                crate::log::log_fmt("[REMOTE_STATUS] ", format_args!("send failed: {:?}", e))
+            }
+        }
     }
 }
 
@@ -109,10 +106,9 @@ where
     });
 
     let mut rows: [InterfaceStatus; IFACE_COUNT] = core::array::from_fn(|id| {
-        let (rxb, txb) = iface_bytes::counters(id).map_or((0, 0), |c| c.totals());
-        let (rxs, txs) = iface_bytes::counters(id).map_or((0.0, 0.0), |c| c.speeds());
+        let traffic = iface_bytes::snapshot(id);
         InterfaceStatus {
-            name: NAMES[id],
+            name: names()[id],
             // The live mirror the main loop keeps (`set_interface_online`),
             // which is the same bool the core routes on: a status line that
             // said "Up" for a carrier the core refuses to route over would
@@ -122,10 +118,10 @@ where
             // Only BLE has a notion of connected clients: the live link
             // count the main loop mirrors for path selection.
             clients: (id == iface_bytes::BLE).then(|| node.interface_peer_count(id) as u64),
-            rxb,
-            txb,
-            rxs,
-            txs,
+            rxb: traffic.rxb,
+            txb: traffic.txb,
+            rxs: traffic.rxs,
+            txs: traffic.txs,
             bitrate: None,
         }
     });
@@ -137,35 +133,6 @@ where
         transport_id: Some(&transport_id),
         transport_uptime: embassy_time::Instant::now().as_millis() as f64 / 1000.0,
     };
-    let link_count = include_lstats.then(|| node.transport_link_table_entries().len() as u64);
+    let link_count = include_lstats.then(|| node.transport_link_count() as u64);
     encode_status_response(&bundle, link_count)
-}
-
-/// Send `response`, falling back to a response Resource when it does not fit
-/// one packet. Same shape as the propagation engine's `respond`
-/// (`pn.rs:3195`), which is the board's precedent for answering a request.
-fn respond<R, C, S>(
-    node: &mut NodeCore<R, C, S>,
-    link_id: &LinkId,
-    request_id: &[u8; 16],
-    response: &[u8],
-    out: &mut TickOutput,
-) where
-    R: CryptoRngCore,
-    C: Clock,
-    S: Storage,
-{
-    match node.send_response(link_id, request_id, response) {
-        Ok(send) => out.merge(send),
-        Err(RequestError::PayloadTooLarge) => {
-            match node.send_response_resource(link_id, request_id, response) {
-                Ok((_, send)) => out.merge(send),
-                Err(e) => crate::log::log_fmt(
-                    "[REMOTE_STATUS] ",
-                    format_args!("resource failed: {:?}", e),
-                ),
-            }
-        }
-        Err(e) => crate::log::log_fmt("[REMOTE_STATUS] ", format_args!("send failed: {:?}", e)),
-    }
 }

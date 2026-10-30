@@ -10,7 +10,7 @@
 //! surfaces received messages as engine events; writing the message file
 //! and running the hook is `main`'s job, off the core lock.
 //!
-//! The absorb loop is `lnmsg`'s (`lnmsg/src/engine.rs`,
+//! The absorb loop is `loquax`'s (`loquax/src/engine.rs`,
 //! `MAX_ABSORB_ROUNDS`): a core call made inside a hook can return
 //! events synchronously, and the driver never hands those back, so
 //! closing the loop is the consumer's job — bounded, because an
@@ -27,7 +27,7 @@ use leviculum_lxmf::{LxmfNode, LxmfNodeConfig, Message};
 
 use crate::engine::EngineEvent;
 
-/// See `lnmsg/src/engine.rs` (`MAX_ABSORB_ROUNDS`) for why the re-feed
+/// See `loquax/src/engine.rs` (`MAX_ABSORB_ROUNDS`) for why the re-feed
 /// is bounded.
 const MAX_ABSORB_ROUNDS: usize = 8;
 

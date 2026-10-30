@@ -10,6 +10,7 @@
 //! | one short | a message for the user arrived | [`notify`] |
 //! | one blip | a held button has reached 2 s: release now | [`release_now`] |
 //! | two short | the report a double press sent was proven delivered | [`report_delivered`] |
+//! | one short, one blip | the announces a double press made have left the radio | [`announce_sent`] |
 //!
 //! A [`Pattern`] is a short list of [`Step`]s, each an on time and the
 //! off time after it, and it is the same list for every sink: the LED, the
@@ -18,6 +19,9 @@
 //! players (`leviculum-nrf/src/feedback.rs`) drive a pin from a
 //! [`Playback`]; which phase a pattern is in at a given millisecond is
 //! decided here, where it can be asserted without a board.
+//!
+//! When `announce-sent` plays is [`AirWatch`]'s decision, host-tested here
+//! for the same reason.
 //!
 //! Every pattern is a `static` list, so a `Pattern` is two words and can
 //! be handed to a player through a signal without a copy of its steps.
@@ -88,6 +92,10 @@ pub const ERROR_FLASHES: usize = 20;
 /// shortest beep Meshtastic plays as a click (`DURATION_1_16` = 62 ms,
 /// `src/buzz/buzz.cpp`), which is audible on the T1000-E's buzzer.
 pub const RELEASE_BLIP_MS: u16 = 60;
+/// The dark time inside `announce-sent`, between its short and its blip.
+/// Under the counting gap, so the pair reads as one figure, a short with a
+/// click after it, and not as a count of two.
+pub const FIGURE_GAP_MS: u16 = SHORT_ON_MS;
 
 const SHORT: Step = Step {
     on_ms: SHORT_ON_MS,
@@ -108,6 +116,16 @@ static BLIP: [Step; 1] = [Step {
     on_ms: RELEASE_BLIP_MS,
     off_ms: 0,
 }];
+static SHORT_BLIP: [Step; 2] = [
+    Step {
+        on_ms: SHORT_ON_MS,
+        off_ms: FIGURE_GAP_MS,
+    },
+    Step {
+        on_ms: RELEASE_BLIP_MS,
+        off_ms: 0,
+    },
+];
 
 /// The two operating modes (`docs/src/concepts/operating-modes.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,6 +202,131 @@ pub fn report_delivered() -> Pattern {
     Pattern {
         name: "report-delivered",
         steps: &SHORTS[..2],
+    }
+}
+
+/// The announces a double press made have left the radio (order 930,
+/// Codeberg #459): one short, then one blip.
+///
+/// Every double press gets this answer, with or without a report
+/// recipient; before it, a board with no recipient answered the gesture
+/// with nothing at all. It is neither of the one-step patterns it borrows
+/// from: [`battery_quarters`]`(25)` and [`notify`] are one short and end
+/// there, [`release_now`] is one blip and nothing before it. Against
+/// [`report_delivered`], two short, it is the second step that differs:
+/// a blip under half a short's length, after a gap under half the
+/// counting one, so the figure is over in 360 ms where two short take
+/// 650. The two follow each other on a board with a recipient, this one at
+/// the air and that one seconds later at the proof.
+pub fn announce_sent() -> Pattern {
+    Pattern {
+        name: "announce-sent",
+        steps: &SHORT_BLIP,
+    }
+}
+
+/// When a double press's announces have left the radio (order 930).
+///
+/// The LoRa interface numbers every packet it accepts into its queue
+/// (the accept count after it, from 1) and the LoRa task settles each one
+/// in that order: keyed, or dropped by the mute, the stale rule or a
+/// refused frame. The press's announces are the packets accepted while
+/// its arm dispatched them, so the last of them is the accept count after
+/// the dispatch, and `announce-sent` plays when that packet settles keyed.
+/// One watch per press, on the press's last packet, so a press plays it
+/// once however many announces it made.
+///
+/// The LoRa task runs above the node loop, so a packet can settle between
+/// the dispatch and the arm. The watch is therefore opened before the
+/// dispatch ([`open`](Self::open)), remembers the latest settle while it
+/// collects, and [`close`](Self::close) resolves a packet that has already
+/// gone. A new press replaces a watch still waiting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AirWatch {
+    /// No press is waiting.
+    Idle,
+    /// A press is dispatching; the latest packet settled meanwhile.
+    Collecting {
+        /// The latest settle: the packet's number and whether it was keyed.
+        last: Option<(u32, bool)>,
+    },
+    /// A press is waiting for the packet with this number.
+    Armed {
+        /// The press's last packet.
+        packet: u32,
+    },
+}
+
+impl Default for AirWatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AirWatch {
+    /// No press waiting.
+    pub const fn new() -> Self {
+        Self::Idle
+    }
+
+    /// A press is about to dispatch its announces.
+    pub fn open(&mut self) {
+        *self = Self::Collecting { last: None };
+    }
+
+    /// The press's dispatch is done. `before` and `after` are the LoRa
+    /// accept count around it; `announced` is whether the press made any
+    /// announce (a press the duty budget defers makes none); `lora_active`
+    /// is whether the LoRa carrier is on.
+    ///
+    /// No LoRa packet with LoRa on means the queue refused them, so the
+    /// radio sends nothing and nothing plays. No LoRa packet with LoRa off
+    /// means the announces went to the other carriers only, which have no
+    /// air hook, and the dispatch itself is the answer.
+    pub fn close(
+        &mut self,
+        before: u32,
+        after: u32,
+        announced: bool,
+        lora_active: bool,
+    ) -> Option<Pattern> {
+        let last = match *self {
+            Self::Collecting { last } => last,
+            Self::Idle | Self::Armed { .. } => None,
+        };
+        *self = Self::Idle;
+        if !announced {
+            return None;
+        }
+        if after == before {
+            return (!lora_active).then(announce_sent);
+        }
+        match last {
+            Some((packet, keyed)) if packet == after => keyed.then(announce_sent),
+            _ => {
+                *self = Self::Armed { packet: after };
+                None
+            }
+        }
+    }
+
+    /// The LoRa task settled the packet numbered `packet`; `keyed` is
+    /// whether it went on the air.
+    pub fn settled(&mut self, packet: u32, keyed: bool) -> Option<Pattern> {
+        match *self {
+            Self::Idle => None,
+            Self::Collecting { .. } => {
+                *self = Self::Collecting {
+                    last: Some((packet, keyed)),
+                };
+                None
+            }
+            Self::Armed { packet: want } if want == packet => {
+                *self = Self::Idle;
+                keyed.then(announce_sent)
+            }
+            Self::Armed { .. } => None,
+        }
     }
 }
 
@@ -352,6 +495,126 @@ mod tests {
         assert_ne!(d.steps, notify().steps, "not the inbound message's one");
     }
 
+    #[test]
+    fn announce_sent_is_one_short_then_one_blip() {
+        let a = announce_sent();
+        assert_eq!(a.name, "announce-sent");
+        assert_eq!(
+            a.steps,
+            &[
+                Step {
+                    on_ms: 150,
+                    off_ms: 150
+                },
+                Step {
+                    on_ms: 60,
+                    off_ms: 0
+                }
+            ]
+        );
+        assert_eq!(a.total_ms(), 360);
+        // Apart from every pattern it could be heard as.
+        for other in [
+            battery_quarters(25),
+            notify(),
+            release_now(),
+            report_delivered(),
+        ] {
+            assert_ne!(a.steps, other.steps, "{}", other.name);
+        }
+        assert_ne!(a.total_ms(), report_delivered().total_ms());
+    }
+
+    fn sent() -> Option<&'static str> {
+        Some("announce-sent")
+    }
+
+    fn name(p: Option<Pattern>) -> Option<&'static str> {
+        p.map(|p| p.name)
+    }
+
+    #[test]
+    fn a_press_plays_once_when_its_last_packet_is_keyed() {
+        let mut w = AirWatch::new();
+        w.open();
+        // Two announces: packets 6 and 7.
+        assert_eq!(w.close(5, 7, true, true), None);
+        assert_eq!(w, AirWatch::Armed { packet: 7 });
+        assert_eq!(name(w.settled(6, true)), None, "not per announce");
+        assert_eq!(name(w.settled(7, true)), sent());
+        assert_eq!(name(w.settled(8, true)), None, "once per press");
+        assert_eq!(w, AirWatch::Idle);
+    }
+
+    #[test]
+    fn a_press_whose_last_packet_was_not_keyed_plays_nothing() {
+        let mut w = AirWatch::new();
+        w.open();
+        assert_eq!(w.close(0, 2, true, true), None);
+        assert_eq!(name(w.settled(1, true)), None);
+        assert_eq!(name(w.settled(2, false)), None);
+        assert_eq!(w, AirWatch::Idle);
+    }
+
+    #[test]
+    fn a_packet_settled_before_the_close_is_resolved_by_it() {
+        let mut w = AirWatch::new();
+        w.open();
+        assert_eq!(name(w.settled(1, true)), None);
+        assert_eq!(name(w.settled(2, true)), None);
+        assert_eq!(name(w.close(0, 2, true, true)), sent());
+        assert_eq!(w, AirWatch::Idle);
+        assert_eq!(name(w.settled(3, true)), None);
+
+        let mut w = AirWatch::new();
+        w.open();
+        assert_eq!(name(w.settled(2, false)), None);
+        assert_eq!(name(w.close(0, 2, true, true)), None, "dropped, silent");
+        assert_eq!(w, AirWatch::Idle);
+    }
+
+    #[test]
+    fn an_earlier_packet_settled_before_the_close_still_arms() {
+        let mut w = AirWatch::new();
+        w.open();
+        assert_eq!(name(w.settled(1, true)), None);
+        assert_eq!(name(w.close(0, 2, true, true)), None);
+        assert_eq!(w, AirWatch::Armed { packet: 2 });
+        assert_eq!(name(w.settled(2, true)), sent());
+    }
+
+    #[test]
+    fn no_lora_packet_plays_only_when_lora_is_off() {
+        let mut w = AirWatch::new();
+        w.open();
+        assert_eq!(name(w.close(4, 4, true, false)), sent());
+        w.open();
+        assert_eq!(name(w.close(4, 4, true, true)), None, "queue refused");
+        w.open();
+        assert_eq!(name(w.close(4, 4, false, false)), None, "deferred");
+        w.open();
+        assert_eq!(name(w.close(4, 6, false, true)), None, "deferred");
+        assert_eq!(w, AirWatch::Idle);
+    }
+
+    #[test]
+    fn settles_without_a_press_play_nothing() {
+        let mut w = AirWatch::new();
+        for packet in 0..5 {
+            assert_eq!(name(w.settled(packet, true)), None);
+        }
+        assert_eq!(w, AirWatch::Idle);
+    }
+
+    #[test]
+    fn the_packet_numbers_wrap() {
+        let mut w = AirWatch::new();
+        w.open();
+        assert_eq!(w.close(u32::MAX, 1, true, true), None);
+        assert_eq!(name(w.settled(0, true)), None);
+        assert_eq!(name(w.settled(1, true)), sent());
+    }
+
     // The timings keep the signals apart. Checked at compile time, so a
     // constant moved past its reason does not build.
     const _: () = {
@@ -360,6 +623,10 @@ mod tests {
         // A long cannot be read as a short, a blip not as a quarter.
         assert!(LONG_ON_MS >= 6 * SHORT_ON_MS);
         assert!(RELEASE_BLIP_MS < SHORT_ON_MS);
+        // announce-sent's blip is under half a short and its gap under
+        // half the counting one: a figure, not a count of two.
+        assert!(2 * RELEASE_BLIP_MS < SHORT_ON_MS);
+        assert!(2 * FIGURE_GAP_MS < COUNT_GAP_MS);
         // The flicker is far faster than the count and still visible.
         let count_period = SHORT_ON_MS + COUNT_GAP_MS;
         let flicker_period = 2 * FLICKER_MS;
@@ -380,6 +647,7 @@ mod tests {
             notify(),
             release_now(),
             report_delivered(),
+            announce_sent(),
         ];
         for (i, a) in all.iter().enumerate() {
             assert!(a
@@ -425,6 +693,7 @@ mod tests {
             notify(),
             release_now(),
             report_delivered(),
+            announce_sent(),
         ] {
             let p = Playback::new(pattern, 0);
             let total = u64::from(pattern.total_ms());

@@ -90,12 +90,17 @@ target the tree has, every bin unittest target and the doctests. Out
 of that it leaves exactly what needs a `reference/` submodule at run
 time, because those fail rather than skip without it: three whole
 targets (`rnsd_interop`, `leviculum-lxmf`'s `reference_lock`,
-`lnmsg`'s `python_interop`) and seven tests by exact name inside `mvr`,
+`loquax`'s `python_interop`) and seven tests by exact name inside `mvr`,
 which includes the rnsd_interop harness by `#[path]` and so runs the
 harness's own tests and the four tests that spawn a Python peer
 through it. The script's header holds the
 list, one written reason per entry, and checks every entry against the
-tree so a stale one is a red gate. The citation guard runs in full but
+tree so a stale one is a red gate. A target that declares
+`required-features` (`loquax`'s `tui_snapshot`) is left out of that
+featureless run too, because cargo refuses the whole invocation over
+it, and `ci-gate` runs the recipe that passes the feature
+(`just loquax-tui`) right after; `check-standard-integ` holds both
+halves. The citation guard runs in full but
 skips the citations into the absent references and prints how many
 (about 2600). Everything left out runs on the tier-2 nightly with the
 submodules present, which is what the publish gate reads.
@@ -112,7 +117,7 @@ pipeline and cannot: it needs the `reference/Reticulum` submodule and a
 which is the property `just check-plain-clone` exists to hold (Codeberg
 #300). Fetching the submodule into the release path would undo exactly
 that. The other two are `leviculum-lxmf`'s `reference_lock` and
-`lnmsg`'s `python_interop`, for the same reason;
+`loquax`'s `python_interop`, for the same reason;
 `scripts/ci-gate-integ.sh` holds the list, one written reason per
 entry, and computes everything else it runs from the tree.
 
@@ -401,7 +406,7 @@ the stack, ~13 KB of margin left for the whole call tree.
 that frame to 12 672 B. It does so only because the compiler builds the
 `Box::new` argument straight into the allocation, which Rust does not
 promise; the gate's limit is therefore held below the node box
-(`NODE_BOX_BYTES`, 31 744 B), so a build that stops eliding the copy puts
+(`NODE_BOX_BYTES`, 31 752 B), so a build that stops eliding the copy puts
 one whole `NodeCore` in a frame and fails here.
 
 The gate prefers `arm-none-eabi-objdump` and falls back to the rustup
@@ -626,17 +631,18 @@ carries the before/after trace and the runs that justify it.
 
 `just install-ci` therefore builds btvirt itself
 (`scripts/install-btvirt.sh`): it fetches the bluez source matching this
-host, applies the vendored upstream patch and then the two local ones from
+host, applies the vendored upstream patch and then the three local ones from
 `scripts/patches/`, and installs the binary together with a provenance
 sidecar, `/usr/local/bin/btvirt.provenance`, whose first non-comment line
 every room prints as `origin=`:
 
 ```
-BLE_ROOM_BTVIRT bin=/usr/local/bin/btvirt bytes=896816 origin="bluez 5.82-1.1 + upstream 4ff7deaf8c + local adv-every-interval + local max-btdev-24; built 2026-10-13, md5 d4a62600d53aa83e102d71d9034c20a7"
+BLE_ROOM_BTVIRT bin=/usr/local/bin/btvirt bytes=896816 origin="bluez 5.82-1.1 + upstream 4ff7deaf8c + local adv-every-interval, max-btdev-24, deferred-fd-free; built 2026-10-24, md5 2484faa5cfe1e5defb5f04763a8ac87a"
 ```
 
-A sidecar that names `4ff7deaf8c` without `adv-every-interval` or without
-`max-btdev-24` is a bench provisioned before that local patch; `--check`
+A sidecar that names `4ff7deaf8c` without `adv-every-interval`,
+`max-btdev-24` or `deferred-fd-free` is a bench provisioned before that local
+patch; `--check`
 fails it and the installer rebuilds it.
 
 A room with no sidecar still runs and says `origin=unrecorded`, which
@@ -681,6 +687,17 @@ controllers, `-l25` fails as `-l17` did, and `ble_room_20` was green
 three of three with 380 of 380 ordered probes each (periculum order
 701). A bench rebuilt from a tree without the patch drops back to
 sixteen, and the cell skips as infra again.
+
+**The event loop frees a removed fd only after its batch.** Stock
+`mainloop_remove_fd` (bluez `src/shared/mainloop.c`) freed an fd's data at
+once, also from inside a callback `mainloop_run` was still dispatching,
+while the loop's local copy of that epoll batch still held the pointer.
+Under timer-fd churn a later entry of the batch read released memory and
+btvirt died: `scripts/btvirt-churn.sh` measured 50 SIGSEGV exits in 3625
+iterations on the three-patch binary. The local patch `deferred-fd-free`
+marks such data removed, skips it for the rest of the batch and frees it
+afterwards; on the rebuilt binary the same bench drove 12000 iterations
+with no exit (2026-10-24, order 955).
 
 ## Concurrent test protection
 

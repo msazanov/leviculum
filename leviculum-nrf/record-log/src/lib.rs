@@ -196,7 +196,12 @@
 
 #![no_std]
 
-#[cfg(any(test, feature = "sim"))]
+// The one place this crate allocates is `legacy`, behind `mapped-read`: it
+// keeps the region's page order, a list whose length is a property of the
+// region rather than of the format. Everything else here is allocation-free,
+// and the builds that link this crate without the feature carry no allocator
+// of ours at all.
+#[cfg(any(test, feature = "sim", feature = "mapped-read"))]
 extern crate alloc;
 
 pub mod board;
@@ -206,6 +211,13 @@ pub mod sim;
 
 #[cfg(test)]
 mod tests;
+
+/// The read-only mapped walk: every record of a region, oldest first, one
+/// at a time. Shared by ordered NOR offers and the one-time microSD import.
+/// Compiled under `test` as well, so the host tests `lint-nrf` runs cover it
+/// before any member turns the feature on.
+#[cfg(any(test, feature = "mapped-read"))]
+pub mod legacy;
 
 use embedded_storage_async::nor_flash::{MultiwriteNorFlash, NorFlash, ReadNorFlash};
 

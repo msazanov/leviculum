@@ -21,13 +21,12 @@
 //! the same reason: a state machine that needs hardware to be exercised
 //! is a state machine that is never exercised.
 //!
-//! The firmware side stays a thin driver: perform the [`Action`] the
-//! machine asks for, feed back the [`Event`] it produced, repeat. Each
-//! action is performed **exactly once**, which is what makes
-//! "every fragment goes out in order and exactly once" a structural
-//! property rather than a hope — the machine is the only source of
-//! actions, and it only ever emits [`Action::Send`] for a fragment it
-//! has not yet seen acknowledged.
+//! The firmware side stays a thin [`FragmentPort`]: enqueue one fragment or
+//! await its own connection's drain edge. [`pump_fragments`] performs the
+//! shared action loop. Each action is performed **exactly once**, which makes
+//! "every fragment goes out in order and exactly once" a structural property
+//! rather than a hope — the machine is the only source of actions, and it only
+//! ever emits [`Action::Send`] for a fragment it has not yet seen accepted.
 //!
 //! [`leviculum-sd-policy`]: https://codeberg.org/Lew_Palm/leviculum
 //! [`leviculum-telemetry-policy`]: https://codeberg.org/Lew_Palm/leviculum
@@ -46,6 +45,7 @@ pub mod gatt_bytes;
 pub mod hold;
 pub mod link_down;
 pub mod peer;
+pub mod pump;
 pub mod registry;
 pub mod saturation;
 pub mod session_census;
@@ -81,12 +81,14 @@ pub use gatt_bytes::{
 };
 pub use hold::TxHold;
 pub use link_down::{
-    disconnect_settle_ms, DisconnectReason, LinkDownLine, DISCONNECT_SETTLE_MARGIN_MS,
+    disconnect_settle_ms, forget_deadline_ms, DisconnectReason, LinkDownLine, LinkForgottenLine,
+    DISCONNECT_SETTLE_MARGIN_MS, MAX_SUPERVISION_TIMEOUT_MS,
 };
 pub use peer::{
     addr_value, parse_peer_advertisement, should_initiate, ConnectDecision, PeerAdvertisement,
     ScanMode,
 };
+pub use pump::{pump_fragments, FragmentPort};
 pub use registry::{
     judge_duplicate, plan_fanout, preferred_ble_role, resolve_fanout, usable_mtu, BleRole,
     DataSilence, Delivery, DupRule, DupVerdict, LinkUp, LinkVerdict, Origin, PeerRegistry,
@@ -284,19 +286,19 @@ impl core::fmt::Display for TxPktLine {
     }
 }
 
-/// The result of one `sd_ble_gatts_hvx` call, as the driver saw it.
+/// The result of one fragment enqueue attempt, as the BLE backend saw it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotifyOutcome {
-    /// The SoftDevice took the fragment into its notification queue.
+    /// The BLE stack accepted the fragment into its outbound queue.
     Sent,
-    /// `NRF_ERROR_RESOURCES`: the per-connection HVN queue is full. The
-    /// fragment was **not** queued and must be offered again.
+    /// The queue or packet pool is full, or a bounded enqueue expired.
+    /// The fragment was **not** queued and must be offered again.
     QueueFull,
     /// The connection is gone; nothing more will go out on it.
     Disconnected,
-    /// Any other SoftDevice error, carrying its raw code so the report
-    /// names it. `NRF_ERROR_DATA_SIZE` (a fragment larger than the
-    /// negotiated ATT MTU allows) is the one to expect here.
+    /// Any other backend error, carrying its raw code so the report names it.
+    /// `NRF_ERROR_DATA_SIZE` (a fragment larger than the negotiated ATT MTU
+    /// allows) is one such error.
     Failed(u32),
 }
 
@@ -305,8 +307,8 @@ pub enum NotifyOutcome {
 pub enum Event {
     /// The outcome of the [`Action::Send`] the driver just performed.
     Notify(NotifyOutcome),
-    /// The SoftDevice raised `BLE_GATTS_EVT_HVN_TX_COMPLETE`: at least
-    /// one queue slot is free again.
+    /// The backend confirmed completion on this connection, making at least
+    /// one of its queue slots free again.
     Drained,
     /// [`Action::AwaitDrain`] hit [`DRAIN_WAIT_MS`] without a drain.
     WaitTimedOut,
@@ -385,9 +387,9 @@ enum Phase {
     Aborted,
 }
 
-/// Drives one packet's fragments through the SoftDevice notification
-/// queue. Construct with [`PacketTx::start`], then loop on
-/// [`PacketTx::step`].
+/// Drives one packet's fragments through the BLE backend's outbound queue.
+/// [`pump_fragments`] owns the production action loop; [`PacketTx::start`] and
+/// [`PacketTx::step`] expose the same decisions for synchronous consumers.
 #[derive(Debug)]
 pub struct PacketTx {
     total: usize,
@@ -612,23 +614,28 @@ mod tests {
         }
     }
 
-    /// The firmware driver, in the shape `ble.rs` uses it.
+    impl FragmentPort for Sink {
+        async fn notify(&mut self, index: usize) -> NotifyOutcome {
+            Sink::notify(self, index)
+        }
+
+        async fn wait_drain(&mut self) -> Event {
+            self.wait()
+        }
+    }
+
     fn drive(sink: &mut Sink, fragments: usize) -> (Action, PacketTx) {
-        let (mut tx, mut action) = PacketTx::start(fragments);
-        for _ in 0..10_000 {
-            match action {
-                Action::Send { index } => {
-                    let outcome = sink.notify(index);
-                    action = tx.step(Event::Notify(outcome));
-                }
-                Action::AwaitDrain { .. } => {
-                    let event = sink.wait();
-                    action = tx.step(event);
-                }
-                terminal => return (terminal, tx),
+        use core::future::Future;
+        use core::pin::pin;
+        use core::task::{Context, Poll, Waker};
+
+        let mut pump = pin!(pump_fragments(sink, fragments));
+        match pump.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready((tx, action)) => (action, tx),
+            Poll::Pending => {
+                panic!("the synchronous credit port must produce its terminal verdict")
             }
         }
-        panic!("driver did not terminate");
     }
 
     /// Positive control for the sink itself, and the red state this

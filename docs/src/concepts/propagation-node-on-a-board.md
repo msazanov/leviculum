@@ -5,8 +5,8 @@ V2, 2 MB on the T114. Neither board carries one: both beliefs came from
 an `EXTERNAL_FLASH_DEVICES` line that is a template default on both
 vendors, and three units answered nothing to a JEDEC read (081522b2; the
 evidence sits in the board files, `CONFIG`,
-`leviculum-nrf/src/boards/t114.rs:171` and `CONFIG`,
-`leviculum-nrf/src/boards/rak4631.rs:186`). So the store went where there
+`leviculum-nrf/src/boards/t114.rs:188` and `CONFIG`,
+`leviculum-nrf/src/boards/rak4631.rs:182`). So the store went where there
 is flash: **16 pages of the nRF52840's own flash between the firmware
 image and the persistence pages** (`STORE`, `leviculum-nrf/memory.x:93`,
 landed in 81fcb46e; the log format chosen in 59c36129). Every capacity,
@@ -34,6 +34,12 @@ compatibility: **a Python or Sideband peer must be able to use our node
 as a propagation node without knowing it is small.** Everything else is
 ours to design, and a board in a pocket is not a server in a basement.
 
+A board's own propagation node is not its own mailbox: a messenger on the
+board never adopts the node beside it, because both are off at the same
+time, while a stationary board that stays on is a fine mailbox for the
+phones and laptops around it ([Loquax: the mailbox](loquax-mailbox.md),
+amended 2026-10-25).
+
 ## 1. What the role obliges us to
 
 Established against `reference/LXMF` at 1.1.0.
@@ -48,7 +54,7 @@ hang off it, and they are the entire public protocol:
 | Verb | Path | Who calls it | Handler |
 |---|---|---|---|
 | offer | `/offer` | another propagation node | `offer_request` (`LXMRouter.py:2266`) |
-| get | `/get` | a client (Sideband, `lnmsg`, `rnsd`) | `message_get_request` (`LXMRouter.py:1482`) |
+| get | `/get` | a client (Sideband, `loquax`, `rnsd`) | `message_get_request` (`LXMRouter.py:1482`) |
 
 The paths are constants on the peer
 (`OFFER_REQUEST_PATH`, `LXMPeer.py:14`; `MESSAGE_GET_PATH`,
@@ -218,7 +224,7 @@ not.
 
 One file decides it. `leviculum-nrf/memory.x` carves `STORE` out of the
 top of the application window and exports `__srecord_store` /
-`__erecord_store`; `region` (`leviculum-nrf/src/record_store.rs:253`)
+`__erecord_store`; `region` (`leviculum-nrf/src/record_store.rs:60`)
 reads those two symbols, and nothing else in the tree knows the
 addresses.
 
@@ -331,28 +337,28 @@ multiple of a word because `sd_flash_write` takes a length in words.
 | body | `len` |
 | padding to a multiple of 4 | 0 to 3 |
 
-(`HEADER_LEN`, `leviculum-nrf/record-log/src/lib.rs:220`; the layout is
+(`HEADER_LEN`, `leviculum-nrf/record-log/src/lib.rs:232`; the layout is
 tabulated at `leviculum-nrf/record-log/src/lib.rs:108-119`.) The
 destination hash is not a field: it is the first 16 bytes of the body,
 as it is in the reference, which reads it back from the head of its file
 (`LXMRouter.py:2498`).
 
 Each page carries a 12-byte header written once per erase
-(`SECTOR_HEADER_LEN`, `leviculum-nrf/record-log/src/lib.rs:222`), which
+(`SECTOR_HEADER_LEN`, `leviculum-nrf/record-log/src/lib.rs:234`), which
 leaves 4 084 B of the 4 096 for records (`SECTOR_PAYLOAD`,
-`leviculum-nrf/record-log/src/lib.rs:227`). A record never straddles a
+`leviculum-nrf/record-log/src/lib.rs:239`). A record never straddles a
 page.
 
 At the measured median body of 304 B the stride is
 `align_up(42 + 304)` = **348 B** (`record_stride`,
-`leviculum-nrf/record-log/src/lib.rs:260`), so 4 084 / 348 = 11 records
+`leviculum-nrf/record-log/src/lib.rs:272`), so 4 084 / 348 = 11 records
 to a page with 256 B of tail (6.3 %).
 
 | Body | Stride | Per page | In the 16-page region |
 |---|---|---|---|
 | 304 B — the field median | 348 B | 11 | **176** |
 | 256 B — the smallest the walk produced | 300 B | 13 | 208 |
-| 4 042 B — the largest the format allows (`MAX_BODY`, `leviculum-nrf/record-log/src/lib.rs:229`) | 4 084 B | 1 | 16 |
+| 4 042 B — the largest the format allows (`MAX_BODY`, `leviculum-nrf/record-log/src/lib.rs:241`) | 4 084 B | 1 | 16 |
 
 The 176 is the count at the brim. Reclaim is round-robin — when the
 active page cannot fit the next record the *next* page is erased and
@@ -408,7 +414,7 @@ says 210 KiB of gap is what remains at 16. Widening the region upward is
 impossible, because `0xEA000` is the bootloader's `USER_FLASH_END`, and
 widening it downward moves every record, so a later resize is a
 reformat. That is the deliberate price of the smaller default, and
-`mount` (`leviculum-nrf/src/record_store.rs:675`) already treats a
+`mount` (`leviculum-nrf/firmware/src/record_store.rs:530`) already treats a
 region that is not ours as unformatted rather than as corrupt, so the
 reformat is a boot line and not an incident.
 
@@ -460,7 +466,7 @@ the firmware: `STORE_STORM` (`TYPE_STORE_STORM`,
 given size, bounded at 1 000 records of 1 024 B
 (`STORE_STORM_MAX_BYTES`, `leviculum-core/src/envelope.rs:286`) and
 tagged so a later batch can purge exactly those (`TAG_BENCH`,
-`leviculum-nrf/src/record_store.rs:90`); `lnflash --store-storm
+`leviculum-nrf/firmware/src/record_store.rs:78`); `lnflash --store-storm
 COUNT[,BYTES]` sends it (`--store-storm`, `lnflash/src/main.rs:157`).
 The numbers owed are a connected phone's throughput and a LoRa link's
 delivery rate across a storm, measured against the same run without one.
@@ -469,7 +475,7 @@ delivery rate across a storm, measured against the same run without one.
 
 **Reads do not go through the SoftDevice's flash scheduler at all.** The
 internal flash is memory-mapped and the read is a `memcpy` that cannot
-fail or be refused (`read`, `leviculum-nrf/src/record_store.rs:396`) —
+fail or be refused (`read`, `leviculum-nrf/src/record_store.rs:140`) —
 unlike a write or an erase, it never waits for a gap between radio
 events. That single fact removes the RAM index the QSPI costing needed:
 a lookup is a scan, and a scan is free of the radio.
@@ -498,19 +504,19 @@ the second row: the peer sets scale with peers, and we control neither
 how many peer with us nor, therefore, that number.
 
 **What a full scan costs.** `for_each`
-(`leviculum-nrf/record-log/src/lib.rs:543`) walks every page, reads each
+(`leviculum-nrf/record-log/src/lib.rs:555`) walks every page, reads each
 record's 42-byte header and then its body, because `probe_record`
-(`leviculum-nrf/record-log/src/lib.rs:903`) checks the CRC over both. A
+(`leviculum-nrf/record-log/src/lib.rs:915`) checks the CRC over both. A
 full region is therefore one pass over at most 64 KiB.
 
 **This is arithmetic, not a measurement, and the assumption is stated:**
 the read is a `memcpy` from mapped flash, so the work is the bit-serial
 CRC-16 at eight shift-and-test steps a byte (`crc16_update`,
-`leviculum-nrf/record-log/src/lib.rs:272`) — 524 288 steps for the whole
+`leviculum-nrf/record-log/src/lib.rs:284`) — 524 288 steps for the whole
 region, and at one to four cycles a step on the Cortex-M4 at 64 MHz that
 is **8 to 33 ms**. The measured number is owed and nearly free, because
 the mount already performs exactly this scan and reports what it found
-(`count`, `leviculum-nrf/record-log/src/lib.rs:408`).
+(`count`, `leviculum-nrf/record-log/src/lib.rs:420`).
 
 Either way the conclusion is the same and it is not close: a `/get` list
 request costing tens of milliseconds of CPU, and nothing of the radio
@@ -545,12 +551,12 @@ usable way for two boards to meet rather than a consolation prize.
 
 **BLE.** The negotiated MTU is bounded by measurement rather than
 assumed: the SoftDevice is configured with an ATT MTU ceiling of 256
-(`CONN_GATT`, `leviculum-nrf/src/ble/mod.rs:835`), but the field log
+(`CONN_GATT`, `leviculum-nrf/src/ble/mod.rs:415`), but the field log
 shows a 183-byte packet fragmenting into 2 and a 275-byte packet also
 into 2, which brackets the payload per fragment to 138 to 182 bytes and
 the MTU to 146 to 190 — consistent with the 185 default
-(`DEFAULT_MTU`, `leviculum-core/src/framing/ble.rs:89`;
-`payload_per_fragment`, `leviculum-core/src/framing/ble.rs:112`). At
+(`DEFAULT_MTU`, `leviculum-core/src/framing/ble.rs:90`;
+`payload_per_fragment`, `leviculum-core/src/framing/ble.rs:113`). At
 177 bytes per fragment a 304-byte message is 2 notifications, so the
 full region is 352 notifications. That field log predates #547: the
 board fragmented at the fixed 185 on every link then, and now sizes
@@ -593,7 +599,7 @@ validator short-circuits before the workblock when the cost is zero
 this way for delivery stamps until the role landed, with the LXMF
 dependency pulled without `pow`; the role brought `pow` in, because the
 board announces stamp cost 13 and has to validate what it accepts, through
-the streaming validator above (`leviculum-nrf/Cargo.toml:25-33`).
+the streaming validator above (`leviculum-nrf/Cargo.toml:28-36`).
 
 The expensive case is *peering out* to a Python node, which requires
 mining a key at that node's advertised peering cost, default 18, over a
@@ -756,7 +762,7 @@ built delivers that with a one-word commit rather than with a
 probability: a record counts as present only if its flags byte reads
 live or purged, that byte sits in a single word programmed last, and a
 word cannot be half-written (`FLAG_LIVE`,
-`leviculum-nrf/record-log/src/lib.rs:240`). Any cut before that word
+`leviculum-nrf/record-log/src/lib.rs:252`). Any cut before that word
 leaves the record invisible, deterministically; the CRC is then
 catching a dropped bit rather than standing in for a commit protocol.
 
@@ -772,7 +778,7 @@ LoRa in half an hour of wall clock at the duty cap, which is the
 difference between a store and a museum. None of those conclusions is
 about LXMF; all of them are about the store, which is why the store came
 first and is why it is worth having whether or not the propagation node
-ever exists — `lnmsg`'s mailbox and telemetry retention want the same
+ever exists — `loquax`'s mailbox and telemetry retention want the same
 16 pages.
 
 What stands between here and the role is not arithmetic. It is three
@@ -853,8 +859,8 @@ statement that a part is fitted, when on both vendors it is a template
 default under a comment denying one. Neither board answered a JEDEC read
 on any unit we own; both sets of pin aliases are gone and the reasons
 are in the board files (`CONFIG`,
-`leviculum-nrf/src/boards/t114.rs:171`; `CONFIG`,
-`leviculum-nrf/src/boards/rak4631.rs:186`).
+`leviculum-nrf/src/boards/t114.rs:188`; `CONFIG`,
+`leviculum-nrf/src/boards/rak4631.rs:182`).
 
 The larger correction was this page's own premise. It costed a store on
 two parts that do not exist, and the recommendation rested on figures
@@ -975,7 +981,7 @@ once per peer, not per reboot.
 
 The record log is append-ordered: pages carry a monotone sequence
 written once per erase (`SECTOR_HEADER_LEN` header,
-`leviculum-nrf/record-log/src/lib.rs:222`), records within a page are
+`leviculum-nrf/record-log/src/lib.rs:234`), records within a page are
 ordered by offset. **A store position is therefore the pair
 `(page_sequence: u32, offset: u16)`, and each peer holds one cursor:
 everything at or below it has been offered and concluded.** As built,

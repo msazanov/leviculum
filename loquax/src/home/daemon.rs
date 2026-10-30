@@ -1,0 +1,841 @@
+//! `loquax --daemon`: the home node (`docs/src/concepts/loquax-home-node.md`).
+//!
+//! Headless, the 2026-08-08 option C (`docs/src/concepts/loquax-architecture.md`,
+//! "process model"): the engine, the store and the router against the local
+//! shared instance, and no screen. It
+//!
+//! - receives as the messenger does: the delivery destination of the home
+//!   identity, announced at start and every [`ANNOUNCE_EVERY`], so senders
+//!   deliver DIRECT and get their proof;
+//! - archives every received message, packed as it came, under a sequence
+//!   ([`crate::store::Store::archive_append`]), within the configured cap;
+//! - answers its admitted clients on `loquax.home` ([`super::server`]);
+//! - collects from its propagation node on the messenger's own schedule
+//!   ([`crate::sync::Schedule`]), so mail that senders propagated arrives
+//!   too;
+//! - delivers what its clients hand in with `/send`, by the outbox policy
+//!   of [`super::outgoing`]: direct at once, a propagated copy on failure,
+//!   direct retries on every announce of the recipient and on a slow
+//!   cadence, each state change an archive entry;
+//! - wakes every client that keeps a watching link ([`super::wake`]) when
+//!   the archive grows, so it pulls at once rather than on its schedule;
+//! - archives the announced name of a peer the user has a relation to
+//!   ([`super::relation`]), and of no other, and wakes nobody for it: a
+//!   name rides along with the next pull (1136).
+
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::time::Duration;
+
+use leviculum_core::{LinkId, RequestError, SendError};
+use leviculum_lxmf::router::MessageState;
+use leviculum_std::ReticulumNode;
+use tokio::sync::mpsc::unbounded_channel;
+
+use crate::clock::Tokio;
+use crate::effects::{Effects, Terminal};
+use crate::engine::{attach_as, AttachConfig, HomeRequest, Role};
+use crate::fanout::Fanout;
+use crate::fetch::{run_fetch, FetchOptions};
+use crate::home::outgoing::{Act, Change, Leg, Outcome, Outgoing, Policy};
+use crate::home::relation::Relations;
+use crate::home::wake::{Due, Wakes};
+use crate::mailbox_state::{MailboxRun, Stored};
+use crate::outbox::{Command, Outbox, OutboxEvent, Via};
+use crate::seen::{SeenStore, SeenWrite};
+use crate::store::Store;
+use crate::sync::{Schedule, SyncEvent};
+
+/// How often the home node announces its delivery destination again: the
+/// interval lxmd's config template suggests for the same announce
+/// (`reference/LXMF/LXMF/Utilities/lxmd.py:1140`, `announce_interval = 360`,
+/// in minutes).
+pub const ANNOUNCE_EVERY: Duration = Duration::from_secs(360 * 60);
+
+/// How often the engine's events are read.
+const PUMP: Duration = Duration::from_millis(20);
+/// How often the outbox looks for a due retry or a passed horizon. Both are
+/// counted in seconds.
+const OUTBOX_TICK: Duration = Duration::from_secs(1);
+
+/// What starting the home node needs.
+pub struct DaemonOptions {
+    pub home: PathBuf,
+    pub instance: String,
+    /// The daemon's Reticulum config directory, for its RPC key.
+    pub config_dir: PathBuf,
+    pub storage_dir: PathBuf,
+    pub identity: leviculum_core::Identity,
+    pub display_name: Vec<u8>,
+    /// The archive's cap in bytes.
+    pub archive_cap_bytes: u64,
+    /// How long an admission token stays good, in seconds.
+    pub token_ttl_secs: i64,
+    /// The outbox's retry cadence and horizon.
+    pub policy: Policy,
+    /// The propagation node to collect from, as `--pn` and the config name
+    /// it, with the word `LNMSG_PN` logs for where it came from.
+    pub preferred_pn: Option<[u8; 16]>,
+    pub pn_source: &'static str,
+    /// The collection schedule's bound, `None` for no collection.
+    pub sync_bound_ms: Option<u64>,
+    /// One collection's budget.
+    pub fetch_budget: Duration,
+    /// How each collection selects its mailbox without a preference: `main`
+    /// reads the daemon's path table for it.
+    pub mailbox: MailboxSource,
+    /// Whether watching clients are woken when the archive grows
+    /// (`home_wake` in the config, on by default). Off, a `/watch` is still
+    /// answered, and the clients pull on their schedule.
+    pub wake: bool,
+}
+
+/// A source of [`MailboxRun`]s, read once per collection.
+pub type MailboxSource =
+    Box<dyn Fn() -> Pin<Box<dyn Future<Output = MailboxRun> + Send>> + Send + Sync>;
+
+/// The runners' effects on the home node: the terminal's files, its notices
+/// on stderr (the journal under systemd), and a fetched message never
+/// printed, because the archive has it and a journal is no place for mail.
+struct Quiet(Terminal);
+
+impl Effects for Quiet {
+    fn notice(&mut self, line: &str) {
+        self.0.notice(line);
+    }
+
+    fn print(&mut self, _rendered: &[u8]) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn save_mailbox(&mut self, stored: &Stored) -> Result<(), String> {
+        self.0.save_mailbox(stored)
+    }
+
+    fn write_seen(&mut self, write: &SeenWrite) -> Result<(), String> {
+        self.0.write_seen(write)
+    }
+
+    fn unix_now_ms(&self) -> u64 {
+        self.0.unix_now_ms()
+    }
+}
+
+/// Run the home node until SIGINT or SIGTERM.
+pub async fn run(options: DaemonOptions) -> Result<(), String> {
+    let DaemonOptions {
+        home,
+        instance,
+        config_dir,
+        storage_dir,
+        identity,
+        display_name,
+        archive_cap_bytes,
+        token_ttl_secs,
+        policy,
+        preferred_pn,
+        pn_source,
+        sync_bound_ms,
+        fetch_budget,
+        mailbox,
+        wake,
+    } = options;
+    let _lock = super::lock::DeliveryLock::acquire(&home, super::lock::HOME_NODE)?;
+    let address = crate::engine::delivery_address(&identity)?;
+    let home_destination = crate::home::destination_hash(&identity.public_key_bytes())?;
+    let mut store = Store::open_in(&home, address).map_err(|e| e.to_string())?;
+    let mut relations = relations_at_start(&store, &home)?;
+    let signer = identity.clone();
+    let mut outgoing = Outgoing::new(policy);
+    for kept in store.outbox_open().map_err(|e| e.to_string())? {
+        outgoing.add(
+            kept.id,
+            kept.destination,
+            kept.packed,
+            kept.created_at,
+            kept.propagated,
+        );
+    }
+    let collector = Collector {
+        home: home.clone(),
+        instance: instance.clone(),
+        budget: fetch_budget,
+        preferred: preferred_pn,
+        source: pn_source,
+        mailbox,
+    };
+    let (requests_tx, mut requests) = unbounded_channel::<HomeRequest>();
+    let mut attached = attach_as(
+        AttachConfig {
+            instance,
+            config_dir: Some(config_dir),
+            storage_dir,
+            identity,
+            display_name,
+            notices: Terminal::new(home),
+        },
+        Role::Home {
+            requests: requests_tx,
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let node = attached.node();
+    tracing::warn!(
+        "HOME up address={} home={} archive_cap={}B outbox={}",
+        crate::address::to_hex(&address),
+        crate::address::to_hex(&home_destination),
+        archive_cap_bytes,
+        outgoing.len()
+    );
+    let serving = super::server::Home {
+        identity: &signer,
+        address,
+        token_ttl_secs,
+        cap_bytes: archive_cap_bytes,
+    };
+    let mut sender = Sender {
+        cap_bytes: archive_cap_bytes,
+        preferred_pn,
+        collecting: sync_bound_ms.is_some(),
+        told: std::collections::HashSet::new(),
+        newest: 0,
+    };
+    let mut wakes: Wakes<LinkId> = Wakes::default();
+    wakes.appended(store.archive_newest_waking().map_err(|e| e.to_string())?);
+
+    let mut fanout = Fanout::default();
+    let mut schedule = sync_bound_ms.map(|bound| Schedule::new(Some(bound)));
+    let mut fetch: Option<tokio::task::JoinHandle<Option<usize>>> = None;
+    // The node the engine's router has selected, as its PnSelected said:
+    // not `--pn` itself, which the router learns only from a SelectPn, and
+    // with collections off nothing else sends one.
+    let mut selected_pn = None;
+    let origin = tokio::time::Instant::now();
+    let now_ms = || u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let mut pump = tokio::time::interval(PUMP);
+    let mut outbox_tick = tokio::time::interval(OUTBOX_TICK);
+    let mut announce =
+        tokio::time::interval_at(tokio::time::Instant::now() + ANNOUNCE_EVERY, ANNOUNCE_EVERY);
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(|e| format!("SIGTERM handler: {e}"))?;
+
+    let outcome = loop {
+        tokio::select! {
+            Some(request) = requests.recv() => {
+                let (link, remote) = (request.link_id, request.remote);
+                let (accepted, watching) = answer(&node, &mut store, &serving, request).await;
+                if let (Some(told), Some(device), true) = (watching, remote, wake) {
+                    wakes.watch(link, device, told);
+                }
+                // A send and a mark append; a failed read is said by the
+                // next append that reads it.
+                if let Ok(newest) = store.archive_newest_waking() {
+                    wakes.appended(newest);
+                }
+                if let Some(accepted) = accepted {
+                    related(&mut store, &mut relations, accepted.destination, archive_cap_bytes);
+                    outgoing.add(
+                        accepted.id,
+                        accepted.destination,
+                        accepted.packed,
+                        accepted.created_at,
+                        false,
+                    );
+                    let acts = outgoing.tick(unix_now());
+                    sender.carry_out(&mut attached.outbox, &mut store, &mut outgoing, acts, selected_pn);
+                }
+            }
+            _ = outbox_tick.tick() => {
+                let acts = outgoing.tick(unix_now());
+                sender.carry_out(&mut attached.outbox, &mut store, &mut outgoing, acts, selected_pn);
+            }
+            _ = pump.tick() => {
+                let events = match fanout.pump(&mut attached.outbox) {
+                    Ok(events) => events,
+                    Err(gone) => break Err(gone.to_string()),
+                };
+                for event in events {
+                    match event {
+                        OutboxEvent::Ready { .. } => {
+                            if let Some(schedule) = &mut schedule {
+                                schedule.on(SyncEvent::Start, now_ms());
+                            }
+                        }
+                        OutboxEvent::Packed { message_id, packed } => {
+                            if let Some(seq) =
+                                archive(&mut store, &message_id, &packed, archive_cap_bytes)
+                            {
+                                wakes.appended(seq);
+                                if let Some(source) = source_of(&packed) {
+                                    related(&mut store, &mut relations, source, archive_cap_bytes);
+                                }
+                            }
+                        }
+                        OutboxEvent::PnSelected { destination, .. } => {
+                            selected_pn = Some(destination);
+                        }
+                        OutboxEvent::PnUnavailable { detail } => {
+                            tracing::info!("HOME no propagation node: {detail}");
+                        }
+                        OutboxEvent::Announced { destination, name } => {
+                            if let Some(name) = name.filter(|_| destination != address) {
+                                heard_name(
+                                    &mut store,
+                                    &mut relations,
+                                    destination,
+                                    &name,
+                                    archive_cap_bytes,
+                                );
+                            }
+                            let acts = outgoing.announced(destination, unix_now());
+                            sender.carry_out(&mut attached.outbox, &mut store, &mut outgoing, acts, selected_pn);
+                        }
+                        OutboxEvent::Left { message_id, last } => {
+                            let outcome = match last {
+                                Some(MessageState::Delivered) => Outcome::Delivered,
+                                Some(MessageState::Sent | MessageState::AwaitingCollection) => {
+                                    Outcome::Sent
+                                }
+                                _ => Outcome::Failed,
+                            };
+                            sender.left(&mut attached.outbox, &mut store, &mut outgoing, &message_id, outcome, selected_pn);
+                        }
+                        OutboxEvent::Unsent { message_id, detail } => {
+                            tracing::info!(
+                                "HOME outbox unsent message={} reason={detail}",
+                                crate::address::to_hex(&message_id)
+                            );
+                            sender.left(&mut attached.outbox, &mut store, &mut outgoing, &message_id, Outcome::Failed, selected_pn);
+                        }
+                        OutboxEvent::NodeAnnounced { destination }
+                            if Some(destination) == selected_pn =>
+                        {
+                            if let Some(schedule) = &mut schedule {
+                                schedule.on(SyncEvent::Announce, now_ms());
+                            }
+                        }
+                        OutboxEvent::Broken { detail } => {
+                            tracing::warn!("HOME engine broken: {detail}");
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(task) = fetch.take_if(|task| task.is_finished()) {
+                    let event = match task.await {
+                        Ok(Some(new)) => SyncEvent::Done { new },
+                        _ => SyncEvent::Failed,
+                    };
+                    if let Some(schedule) = &mut schedule {
+                        schedule.on(event, now_ms());
+                    }
+                }
+                wakes.appended(sender.newest);
+                for due in wakes.due(now_ms()) {
+                    send_wake(&node, &mut store, &mut wakes, due).await;
+                }
+                if fetch.is_none() {
+                    if let Some(schedule) = &mut schedule {
+                        if schedule.due(now_ms()).is_some() {
+                            schedule.begin(now_ms());
+                            fetch = Some(collector.collect(&mut fanout));
+                        }
+                    }
+                }
+            }
+            _ = announce.tick() => {
+                if attached.outbox.submit(Command::Announce).is_err() {
+                    break Err("the message engine stopped".to_string());
+                }
+            }
+            _ = tokio::signal::ctrl_c() => break Ok(()),
+            _ = terminate.recv() => break Ok(()),
+        }
+    };
+    if let Some(task) = fetch {
+        task.abort();
+    }
+    drop(node);
+    attached.stop().await;
+    outcome
+}
+
+/// The relations at start: the conversations the store holds and the
+/// petnames of the home node's contacts file. A contacts file that cannot
+/// be read is said and counts no petname.
+fn relations_at_start(store: &Store, home: &std::path::Path) -> Result<Relations, String> {
+    let mut related = store.archive_peers().map_err(|e| e.to_string())?;
+    match crate::names::load_contacts(home) {
+        Ok(contacts) => related.extend(contacts.petnames.into_keys()),
+        Err(error) => tracing::warn!("HOME contacts: {error}"),
+    }
+    Ok(Relations::new(related))
+}
+
+/// The source of an LXMF message as packed: its second sixteen bytes.
+fn source_of(packed: &[u8]) -> Option<[u8; 16]> {
+    packed.get(16..32)?.try_into().ok()
+}
+
+/// `peer` announced `name`: archived when the user has a relation to the
+/// peer, only remembered when not. Its sequence, which wakes nobody.
+fn heard_name(
+    store: &mut Store,
+    relations: &mut Relations,
+    peer: [u8; 16],
+    name: &str,
+    cap: u64,
+) -> Option<u64> {
+    let name = relations.announced(peer, name)?;
+    archive_name(store, peer, &name, cap)
+}
+
+/// A conversation with `peer` went on: when it is a new one, the newest
+/// name heard from the peer goes into the archive at once.
+fn related(store: &mut Store, relations: &mut Relations, peer: [u8; 16], cap: u64) -> Option<u64> {
+    let name = relations.relate(peer)?;
+    archive_name(store, peer, &name, cap)
+}
+
+/// Keep a name a peer announced in the archive, for the clients that hear
+/// no announces: its sequence, when the name is new for the peer.
+fn archive_name(store: &mut Store, peer: [u8; 16], name: &str, cap: u64) -> Option<u64> {
+    let now = leviculum_std::local_time::unix_now_secs();
+    match store.archive_name(peer, name, now, cap) {
+        Ok(Some(seq)) => {
+            tracing::info!(
+                "HOME name archived peer={} seq={seq}",
+                crate::address::to_hex(&peer)
+            );
+            Some(seq)
+        }
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!("HOME archive: {error}");
+            None
+        }
+    }
+}
+
+/// Keep one received message in the archive: its sequence, when it is new.
+fn archive(store: &mut Store, message_id: &[u8; 32], packed: &[u8], cap: u64) -> Option<u64> {
+    let now = leviculum_std::local_time::unix_now_secs();
+    match store.archive_append(crate::home::KIND_RECEIVED, message_id, packed, now, cap) {
+        Ok(Some(seq)) => {
+            tracing::info!(
+                "HOME archived message={} seq={seq} bytes={}",
+                crate::address::to_hex(message_id),
+                packed.len()
+            );
+            Some(seq)
+        }
+        Ok(None) => {
+            tracing::info!(
+                "HOME archived already message={}",
+                crate::address::to_hex(message_id)
+            );
+            None
+        }
+        Err(error) => {
+            tracing::warn!("HOME archive: {error}");
+            None
+        }
+    }
+}
+
+/// One wake, on the link that watches, to a device still admitted. A link
+/// that is busy owes the wake again; one that is gone, or whose device was
+/// revoked, is forgotten, and the revoked device's link is closed.
+///
+/// The store comes `&mut`, though only read, so the loop's future stays
+/// `Send`: a shared borrow of the store is not.
+async fn send_wake(
+    node: &ReticulumNode,
+    store: &mut Store,
+    wakes: &mut Wakes<LinkId>,
+    due: Due<LinkId>,
+) {
+    let device = crate::address::to_hex(&due.device);
+    match store.is_admitted(&due.device) {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::info!("HOME wake refused device={device} reason=not-admitted");
+            wakes.forget(&due.link);
+            let _ = node.close_link(&due.link).await;
+            return;
+        }
+        Err(error) => {
+            tracing::warn!("HOME wake: {error}");
+            wakes.unsent(&due.link, due.before);
+            return;
+        }
+    }
+    let sent = node
+        .link_handle(&due.link)
+        .try_send(&super::wire::wake(due.newest))
+        .await;
+    match sent {
+        Ok(()) => tracing::info!("HOME wake device={device} newest={}", due.newest),
+        Err(leviculum_std::Error::Send(SendError::Busy | SendError::PacingDelay { .. })) => {
+            wakes.unsent(&due.link, due.before);
+        }
+        Err(error) => {
+            tracing::info!("HOME wake device={device} link gone: {error}");
+            wakes.forget(&due.link);
+        }
+    }
+}
+
+/// The unix time in seconds, the outbox's clock.
+fn unix_now() -> i64 {
+    leviculum_std::local_time::unix_now_secs()
+}
+
+/// Answer one request, as a packet when it fits and as a resource when not.
+/// The message a `/send` put in the outbox comes back, when it is new, and
+/// what a `/watch` told its client, when it took it.
+async fn answer(
+    node: &ReticulumNode,
+    store: &mut Store,
+    serving: &super::server::Home<'_>,
+    request: HomeRequest,
+) -> (Option<crate::store::Outgoing>, Option<u64>) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |elapsed| elapsed.as_secs_f64());
+    let answer = super::server::answer(
+        store,
+        serving,
+        &request.path,
+        &request.data,
+        request.remote,
+        now,
+    );
+    let bytes = &answer.bytes;
+    let sent = match node
+        .send_response(&request.link_id, &request.request_id, bytes)
+        .await
+    {
+        Err(leviculum_std::Error::Request(RequestError::PayloadTooLarge)) => {
+            node.send_response_resource(&request.link_id, &request.request_id, bytes)
+                .await
+        }
+        other => other,
+    };
+    if let Err(error) = sent {
+        // The outbox has the message whether the answer arrived or not: a
+        // client that retries with the same id is answered from it.
+        tracing::warn!("HOME answer to {}: {error}", request.path);
+        return (answer.accepted, None);
+    }
+    (answer.accepted, answer.watching)
+}
+
+/// What carrying out the outbox's acts needs besides the engine and the
+/// store.
+struct Sender {
+    cap_bytes: u64,
+    preferred_pn: Option<[u8; 16]>,
+    /// Whether collections run, the only thing that selects a propagation
+    /// node when none is named.
+    collecting: bool,
+    /// The messages already told they have no propagation node: said once
+    /// each, not on every failed direct retry.
+    told: std::collections::HashSet<[u8; 32]>,
+    /// The newest archive sequence a state change took, for the wakes.
+    newest: u64,
+}
+
+impl Sender {
+    /// The router let go of `id`: tell the outbox, and carry out what it
+    /// says.
+    fn left(
+        &mut self,
+        engine: &mut impl Outbox,
+        store: &mut Store,
+        outgoing: &mut Outgoing,
+        id: &[u8; 32],
+        outcome: Outcome,
+        selected_pn: Option<[u8; 16]>,
+    ) {
+        if let Some(leg) = outgoing.in_flight(id) {
+            tracing::info!(
+                "HOME outbox {} {} message={}",
+                leg_word(leg),
+                match outcome {
+                    Outcome::Delivered => "delivered",
+                    Outcome::Sent => "handed-on",
+                    Outcome::Failed => "failed",
+                },
+                crate::address::to_hex(id)
+            );
+        }
+        let acts = outgoing.left(id, outcome);
+        self.carry_out(engine, store, outgoing, acts, selected_pn);
+    }
+
+    /// Hand each message to the router on its leg, and record each state
+    /// change. A leg that cannot start is ended as failed at once, so the
+    /// outbox moves on.
+    fn carry_out(
+        &mut self,
+        engine: &mut impl Outbox,
+        store: &mut Store,
+        outgoing: &mut Outgoing,
+        acts: Vec<Act>,
+        selected_pn: Option<[u8; 16]>,
+    ) {
+        let mut acts = std::collections::VecDeque::from(acts);
+        while let Some(act) = acts.pop_front() {
+            match act {
+                Act::Record { id, change } => self.record(store, &id, change),
+                Act::Send { id, leg } => {
+                    let Some(packed) = outgoing.packed(&id).map(<[u8]>::to_vec) else {
+                        continue;
+                    };
+                    let started = match leg {
+                        Leg::Direct => engine
+                            .submit(Command::SendPacked {
+                                packed,
+                                via: Via::Link,
+                            })
+                            .is_ok(),
+                        Leg::Propagated => match selected_pn.or(self.preferred_pn) {
+                            Some(node) => {
+                                // The node the collections use, selected again
+                                // if none was this run: one command queue, so
+                                // the selection is in before the send.
+                                let selected = selected_pn.is_some()
+                                    || engine
+                                        .submit(Command::SelectPn {
+                                            preferred: Some(node),
+                                            mailbox: None,
+                                        })
+                                        .is_ok();
+                                selected
+                                    && engine
+                                        .submit(Command::SendPacked {
+                                            packed,
+                                            via: Via::Propagated,
+                                        })
+                                        .is_ok()
+                            }
+                            // Not selected here by the mailbox rule: that
+                            // reads the daemon's path table and may wait for
+                            // announce replays, which this path cannot. A
+                            // collection selects one, or --pn names it.
+                            None => {
+                                if self.told.insert(id) {
+                                    tracing::info!(
+                                        "HOME outbox no propagation node message={}; direct \
+                                         retries only{}",
+                                        crate::address::to_hex(&id),
+                                        match self.collecting {
+                                            true => " until a collection selects one",
+                                            false =>
+                                                ", since collections are off \
+                                                      (--sync-interval off) and no --pn \
+                                                      names one",
+                                        }
+                                    );
+                                }
+                                false
+                            }
+                        },
+                    };
+                    if started {
+                        tracing::info!(
+                            "HOME outbox {} message={}",
+                            leg_word(leg),
+                            crate::address::to_hex(&id)
+                        );
+                    } else {
+                        acts.extend(outgoing.left(&id, Outcome::Failed));
+                    }
+                }
+            }
+        }
+    }
+
+    fn record(&mut self, store: &mut Store, id: &[u8; 32], change: Change) {
+        if change != Change::Propagated {
+            self.told.remove(id);
+        }
+        match store.outbox_record(id, change, unix_now(), self.cap_bytes) {
+            Ok(seq) => {
+                self.newest = self.newest.max(seq.unwrap_or(0));
+                tracing::info!(
+                    "HOME outbox {} message={} seq={}",
+                    change.word(),
+                    crate::address::to_hex(id),
+                    seq.map_or_else(|| "-".to_string(), |seq| seq.to_string())
+                )
+            }
+            Err(error) => tracing::warn!("HOME outbox record: {error}"),
+        }
+    }
+}
+
+fn leg_word(leg: Leg) -> &'static str {
+    match leg {
+        Leg::Direct => "direct",
+        Leg::Propagated => "propagated",
+    }
+}
+
+/// What a collection from the propagation node needs.
+struct Collector {
+    home: PathBuf,
+    instance: String,
+    budget: Duration,
+    preferred: Option<[u8; 16]>,
+    source: &'static str,
+    mailbox: MailboxSource,
+}
+
+impl Collector {
+    /// One collection, on a tap of its own, the way `loquax fetch` runs it:
+    /// how many messages it brought, `None` when it failed.
+    fn collect(&self, fanout: &mut Fanout) -> tokio::task::JoinHandle<Option<usize>> {
+        let mut tap = fanout.tap();
+        let home = self.home.clone();
+        let mut options = FetchOptions::new(self.instance.clone(), self.budget);
+        let (preferred, source) = (self.preferred, self.source);
+        let mailbox = (self.mailbox)();
+        tokio::spawn(async move {
+            options.mailbox = mailbox.await;
+            let mut seen = match SeenStore::load(&home) {
+                Ok(seen) => seen,
+                Err(error) => {
+                    tracing::warn!("HOME collect: seen store: {error}");
+                    return None;
+                }
+            };
+            let mut effects = Quiet(Terminal::new(home));
+            match run_fetch(
+                &mut tap,
+                preferred,
+                source,
+                &options,
+                &mut effects,
+                &mut seen,
+                &Tokio::new(),
+            )
+            .await
+            {
+                Ok(fetched) => Some(fetched.received),
+                Err(error) => {
+                    tracing::info!("HOME collect: {error}");
+                    None
+                }
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const US: [u8; 16] = [0x11; 16];
+    const FRIEND: [u8; 16] = [0x22; 16];
+    const STRANGER: [u8; 16] = [0x33; 16];
+
+    fn names_archived(store: &Store) -> Vec<([u8; 16], String)> {
+        store
+            .archive_since(0, usize::MAX)
+            .expect("page")
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == crate::home::KIND_NAME)
+            .map(|entry| crate::home::wire::read_name_entry(&entry.packed).expect("a name"))
+            .collect()
+    }
+
+    /// 1136: the home node hears the whole network. A stranger's announce
+    /// appends nothing; a conversation peer's appends once per name; a
+    /// stranger heard before a conversation starts has its name archived
+    /// when it does.
+    #[test]
+    fn only_a_peer_with_a_relation_has_its_name_archived() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let mut relations = Relations::new([FRIEND]);
+        for n in 0..50 {
+            let name = format!("Stranger {n}");
+            assert_eq!(
+                heard_name(&mut store, &mut relations, STRANGER, &name, u64::MAX),
+                None
+            );
+        }
+        assert!(names_archived(&store).is_empty(), "no stranger's name");
+        assert!(heard_name(&mut store, &mut relations, FRIEND, "Friend", u64::MAX).is_some());
+        assert_eq!(
+            heard_name(&mut store, &mut relations, FRIEND, "Friend", u64::MAX),
+            None,
+            "the same name again appends nothing"
+        );
+        assert_eq!(names_archived(&store), [(FRIEND, "Friend".to_string())]);
+        // The stranger's first message: its newest name, at once, once.
+        assert!(related(&mut store, &mut relations, STRANGER, u64::MAX).is_some());
+        assert_eq!(
+            related(&mut store, &mut relations, STRANGER, u64::MAX),
+            None
+        );
+        assert_eq!(
+            names_archived(&store),
+            [
+                (FRIEND, "Friend".to_string()),
+                (STRANGER, "Stranger 49".to_string())
+            ]
+        );
+    }
+
+    /// A peer's names are capped to its newest: a rename replaces the entry
+    /// before it, and the relations at start come from the archive.
+    #[test]
+    fn a_rename_keeps_only_the_newest_name_and_the_archive_relates_at_start() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let mut relations = Relations::new([FRIEND]);
+        heard_name(&mut store, &mut relations, FRIEND, "Friend", u64::MAX).expect("first");
+        heard_name(&mut store, &mut relations, FRIEND, "Renamed", u64::MAX).expect("rename");
+        assert_eq!(names_archived(&store), [(FRIEND, "Renamed".to_string())]);
+
+        let mut packed = vec![0u8; 120];
+        packed[..16].copy_from_slice(&US);
+        packed[16..32].copy_from_slice(&STRANGER);
+        assert_eq!(source_of(&packed), Some(STRANGER));
+        store
+            .archive_append(crate::home::KIND_RECEIVED, &[7; 32], &packed, 1, u64::MAX)
+            .expect("append")
+            .expect("new");
+        let again = relations_at_start(&store, home.path()).expect("relations");
+        assert!(again.is_related(&STRANGER), "the sender of a message");
+        assert!(!again.is_related(&FRIEND), "a name alone is no relation");
+    }
+
+    /// A name entry wakes nobody: the newest waking sequence passes it by,
+    /// so a client told the message before it is owed nothing.
+    #[test]
+    fn a_name_entry_causes_no_wake() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let message = store
+            .archive_append(crate::home::KIND_RECEIVED, &[7; 32], &[0; 40], 1, u64::MAX)
+            .expect("append")
+            .expect("new");
+        let mut wakes: Wakes<u8> = Wakes::default();
+        wakes.watch(1, [9; 16], message);
+        let mut relations = Relations::new([FRIEND]);
+        let name =
+            heard_name(&mut store, &mut relations, FRIEND, "Friend", u64::MAX).expect("archived");
+        assert!(name > message);
+        wakes.appended(store.archive_newest_waking().expect("newest"));
+        assert!(wakes.due(10_000).is_empty(), "no wake for a name");
+        // Positive control: the newest of all entries would have woken it.
+        wakes.appended(store.archive_newest().expect("newest"));
+        assert_eq!(wakes.due(20_000).len(), 1);
+    }
+}

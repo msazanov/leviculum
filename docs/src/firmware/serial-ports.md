@@ -51,8 +51,8 @@ keyed off the per-board USB PID:
 
 (Symlink names and PIDs: `leviculum-nrf/udev/99-leviculum.rules`. The
 firmware-side USB VID/PID constants:
-`leviculum-nrf/src/boards/t114.rs:172-173` for `1209:0001`,
-`leviculum-nrf/src/boards/rak4631.rs:188-189` for `1209:0002`.)
+`leviculum-nrf/src/boards/t114.rs:189-190` for `1209:0001`,
+`leviculum-nrf/src/boards/rak4631.rs:184-185` for `1209:0002`.)
 
 > **Multiple boards of the same kind.** The short symlinks
 > (`/dev/leviculum-transport`) land on whichever device udev sees first.
@@ -116,7 +116,7 @@ The hashes a prober needs are among them, on one line:
 destination this boot did not register reads `none` rather than a
 string of zeroes. The line is emitted once the boot has registered its
 destinations and then again in the 5 s banner
-(`leviculum-nrf/src/identity.rs`, `log_banner`), so attaching late
+(`leviculum-nrf/firmware/src/identity.rs`, `log_banner`), so attaching late
 costs at most one banner period.
 
 > **It has to be on the critical log path, and it is.** Until 2026-09-17
@@ -124,7 +124,7 @@ costs at most one banner period.
 > `[IDENTITY] t114_node=…`, `[IDENTITY] t114_probe=…` — went through
 > `log_fmt`, which is runtime-gated: with no reader attached yet it
 > counts the line and returns *before* the ring buffer and before the
-> reset-surviving tail (`leviculum-nrf/src/log.rs`, `log_fmt`). The gate
+> reset-surviving tail (`leviculum-nrf/firmware/src/log.rs`, `log_fmt`). The gate
 > opens on the first DTR-assert or after 30 s, both later than the lines
 > were written, so a reader saw only the gate's own summary,
 > `[LOG_GATE] opened, dropped N runtime lines pre-attach`, and nothing
@@ -199,7 +199,7 @@ implements no RNode KISS command set — there is no `CMD_DETECT`,
 > `SerialInterface` honours [the LoRa keys] too and configures the
 > attached LNode's radio over the serial port — the LNode frames HDLC,
 > so it cannot be driven by the KISS-framed `RNodeInterface`.
-> (`docs/src/guide/configuration.md:394-403`)
+> (`docs/src/guide/configuration.md:441-450`)
 
 ```ini
 [interfaces]
@@ -229,7 +229,7 @@ the channel. Under Python-RNS `rnsd` they are inert: its
 `SerialInterface` reads port settings only and pushes nothing to the
 board, which then keeps whatever profile is in its flash — the compiled
 `eu_medium` default (869.463 MHz, BW 125 kHz, SF8, CR4/5, 22 dBm;
-`leviculum-nrf/src/lora.rs:562-591`, `RadioConfig::eu_medium`) or the
+`leviculum-nrf/src/lora.rs:595-624`, `RadioConfig::eu_medium`) or the
 preset chosen at flash time. The values above are that default written
 out, so a Python-driven LNode and an `lnsd`-driven one land on the same
 channel. Changing the channel of a Python-driven board is a reflash
@@ -262,7 +262,7 @@ lnstest diag --config /etc/reticulum
 
 A standalone LNode answers probes on one destination,
 `rnstransport.probe`, and announces it 15 s after boot and then every
-2 hours (`schedule_initial_mgmt_announce`, `leviculum-core/src/node/mod.rs:787-788`;
+2 hours (`schedule_initial_mgmt_announce`, `leviculum-core/src/node/mod.rs:821-822`;
 `MGMT_ANNOUNCE_INTERVAL_MS`, `leviculum-core/src/constants.rs:219`).
 The hash is carried in the announce itself, but it is also printed on
 the debug port — the `probe=` field of the `[IDENTITY]` banner, repeated
@@ -300,7 +300,7 @@ the board again is quicker.
 
 The probe destination is the only addressed service the firmware
 offers. Remote management is not enabled on the standalone binary
-(`leviculum-nrf/src/bin/t114.rs:149` sets `respond_to_probes` and
+(`leviculum-nrf/src/node_loop.rs:322` sets `respond_to_probes` and
 nothing else), so `rnstatus -R` and `rnpath -R` have no responder;
 `rncp`, `rnsh` and `rnx` have no counterpart either. What the board
 does beyond that — forwarding announces, answering path requests,

@@ -154,7 +154,7 @@
 //! The boot line `HEAP_BUDGET links=<max> ble_links=<m> per_link=<b>
 //! ble_session=<b> role=<b> reserve=<b> total=<b>` (emitted by
 //! [`crate::heap_census::log_budget_and_assert`], asserted against
-//! [`crate::HEAP_SIZE`]) sums the worst case every owner of the 96 KiB
+//! [`leviculum_heap_budget::HEAP_SIZE`]) sums the worst case every owner of the 96 KiB
 //! heap may reach at once:
 //!
 //! ```text
@@ -192,9 +192,9 @@
 //! `links` is DERIVED, not chosen
 //! ([`crate::heap_census::max_endpoint_links`]): the fixed terms are
 //! subtracted from the heap and the remainder divided by `per_link`.
-//! With today's numbers — node box 31 744, role 21 120, reserve 18 848,
+//! With today's numbers — node box 31 752, role 21 120, reserve 18 848,
 //! sessions 4 · 3 948 = 15 792, per_link 2 696 — the remainder is
-//! 10 800 B and the division yields **4** (leaving 16 B of slack, #661, #662, #666, #852, 860, 867): the heap affords exactly the
+//! 10 792 B and the division yields **4** (leaving 8 B of slack, #661, #662, #666, #852, 860, 867, 981): the heap affords exactly the
 //! BLE-session count, no extra LoRa-backed links until a fixed term
 //! shrinks. The same number is handed to `NodeCoreBuilder::max_links`,
 //! so the budget's `links=` is an enforced cap, not a claim: the fifth
@@ -254,8 +254,8 @@ use leviculum_lxmf::constants::{
 };
 use leviculum_lxmf::node::APP_NAME;
 use leviculum_lxmf::peering::{
-    answer_offer, build_offer, offer_budget_for_mdu, offer_reply, peering_key_material,
-    plan_sync_batch, DeclineReason, DropReason, InboundGate, OfferPlan, OfferReply, OfferResponse,
+    answer_offer, offer_budget_for_mdu, offer_reply, peering_key_material, plan_sync_batch,
+    DeclineReason, DropReason, InboundGate, OfferBuilder, OfferPlan, OfferReply, OfferResponse,
     PeerChange, PeerOffer, PeerRecord, PeerStore, PeerSyncEnvelope, PeerTable, SyncPhase,
     SyncSource, WantedIds, OFFER_PROBE_BUDGET, OFFER_REQUEST_PATH, SYNC_INTERVAL_SECS,
 };
@@ -264,7 +264,7 @@ use leviculum_lxmf::propagation::{
 };
 use leviculum_lxmf::propagation_client::PROPAGATION_ASPECT;
 use leviculum_lxmf::propagation_node::{link_idle_past_bound, offer_remote, propagation_hash_of};
-use leviculum_lxmf::propagation_store::StoredMessage;
+use leviculum_lxmf::propagation_store::PropagationBodyStore;
 use leviculum_lxmf::sync_round::{
     round_deadline_ms, round_step, LinkView, RoundEvent, RoundStep, RoundView,
 };
@@ -654,7 +654,7 @@ pub async fn miner_task() {
     loop {
         let job = MINE_REQ.receive().await;
         let started = embassy_time::Instant::now();
-        let mut stamper = CooperativeStamper::cooperative(crate::rng::RawHwRng::new());
+        let mut stamper = CooperativeStamper::cooperative(leviculum_firmware::entropy::Entropy);
         // No cancellation handle: the board mines one key per peer from its
         // own table and has no way to withdraw the intent while it runs
         // (Codeberg #185). The cost is capped at 18 here, so this grind is
@@ -999,7 +999,7 @@ impl Engine {
             sync_batch: None,
             outbound: None,
             validated_links: BTreeMap::new(),
-            inbound_transfers: Vec::with_capacity(crate::ble::MAX_LINKS),
+            inbound_transfers: Vec::with_capacity(leviculum_heap_budget::MAX_LINKS),
             advertised_hops: AdvertisedHops::default(),
             mining_peer: None,
             last_synced: None,
@@ -1135,7 +1135,7 @@ impl Engine {
         // timestamp rather than uptime seconds (Codeberg #247).
         let before = node.emission_secs();
         if node.set_wall_time_unix_secs(unix_secs, TimeSource::Overheard) {
-            crate::set_time_source(TimeSource::Overheard);
+            leviculum_firmware::clock::set_time_source(TimeSource::Overheard);
             crate::log::log_fmt_critical(
                 "[INFO!] ",
                 format_args!("[TIME_SEED] source=overheard via={from} unix={unix_secs}"),
@@ -1332,7 +1332,7 @@ impl Engine {
                     Ok(send) => out.merge(send),
                     // The node refused what the role decided, the late
                     // `incoming_full` above all: it sent the RCL itself
-                    // (`leviculum-core/src/node/mod.rs:2334-2337`), and the
+                    // (`leviculum-core/src/node/mod.rs:2336-2339`), and the
                     // line is the board's only record of it (867, 878).
                     Err(error) => {
                         if accept && from_peer {
@@ -1744,15 +1744,14 @@ impl Engine {
         let Some(cursor) = self.peers.get(&peer_hash).map(|peer| peer.cursor) else {
             return;
         };
-        let mut entries: Vec<StoredMessage> = Vec::new();
+        let Some(peer) = self.peers.get(&peer_hash) else {
+            return;
+        };
+        let mut offer_builder = OfferBuilder::new(peer, offer_budget_for_mdu(mdu));
         if self
             .role
             .store()
-            .for_each(&mut |meta| {
-                if meta.sequence > cursor {
-                    entries.push(*meta);
-                }
-            })
+            .for_each_ordered(&mut |meta| offer_builder.push(meta))
             .is_err()
         {
             if let RoundStep::End(end) =
@@ -1763,11 +1762,7 @@ impl Engine {
             }
             return;
         }
-        entries.sort_by_key(|meta| meta.sequence);
-        let Some(peer) = self.peers.get(&peer_hash) else {
-            return;
-        };
-        let planned = build_offer(peer, &entries, offer_budget_for_mdu(mdu));
+        let planned = offer_builder.finish();
         let plan = match planned {
             Some(plan) if !plan.ids.is_empty() => plan,
             // Everything above the cursor was drained or became
@@ -1779,7 +1774,8 @@ impl Engine {
                 return;
             }
         };
-        let tail_peak = leviculum_heap_budget::store_tail_peak(entries.len(), plan.ids.len());
+        let tail_peak = leviculum_heap_budget::store_tail_peak(0, plan.ids.len())
+            + self.role.store().ordered_traversal_heap_bound();
         self.peaks.store_tail = self.peaks.store_tail.max(tail_peak);
         let Some(sync) = self.outbound.as_mut() else {
             return;
@@ -1945,7 +1941,7 @@ impl Engine {
         let Some(plan) = self.outbound.as_ref().map(|sync| &sync.plan) else {
             return;
         };
-        let planned = plan_sync_batch(self.role.store(), plan, &wanted, |_, encoded_len| {
+        let planned = plan_sync_batch(self.role.store(), plan, &wanted, |_, encoded_len, _| {
             leviculum_heap_budget::offer_response_fits(
                 encoded_len,
                 offered,
@@ -1997,8 +1993,14 @@ impl Engine {
         let timestamp = node.emission_secs() as f64;
         let sent = match self.outbound.as_ref() {
             Some(sync) => {
-                let mut source =
-                    SyncSource::new(self.role.store(), &sync.plan, wanted, batch, timestamp);
+                let mut source = SyncSource::new(
+                    self.role.store(),
+                    self.role.store(),
+                    &sync.plan,
+                    wanted,
+                    batch,
+                    timestamp,
+                );
                 node.send_resource_from_source(link_id, &mut source)
             }
             None => return,
@@ -2991,16 +2993,11 @@ impl Engine {
             return;
         }
 
-        let mut entries: Vec<StoredMessage> = Vec::new();
-        let cursor = peer.cursor;
+        let mut offer_builder = OfferBuilder::new(peer, OFFER_PROBE_BUDGET);
         if self
             .role
             .store()
-            .for_each(&mut |meta| {
-                if meta.sequence > cursor {
-                    entries.push(*meta);
-                }
-            })
+            .for_each_ordered(&mut |meta| offer_builder.push(meta))
             .is_err()
         {
             // A store that cannot be walked now will most likely fail on
@@ -3020,14 +3017,13 @@ impl Engine {
             }
             return;
         }
-        entries.sort_by_key(|meta| meta.sequence);
         // A probe, not the offer: there is no link yet, so no MDU to size
         // against. One id is all this has to answer — "is anything above
         // the cursor offerable?". The offer itself is built in
         // `on_sync_link_up` against the link that will carry it. An empty
         // id list still carries the full skip scan, so dead entries are
         // stepped past here exactly as before.
-        let Some(plan) = build_offer(peer, &entries, OFFER_PROBE_BUDGET) else {
+        let Some(plan) = offer_builder.finish() else {
             return;
         };
         if plan.ids.is_empty() {
@@ -3219,7 +3215,7 @@ impl Engine {
     /// beside `margin=` are every input it was computed from, so the
     /// arithmetic can be re-run from a capture.
     fn read_serve_cap(&mut self) {
-        let (_, free) = crate::heap_stats();
+        let (_, free) = leviculum_firmware::heap::heap_stats();
         let largest = crate::heap_census::largest_free_block();
         let live_cap = crate::heap_census::live_serve_cap(self.serve_boot_cap, free, largest);
         self.role.set_serve_cap_bytes(Some(live_cap));
@@ -3479,7 +3475,7 @@ impl Engine {
         let our_cost = self.peers.config().peering_cost;
         if our_cost > 0 {
             let material = peering_key_material(&self.identity_hash, &remote_identity_hash);
-            let mut stamper = CooperativeStamper::cooperative(crate::rng::RawHwRng::new());
+            let mut stamper = CooperativeStamper::cooperative(leviculum_firmware::entropy::Entropy);
             let valid = stamper
                 .validate_stamp(
                     &material,
@@ -3697,7 +3693,7 @@ impl Engine {
     /// Drain both adapters' queued writes through the record-store task.
     /// Returns whether every op landed; a failed append un-remembers its
     /// id from the duplicate cache so the client's retry is stored.
-    async fn flush<R, C, S>(&mut self, _node: &mut NodeCore<R, C, S>) -> bool
+    async fn flush<R, C, S>(&mut self, node: &mut NodeCore<R, C, S>) -> bool
     where
         R: CryptoRngCore,
         C: Clock,
@@ -3707,6 +3703,11 @@ impl Engine {
         while let Some(op) = self.role.store().peek_op().cloned() {
             let ok = execute(&op).await.is_some();
             settle_message_op(&mut self.role, ok);
+            if ok {
+                if let FlushOp::ConfirmedPurge { key, .. } = &op {
+                    self.role.note_confirmed_deletion(key, node.emission_secs());
+                }
+            }
             all_ok &= ok;
         }
         while let Some(op) = self.peer_store.peek_op().cloned() {
@@ -3736,7 +3737,7 @@ async fn execute(op: &FlushOp) -> Option<u32> {
             tag: *tag,
             body: body.clone(),
         },
-        FlushOp::Purge { offset, key } => PnOp::Purge {
+        FlushOp::Purge { offset, key } | FlushOp::ConfirmedPurge { offset, key } => PnOp::Purge {
             offset: *offset,
             key: *key,
         },
@@ -3746,13 +3747,13 @@ async fn execute(op: &FlushOp) -> Option<u32> {
 
 /// A message the role just stored is for this board's own `lxmf.delivery`
 /// destination: the feedback grammar's "a message for the user arrived"
-/// (order 892, `crate::feedback::notify`). The board has no inbox, so the
+/// (order 892, `leviculum_firmware::feedback::notify`). The board has no inbox, so the
 /// propagation store is the one place a message for its user is kept
 /// (`crate::telemetry::register_delivery_destination`); a copy already
 /// held (`dup=1`) is not news.
 fn notify_if_for_us(destination_hash: &[u8; 16], duplicate: bool) {
-    let own = crate::identity::report().and_then(|report| report.lxmf);
+    let own = leviculum_firmware::identity::report().and_then(|report| report.lxmf);
     if !duplicate && own.as_ref() == Some(destination_hash) {
-        crate::feedback::notify();
+        leviculum_firmware::feedback::notify();
     }
 }

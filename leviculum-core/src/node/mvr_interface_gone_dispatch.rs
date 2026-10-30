@@ -27,8 +27,10 @@
 //!      interface is gone; every later send on it (channel data, keepalive,
 //!      close) is addressed there. Python keeps the attachment too
 //!      (`Link.attached_interface`), and an interface that comes back under
-//!      the same index carries the link on, which is why this is pinned and
-//!      not changed here;
+//!      the same index carries the link on, which is why this is pinned for
+//!      a `Teardown::Transient` teardown (`handle_interface_down`). A
+//!      `Teardown::Final` one closes the link instead (931,
+//!      `mvr_interface_gone_final_teardown.rs`);
 //!   2. a `TickOutput` committed from an API task BEFORE the loop processed
 //!      the disconnect waits in the driver's dispatch channel and is routed
 //!      after the registry dropped the handle (`dispatch_committed`, the
@@ -60,12 +62,12 @@ use crate::test_utils::{MockClock, MockInterface, TEST_TIME_MS};
 use crate::transport::{dispatch_actions, Action, DropReason, InterfaceId, TickOutput};
 use crate::DestinationHash;
 
-type Node = NodeCore<OsRng, MockClock, MemoryStorage>;
+pub(super) type Node = NodeCore<OsRng, MockClock, MemoryStorage>;
 
 /// The index the link is formed on and that later goes away.
-const GONE: usize = 6;
+pub(super) const GONE: usize = 6;
 /// An interface the driver still has.
-const KEPT: usize = 0;
+pub(super) const KEPT: usize = 0;
 
 fn node() -> Node {
     NodeCoreBuilder::new().build(
@@ -93,15 +95,15 @@ fn frame(output: &TickOutput) -> Vec<u8> {
     frames[0].clone()
 }
 
-struct Pair {
-    initiator: Node,
-    link_id: LinkId,
-    dest_hash: DestinationHash,
+pub(super) struct Pair {
+    pub(super) initiator: Node,
+    pub(super) link_id: LinkId,
+    pub(super) dest_hash: DestinationHash,
 }
 
 /// The initiator learns a path to the responder on `GONE` and forms a link
 /// over it.
-fn linked_over_gone() -> Pair {
+pub(super) fn linked_over_gone() -> Pair {
     let identity = Identity::generate(&mut OsRng);
     let signing_key = identity.ed25519_verifying().to_bytes();
     let mut responder = node();
@@ -145,7 +147,9 @@ fn linked_over_gone() -> Pair {
 /// Dispatch `output` into a driver slice that has only `KEPT`, as lnsd's
 /// registry does once `GONE` was removed, and return the drops and the
 /// captured log.
-fn dispatch_without_gone(output: TickOutput) -> (Vec<(InterfaceId, DropReason)>, String) {
+pub(super) fn dispatch_without_gone(
+    output: TickOutput,
+) -> (Vec<(InterfaceId, DropReason)>, String) {
     let mut kept = MockInterface::new("kept", KEPT as u8);
     let (drops, logs) = with_captured_logs(|| {
         let mut slice: Vec<&mut dyn crate::traits::Interface> = vec![&mut kept];

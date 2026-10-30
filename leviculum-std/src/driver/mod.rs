@@ -89,7 +89,7 @@ use crate::interfaces::IncomingPacket;
 use leviculum_announce_policy::{Decision, PeerAnnounceLimiter};
 use leviculum_core::constants::TRUNCATED_HASHBYTES;
 use leviculum_core::link::LinkId;
-use leviculum_core::node::{EventClass, FrameDropReason, NodeCore, NodeEvent};
+use leviculum_core::node::{EventClass, FrameDropReason, NodeCore, NodeEvent, Teardown};
 use leviculum_core::traits::{InterfaceError, Storage as StorageTrait};
 use leviculum_core::transport::{InterfaceId, TickOutput};
 use leviculum_core::{AnnounceControl, Destination, DestinationHash};
@@ -1216,8 +1216,71 @@ struct DiscoveryAnnounceWiring {
 enum RecvEvent {
     /// A complete packet from an interface
     Packet(InterfaceId, IncomingPacket),
-    /// An interface disconnected (its incoming channel closed)
-    Disconnected(InterfaceId),
+    /// An interface disconnected: its incoming channel closed, or the
+    /// operator removed it.
+    Disconnected(InterfaceId, TeardownCause),
+}
+
+/// Why the event loop tears an interface down (931, Codeberg #468).
+///
+/// Every site that calls into the core's interface teardown names one of
+/// these, and [`TeardownCause::class`] is the one place that maps it to the
+/// core's [`Teardown`]. A `Final` teardown closes the node's own links on the
+/// interface at once; a `Transient` one keeps them for an interface that may
+/// return under the same index. When a site cannot be sure, it is
+/// `Transient`: a wrong `Transient` costs a link that lingers to its stale
+/// timeout (the behaviour before 931), a wrong `Final` closes a link that
+/// would have carried on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TeardownCause {
+    /// The interface's incoming channel closed (`recv_any`). Interfaces that
+    /// re-dial keep their channel across the gap (the reconnecting TCP
+    /// client, `interfaces/tcp.rs::tcp_client_reconnect_task`), so a close
+    /// is an interface task that ended: an accepted TCP connection whose
+    /// socket closed, a client out of reconnect tries, a serial, BLE or
+    /// RNode task that gave up. The handle does not say which, and a serial
+    /// or RNode section can come back under its section index, so this one
+    /// stays `Transient` out of doubt.
+    ChannelClosed,
+    /// [`ReticulumNode::remove_interface`]: the operator detached it.
+    OperatorRemoved,
+    /// The auto-connect manager retired a discovered peer (its record
+    /// expired, or it stayed offline past the detach threshold). A
+    /// re-discovered endpoint is spawned under a fresh id from `next_id`.
+    AutoconnectRetired,
+    /// A `bootstrap_only` interface detached once enough discovered
+    /// interfaces are online (Codeberg #416). `reattach_bootstrap_interfaces`
+    /// brings it back under its ORIGINAL index when they are gone.
+    BootstrapDetached,
+}
+
+impl TeardownCause {
+    /// The teardown class of this cause, the table 931 asks for:
+    ///
+    /// | cause                | class       | why                                     |
+    /// |----------------------|-------------|-----------------------------------------|
+    /// | `ChannelClosed`      | `Transient` | cannot tell a final close from one that returns |
+    /// | `OperatorRemoved`    | `Final`     | the operator took it away               |
+    /// | `AutoconnectRetired` | `Final`     | a return draws a fresh index            |
+    /// | `BootstrapDetached`  | `Transient` | re-attached under the same index        |
+    fn class(self) -> Teardown {
+        match self {
+            TeardownCause::ChannelClosed => Teardown::Transient,
+            TeardownCause::OperatorRemoved => Teardown::Final,
+            TeardownCause::AutoconnectRetired => Teardown::Final,
+            TeardownCause::BootstrapDetached => Teardown::Transient,
+        }
+    }
+
+    /// The word the driver's teardown log lines carry.
+    fn label(self) -> &'static str {
+        match self {
+            TeardownCause::ChannelClosed => "channel-closed",
+            TeardownCause::OperatorRemoved => "removed",
+            TeardownCause::AutoconnectRetired => "auto-connected",
+            TeardownCause::BootstrapDetached => "bootstrap-only",
+        }
+    }
 }
 
 /// Reason a `wait_for_interface_ready` call did not return `Ok(())`.
@@ -2272,6 +2335,23 @@ impl ReticulumNode {
                 default_announce_rate: self.default_announce_rate(),
                 identity_hash: self.identity_hash(),
             };
+            {
+                // Every section once, enabled or not, before anything is
+                // built: which interfaces the daemon was asked for and where
+                // each request came from, a file or the default lnsd holds
+                // when there is none (#471).
+                let mut inv = self.inventory.lock_recover();
+                for config in &self.interfaces {
+                    tracing::info!(
+                        event = "IFACE_CONFIG",
+                        name = %crate::event_log::Scalar(&config.name),
+                        r#type = %crate::event_log::Scalar(&config.interface_type),
+                        enabled = config.enabled,
+                        origin = %config.origin.as_str(),
+                    );
+                    inv.set_section_origin(&config.name, config.origin);
+                }
+            }
             for (idx, config) in self.interfaces.iter().enumerate() {
                 if !config.enabled {
                     continue;
@@ -4296,7 +4376,7 @@ async fn recv_any(
 ) -> RecvEvent {
     std::future::poll_fn(|cx| {
         if let Poll::Ready(Some(id)) = remove_rx.poll_recv(cx) {
-            return Poll::Ready(RecvEvent::Disconnected(id));
+            return Poll::Ready(RecvEvent::Disconnected(id, TeardownCause::OperatorRemoved));
         }
 
         if !registry.is_empty() {
@@ -4315,7 +4395,10 @@ async fn recv_any(
                     }
                     Poll::Ready(None) => {
                         *poll_start = (idx + 1) % len;
-                        return Poll::Ready(RecvEvent::Disconnected(id));
+                        return Poll::Ready(RecvEvent::Disconnected(
+                            id,
+                            TeardownCause::ChannelClosed,
+                        ));
                     }
                     Poll::Pending => {}
                 }
@@ -4974,8 +5057,8 @@ async fn run_event_loop(
                         prepared.peer = pkt.peer;
                         apply_inbound!(prepared);
                     }
-                    RecvEvent::Disconnected(iface_id) => {
-                        tracing::warn!("Interface {} ({}) disconnected", iface_id, registry.name_of(iface_id));
+                    RecvEvent::Disconnected(iface_id, cause) => {
+                        tracing::warn!("Interface {} ({}) disconnected ({})", iface_id, registry.name_of(iface_id), cause.label());
                         // The core forgets its peer-count mirror in
                         // handle_interface_down; forget the driver's
                         // half too so a re-registered index starts at
@@ -4983,7 +5066,7 @@ async fn run_event_loop(
                         live_peer_counts.remove(&iface_id.0);
                         let output = {
                             let mut core = inner.lock_recover();
-                            core.handle_interface_down(iface_id)
+                            core.handle_interface_teardown(iface_id, cause.class())
                         };
                         let processor_delay = dispatch_output(
                             output,
@@ -5365,6 +5448,9 @@ async fn run_event_loop(
             // re-announce all local destinations (daemon-owned get fresh announces,
             // client-cached get rebroadcast) so the remote peer re-learns paths.
             Some(iface_id) = reconnect_rx.recv() => {
+                if retired_interface_event(&inner, iface_id, "reconnect") {
+                    continue;
+                }
                 tracing::info!("Interface {} reconnected, re-announcing destinations", iface_id);
                 // Re-apply IFAC config to core (E29: handle_interface_down removed it)
                 if let Some(cfg) = ifac_configs.get(&iface_id.0) {
@@ -5412,6 +5498,9 @@ async fn run_event_loop(
             // pull decision. The interface itself stays up — other peers
             // keep their links and paths.
             Some((iface_id, event)) = peer_event_rx.recv() => {
+                if retired_interface_event(&inner, iface_id, "peer") {
+                    continue;
+                }
                 // Keep the driver's live-peer count and its core mirror
                 // in step with the transition before handling it
                 // (Codeberg #365; see `live_peer_counts`).
@@ -5543,10 +5632,10 @@ async fn run_event_loop(
                         transport_enabled,
                     };
                     manager.poll(&live, now_unix, &mut spawner);
-                    let mut teardown_ids: Vec<(InterfaceId, &'static str)> = spawner
+                    let mut teardown_ids: Vec<(InterfaceId, TeardownCause)> = spawner
                         .teardown_ids
                         .into_iter()
-                        .map(|id| (id, "auto-connected"))
+                        .map(|id| (id, TeardownCause::AutoconnectRetired))
                         .collect();
 
                     // Bootstrap-only lifecycle (Codeberg #416). A seed
@@ -5562,7 +5651,9 @@ async fn run_event_loop(
                             crate::autoconnect::BootstrapAction::Detach => {
                                 for b in bootstrap.ifaces.iter_mut() {
                                     teardown_ids.extend(
-                                        b.ids.drain(..).map(|id| (id, "bootstrap-only")),
+                                        b.ids
+                                            .drain(..)
+                                            .map(|id| (id, TeardownCause::BootstrapDetached)),
                                     );
                                 }
                             }
@@ -5585,17 +5676,17 @@ async fn run_event_loop(
                     // Complete each requested teardown through the same cleanup
                     // path a hard `Disconnected` uses, so path/link state and
                     // the per-interface maps are consistently torn down.
-                    for (iface_id, reason) in teardown_ids {
+                    for (iface_id, cause) in teardown_ids {
                         tracing::info!(
                             "discovery: tearing down {} interface {} ({})",
-                            reason,
+                            cause.label(),
                             iface_id,
                             registry.name_of(iface_id),
                         );
                         live_peer_counts.remove(&iface_id.0);
                         let output = {
                             let mut core = inner.lock_recover();
-                            core.handle_interface_down(iface_id)
+                            core.handle_interface_teardown(iface_id, cause.class())
                         };
                         let processor_delay = dispatch_output(
                             output,
@@ -5952,6 +6043,36 @@ fn merged_next_deadline(core_ms: Option<u64>, processor_ms: Option<u64>) -> Opti
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
     }
+}
+
+/// Whether an interface event names an index the core already tore down
+/// (989), and if so, say so once.
+///
+/// A reconnect notification (`interfaces/tcp.rs`, `notify.try_send`) or a
+/// peer transition (`peer_event_rx`) is sent by the interface task and can
+/// sit in its channel while the loop retires the interface — an
+/// auto-connect client detached past `DETACH_THRESHOLD_SECS` in the same
+/// second it reconnected. Acting on it would hand the core configuration
+/// and peer state for an index nothing will ever clean up again: Branch 6
+/// re-applies the IFAC config (one `IfacConfig` leaked per occurrence) and
+/// Branch 6c sets a peer count and pulls paths toward a peer on it. The
+/// core's own refusal (`IFACE_UP_STALE`, 981) covers only the re-announce.
+///
+/// The core's tombstone is the discriminator rather than the registry:
+/// an index not yet registered is absent from the registry too, and its
+/// events can lead its registration across the loop's unbiased `select!`
+/// (`pending_removals` exists for the same crossing), while a tombstoned
+/// index is one that was registered and has since gone.
+fn retired_interface_event(
+    inner: &Arc<Mutex<StdNodeCore>>,
+    iface_id: InterfaceId,
+    kind: &'static str,
+) -> bool {
+    let retired = inner.lock_recover().interface_torn_down(iface_id.0);
+    if retired {
+        tracing::debug!(event = "IFACE_EVENT_STALE", idx = iface_id.0, kind = kind);
+    }
+    retired
 }
 
 /// Bring `next_poll` forward when a processor asked to be woken sooner.
@@ -6863,6 +6984,98 @@ mod tests {
             crate::storage::hex_encode(&tcp_client_tunnel_hash(3)),
             "fe987f1066cdbb7b2f90c5845561ef9596e0c20e08d540763eabd722b078a6e1"
         );
+    }
+
+    /// 931 (Codeberg #468): every teardown cause maps to the class its
+    /// documentation claims, and only the two causes whose interface cannot
+    /// return under the same index close the node's own links.
+    #[test]
+    fn each_teardown_cause_has_the_class_it_claims() {
+        let table = [
+            (
+                TeardownCause::ChannelClosed,
+                Teardown::Transient,
+                "channel-closed",
+            ),
+            (TeardownCause::OperatorRemoved, Teardown::Final, "removed"),
+            (
+                TeardownCause::AutoconnectRetired,
+                Teardown::Final,
+                "auto-connected",
+            ),
+            (
+                TeardownCause::BootstrapDetached,
+                Teardown::Transient,
+                "bootstrap-only",
+            ),
+        ];
+        for (cause, class, label) in table {
+            // Exhaustive on purpose: a new cause fails to compile here until
+            // it has a row above.
+            match cause {
+                TeardownCause::ChannelClosed
+                | TeardownCause::OperatorRemoved
+                | TeardownCause::AutoconnectRetired
+                | TeardownCause::BootstrapDetached => {}
+            }
+            assert_eq!(cause.class(), class, "{cause:?}");
+            assert_eq!(cause.label(), label, "{cause:?}");
+        }
+    }
+
+    /// 931: the two sources `recv_any` folds into `Disconnected` carry their
+    /// own cause, so an operator removal is `Final` and a channel close is
+    /// not.
+    #[tokio::test]
+    async fn recv_any_names_the_cause_of_a_disconnect() {
+        use crate::interfaces::{InterfaceCounters, InterfaceInfo};
+        let mut registry = InterfaceRegistry::new();
+        let (inc_tx, inc_rx) = mpsc::channel(4);
+        let (out_tx, _out_rx) = mpsc::channel(4);
+        registry.register(InterfaceHandle {
+            next_tag: None,
+            info: InterfaceInfo {
+                id: InterfaceId(7),
+                name: "closing".into(),
+                hw_mtu: None,
+                is_local_client: false,
+                bitrate: None,
+                announce_cap_bitrate: None,
+                tx_jitter_max_ms: None,
+                tx_hold_spread_max_ms: None,
+                acquisition: None,
+                frame_turnaround_ms: None,
+                ifac: None,
+                mode: leviculum_core::traits::InterfaceMode::default(),
+                kind: leviculum_core::traits::InterfaceKind::Unknown,
+                ingress_control: None,
+            },
+            incoming: inc_rx,
+            outgoing: out_tx,
+            counters: Arc::new(InterfaceCounters::new()),
+            credit: None,
+            ready: crate::interfaces::ReadySignal::ready_immediate(),
+            teardown: None,
+        });
+        let (remove_tx, mut remove_rx) = mpsc::channel(1);
+
+        remove_tx.send(InterfaceId(9)).await.expect("remove");
+        match recv_any(&mut registry, &mut remove_rx).await {
+            RecvEvent::Disconnected(id, cause) => {
+                assert_eq!(id, InterfaceId(9));
+                assert_eq!(cause, TeardownCause::OperatorRemoved);
+            }
+            RecvEvent::Packet(..) => panic!("expected the removal"),
+        }
+
+        drop(inc_tx);
+        match recv_any(&mut registry, &mut remove_rx).await {
+            RecvEvent::Disconnected(id, cause) => {
+                assert_eq!(id, InterfaceId(7));
+                assert_eq!(cause, TeardownCause::ChannelClosed);
+            }
+            RecvEvent::Packet(..) => panic!("expected the channel close"),
+        }
     }
 
     /// A radio reading is filed under the hash of the packet the core will
@@ -10296,7 +10509,8 @@ mod tests {
         out_rx: mpsc::Receiver<crate::interfaces::OutgoingPacket>,
         _in_tx: mpsc::Sender<IncomingPacket>,
         _new_iface_tx: mpsc::Sender<InterfaceHandle>,
-        _reconnect_tx: mpsc::Sender<InterfaceId>,
+        reconnect_tx: mpsc::Sender<InterfaceId>,
+        peer_event_tx: mpsc::Sender<(InterfaceId, crate::interfaces::PeerEvent)>,
         _tunnel_tx: mpsc::Sender<InterfaceId>,
         _remove_tx: mpsc::Sender<InterfaceId>,
     }
@@ -10341,7 +10555,7 @@ mod tests {
         let (_shared_down_tx, shared_instance_down_rx) = mpsc::channel(1);
         let (tunnel_tx, tunnel_rx) = mpsc::channel(1);
         let (remove_tx, remove_rx) = mpsc::channel(1);
-        let (_peer_event_tx, peer_event_rx) = mpsc::channel(1);
+        let (peer_event_tx, peer_event_rx) = mpsc::channel(1);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let loop_handle = tokio::spawn(run_event_loop(
@@ -10387,7 +10601,8 @@ mod tests {
             out_rx,
             _in_tx: in_tx,
             _new_iface_tx: new_iface_tx,
-            _reconnect_tx: reconnect_tx,
+            reconnect_tx,
+            peer_event_tx,
             _tunnel_tx: tunnel_tx,
             _remove_tx: remove_tx,
         }
@@ -10576,6 +10791,88 @@ mod tests {
             .try_recv()
             .expect("the reserved output went out");
         assert_eq!(frame.data, vec![0xC3; 32].into());
+    }
+
+    /// Yield until the loop has taken every message off `tx`. The branch a
+    /// message lands in has no await point, so on the current-thread runtime
+    /// a returned permit means its handler has run to the end.
+    async fn drained<T>(tx: &mpsc::Sender<T>) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while tx.capacity() < tx.max_capacity() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the loop takes the message");
+    }
+
+    /// 989: a reconnect notification and a peer transition that crossed
+    /// the teardown of their interface in a driver channel touch nothing in
+    /// the core. Without the driver's check the reconnect re-applies the
+    /// IFAC config the teardown removed (left behind for good, since nothing
+    /// tears that index down again) and the peer-up sets a peer count on
+    /// it; the core's own `IFACE_UP_STALE` refusal (981) covers neither.
+    #[tokio::test(flavor = "current_thread")]
+    async fn events_for_a_retired_index_reach_no_core_state() {
+        const GONE: usize = 7;
+        let (seen, subscriber) = processor_event_probe();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let (core, _td) = shared_test_core();
+        let ifac =
+            leviculum_core::ifac::IfacConfig::new(Some("989-net"), None, 16).expect("ifac config");
+        core.lock_recover().set_ifac_config(GONE, ifac);
+        let harness = spawn_flush_loop(Arc::clone(&core), 3600);
+
+        // The loop snapshots the IFAC configs on entry, as it holds the
+        // configured ones in production; one round trip proves it entered.
+        harness
+            .action_tx
+            .send(TickOutput::empty())
+            .await
+            .expect("loop is live");
+        drained(&harness.action_tx).await;
+
+        // The detach poll retires the index (Branch 8).
+        let _ = core
+            .lock_recover()
+            .handle_interface_teardown(InterfaceId(GONE), Teardown::Final);
+        assert!(!core.lock_recover().clone_ifac_configs().contains_key(&GONE));
+
+        harness
+            .reconnect_tx
+            .send(InterfaceId(GONE))
+            .await
+            .expect("loop is live");
+        drained(&harness.reconnect_tx).await;
+        assert!(
+            !core.lock_recover().clone_ifac_configs().contains_key(&GONE),
+            "the stale reconnect re-applied IFAC config for a retired index"
+        );
+
+        harness
+            .peer_event_tx
+            .send((
+                InterfaceId(GONE),
+                crate::interfaces::PeerEvent::Up([0x42; 16]),
+            ))
+            .await
+            .expect("loop is live");
+        drained(&harness.peer_event_tx).await;
+        assert_eq!(
+            core.lock_recover().interface_peer_count(GONE),
+            0,
+            "the stale peer-up set a peer count on a retired index"
+        );
+
+        let stale = seen
+            .lock_recover()
+            .iter()
+            .filter(|e| *e == "IFACE_EVENT_STALE")
+            .count();
+        assert_eq!(stale, 2, "one stale line per dropped event");
+
+        harness.shutdown_tx.send(true).expect("loop is live");
+        harness.loop_handle.await.expect("loop exits cleanly");
     }
 
     /// The hourly deaf window this lane removes: a SendPacket pushed while
@@ -11523,15 +11820,31 @@ mod first_hop_timeout_tests {
         same_identity_as_daemon: bool,
         measure: Measure,
     ) -> (u64, u16) {
+        client_measure_in(tag, same_identity_as_daemon, measure, None).await
+    }
+
+    /// [`client_measure`] with the daemon's storage at `config_dir/storage`
+    /// and the client told that directory, as a client is told the config
+    /// directory of the daemon it joins. `None` keeps both apart.
+    async fn client_measure_in(
+        tag: &str,
+        same_identity_as_daemon: bool,
+        measure: Measure,
+        config_dir: Option<std::path::PathBuf>,
+    ) -> (u64, u16) {
         let identity = Identity::generate(&mut OsRng);
         let instance = format!("firsthop_{tag}_{}", std::process::id());
         let daemon_storage = tempfile::tempdir().expect("daemon storage");
+        let daemon_storage_path = match &config_dir {
+            Some(dir) => dir.join("storage"),
+            None => daemon_storage.path().to_path_buf(),
+        };
         let mut daemon = ReticulumNodeBuilder::new()
             .identity(identity.clone())
             .enable_transport(true)
             .share_instance(true)
             .instance_name(instance.clone())
-            .storage_path(daemon_storage.path().to_path_buf())
+            .storage_path(daemon_storage_path)
             .build()
             .await
             .expect("build daemon");
@@ -11543,10 +11856,14 @@ mod first_hop_timeout_tests {
             Identity::generate(&mut OsRng)
         };
         let client_storage = tempfile::tempdir().expect("client storage");
+        // Without a directory of its own the client is pointed at an empty
+        // one, never the host's default, whose key is no test's business.
+        let client_config_dir = config_dir.unwrap_or_else(|| client_storage.path().join("rns"));
         let mut client = ReticulumNodeBuilder::new()
             .identity(client_identity)
             .enable_transport(false)
             .connect_to_shared_instance(&instance)
+            .shared_instance_config_dir(client_config_dir)
             .storage_path(client_storage.path().to_path_buf())
             .build()
             .await
@@ -11638,6 +11955,30 @@ mod first_hop_timeout_tests {
 
     /// A client the daemon does not answer (here: one without the daemon's
     /// RPC key) keeps the conservative fallback, 31 333 ms before jitter.
+    /// 1119: a client with an identity of its own (loquax's device identity,
+    /// lnpnd's, any client keeping its own storage) asks with the key of the
+    /// daemon's config directory, as a Python client does: its rpc_key is the
+    /// hash of `Transport.identity`, which it loads from
+    /// `<configdir>/storage/transport_identity` (Reticulum.py:355-356,
+    /// Transport.py:218-220), never the application's identity. Keyed with
+    /// its own, every first-hop question failed authentication.
+    #[tokio::test]
+    async fn a_client_with_its_own_identity_asks_with_the_daemons_key() {
+        let config_dir = tempfile::tempdir().expect("daemon config dir");
+        let (timeout, jitter) = client_measure_in(
+            "ownidentity",
+            false,
+            Measure::Link,
+            Some(config_dir.path().to_path_buf()),
+        )
+        .await;
+        assert_eq!(
+            timeout,
+            jittered(20_276, jitter),
+            "jitter {jitter} permille on a 20 276 ms base; 31 333 ms is the unanswered fallback"
+        );
+    }
+
     #[tokio::test]
     async fn shared_instance_client_without_an_answer_keeps_the_fallback() {
         let (timeout, jitter) = client_timeout("noanswer", false).await;

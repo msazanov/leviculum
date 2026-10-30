@@ -92,7 +92,12 @@
 # by name, `cargo test -p leviculum-std --test rnsd_interop
 # python_rncp_sender_fails_on_the_same_dropped_identify -- --ignored`, whenever
 # the identify-loss fix direction is revisited.
-23   -p leviculum-std --test rnsd_interop
+#
+# 23 -> 24 (2026-10-24): lnstatus_origin_flag_adds_only_the_origin_lines,
+# the acceptance for `lnstatus --origin` (952, #471). Observed group:
+# run-status-parity.sh runs it by name in `just standard` and the land
+# gate's status-parity step, its EXPECTED moved to 5 in the same commit.
+24   -p leviculum-std --test rnsd_interop
 
 # ble_link_gap_floor (2026-10-10, #379): the measurement grid behind
 # docs/measurements/2026-10-10-ble-link-gap-floor.md. It needs the patched
@@ -113,6 +118,30 @@
 # periculum's ble_room_departure cell covers the full three-node scenario.
 1    -p leviculum-std --test ble_returning_peer_resight
 
+# ble_handshake_primer (2026-10-26, 1004): the minimal reproduction of the
+# BlueZ AcquireWrite pending-write decay — the triggering write is forwarded
+# from the reused ATT receive buffer after the D-Bus round trip, which turned
+# the T114's identity handshake into GATT debris on the bench — and the proof
+# that the dial's keepalive primer delivers the identity byte-exact through
+# the same hostile window. Needs the patched btvirt, /dev/vhci and the system
+# bluetoothd (host-global Bluetooth state, the ble_room lock class), so no
+# tier can run it. Run by name with
+# `cargo test -p leviculum-std --test ble_handshake_primer -- --ignored
+# --nocapture` beside any change to the dial's handshake order or the
+# peripheral write path.
+1    -p leviculum-std --test ble_handshake_primer
+
+# ble_stranger_identity (2026-10-25, 996): the minimal reproduction of a
+# stranger's 16-byte RX write becoming a mesh peer, and the positive control
+# that the Columba subscribe-then-handshake sequence still links. Needs the
+# patched btvirt, /dev/vhci, the system bluetoothd and a release lnsd
+# (host-global Bluetooth state, the ble_room lock class), so no tier can run
+# it. Run by name with
+# `cargo test -p leviculum-std --test ble_stranger_identity -- --ignored
+# --nocapture` beside any change to the identity exchange or the peripheral
+# write path.
+1    -p leviculum-std --test ble_stranger_identity
+
 # ble_adapter_return (2026-10-10, 600): the minimal reproduction of the deaf
 # interface after its adapter's D-Bus object vanished and returned (btvirt
 # stopped and restarted under two linked lnsd). Needs the patched btvirt,
@@ -126,4 +155,18 @@
 # an assertion: its runtime is a coin-flip distribution and only means
 # anything in --release on the host it runs on, by hand. Run manually before
 # a release and whenever the stamp code changes (see the test's header).
-1    -p lnmsg --test stamp_timing
+1    -p loquax --test stamp_timing
+
+# 0 -> 1 (2026-10-26, order 1009): hook_profile_under_field_load is the
+# measurement behind the LNPND_HOOK_PROFILE line: it drives the engine's
+# hooks under the miauhaus load (40 000 known destinations, a full peer
+# table, a 100-message inbound sync on the production file stores) and
+# prints the distribution per section. It asserts only that the load was
+# applied; it means something only in --release against a real disk (the
+# stores fsync, a tmpfs prices that at nothing), and a fill of 40 000
+# announces takes six seconds of release CPU. The budget rule it found is
+# pinned deterministically by an_announce_dispatch_during_a_sync_stores_at_most_one_slice,
+# which runs in the suite. Run by hand with LNPND_LOAD_DIR on the disk under
+# test (see the module docs of lnpnd/src/engine_hook_load.rs) whenever the
+# engine's hooks or the stores' write paths change.
+1    -p lnpnd --lib

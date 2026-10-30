@@ -663,6 +663,38 @@ fn a_receive_window_arms_waits_and_reads_the_frame_out() {
     );
 }
 
+/// A window whose expiry licenses a transmit — jitter or CSMA backoff — runs
+/// the preamble detector's settle past its asked bound, so a preamble that
+/// begins inside the window's last detector horizon latches and stops the
+/// hardware timer instead of dying with it (929, #466: both witnessed
+/// t1000e_rnode_pair losses were jitter timeouts 11–17 ms into the lost
+/// probe's preamble). The ack window two tests up is the control: it stays at
+/// exactly its asked bound.
+#[test]
+fn a_tx_gating_window_runs_the_detector_settle_past_its_bound() {
+    for site in [
+        leviculum_core::sx126x::RxSite::Jitter,
+        leviculum_core::sx126x::RxSite::Csma,
+    ] {
+        let _clock = test_clock();
+        let (mut r, spi) = radio();
+        block_on(r.configure_lora(869_463_000, 8, 0x04, 0x01, 14, 18)).expect("configure");
+        spi.0.borrow_mut().written.clear();
+        block_on(r.arm_rx(500, site)).expect("arm");
+        let settle =
+            leviculum_core::sx126x::latch_settle_ms(125_000, 8).expect("a configured radio");
+        let w = written(&spi);
+        assert_eq!(
+            w.last().expect("an arm writes commands")[2..],
+            leviculum_lr11xx::cmd::set_rx(leviculum_lr11xx::cmd::ms_to_rtc_steps(
+                500 + settle as u32
+            )),
+            "site {} must pad its hardware bound by the settle",
+            site.tag()
+        );
+    }
+}
+
 #[test]
 fn a_crc_failure_is_measured_and_the_payload_left_in_the_chip() {
     let _clock = test_clock();

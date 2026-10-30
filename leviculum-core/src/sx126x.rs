@@ -314,6 +314,64 @@ pub fn latch_settle_ms(bw_hz: u32, sf: u8) -> Option<u64> {
     Some(RX_ENTRY_SLACK_MS + (PREAMBLE_DETECT_SYMBOLS as u64 * t_sym_us).div_ceil(1_000))
 }
 
+/// The hardware bound `arm_rx` programs for a window the loop asked
+/// `timeout_ms` of.
+///
+/// For most windows it is the asked bound, and `0` (single mode) is always
+/// kept. For the two windows whose expiry licenses a transmit — the
+/// acquisition jitter and the CSMA backoff ([`RxSite::Jitter`],
+/// [`RxSite::Csma`]) — it is the asked bound plus [`latch_settle_ms`],
+/// because the asked bound alone leaves the window's final detector horizon
+/// unlistened-to:
+///
+/// A preamble that begins within the last [`PREAMBLE_DETECT_SYMBOLS`] of a
+/// bounded window has not latched when the hardware timer expires, so
+/// stop-timer-on-preamble has nothing to hold the window open with and the
+/// chip leaves RX mid-preamble on its own. On these two sites that exit is a
+/// transmit decision: the CAD that follows reads the frame as a busy channel
+/// — correctly — but the backoff re-arms it licenses restart the preamble
+/// detector with too little preamble left to sync, so the frame is lost
+/// without ever being receivable again. With the pad, exactly those preambles
+/// get the symbols the detector needs; the latch then stops the hardware
+/// timer and the window ends in the reception instead of the timeout.
+///
+/// Measured (929, `t1000e_rnode_pair` 2026-10-22, runs 1 and 5 on 77c4ff13):
+/// both witnessed receiver-side losses were `[LORA_JITTER]` windows whose
+/// `rx_timeout` fell 11–17 ms after the lost probe's preamble began (witness
+/// `probe_rx_t` minus the frame's airtime, against the board's
+/// `[T114_SX_TIMEOUT]`), and both were followed by `[LORA_CAD] busy=true`
+/// runs through the remainder of the frame and a `site=csma` re-arm that
+/// never synced. The reference stays armed through its whole contention
+/// countdown and has no such tail (`RNode_Firmware.ino:1631-1646`), so the
+/// pad restores its semantics at the cost of its wall-clock: one
+/// [`latch_settle_ms`] — ~25 ms at SF8/BW125, about one CSMA slot — per
+/// quiet-channel expiry, and nothing when a frame arrives.
+///
+/// The other bounded sites are deliberately not padded. Their expiry returns
+/// to a loop whose next act is another listen, and a fresh arm within a few
+/// milliseconds still meets a preamble cut that recently with enough of it
+/// left to sync ([`RX_ENTRY_SLACK_MS`] + [`PREAMBLE_DETECT_SYMBOLS`] against
+/// the 18-symbol programmed preamble); only the CSMA path spends the whole
+/// remainder on CAD cycles that cannot sync at all.
+///
+/// The `[SX_RX_ARM]` line carries the bound this returns — the timer the
+/// chip actually runs — so a capture's `timeout_ms=` stays matchable against
+/// the expiry that follows it. Adoption ([`RxSite`] windows compared by
+/// `ensure_armed`) keeps the asked bound; the pad is applied at `SetRx` and
+/// nowhere above it, so it cannot compound across provisional re-arms.
+pub fn rx_arm_bound_ms(timeout_ms: u32, site: RxSite, bw_hz: u32, sf: u8) -> u32 {
+    if timeout_ms == 0 {
+        return 0;
+    }
+    match site {
+        RxSite::Jitter | RxSite::Csma => {
+            let pad = latch_settle_ms(bw_hz, sf).unwrap_or(0);
+            timeout_ms.saturating_add(pad.min(u32::MAX as u64) as u32)
+        }
+        RxSite::Idle | RxSite::Ack | RxSite::Hold | RxSite::Yield => timeout_ms,
+    }
+}
+
 /// Slack added on top of a computed on-air time when sizing the software
 /// timeout around a started radio operation (TX completion, CAD completion).
 ///
@@ -1631,6 +1689,37 @@ mod tests {
         assert_eq!(latch_settle_ms(0, 7), None);
         assert_eq!(latch_settle_ms(125_000, 0), None);
         assert_eq!(latch_settle_ms(125_000, 64), None);
+    }
+
+    /// The two windows whose expiry licenses a transmit run the detector's
+    /// settle past their asked bound; every other window runs exactly what it
+    /// asked. The 929 losses sized this: both witnessed kills were jitter
+    /// windows whose hardware timeout fell 11–17 ms into the lost probe's
+    /// preamble, inside the ~17 ms the SF8/BW125 detector needs to latch and
+    /// stop that timer.
+    #[test]
+    fn a_tx_gating_window_is_padded_by_the_settle_bound_and_no_other_is() {
+        let settle = latch_settle_ms(125_000, 8).expect("a configured radio") as u32;
+        for site in [RxSite::Jitter, RxSite::Csma] {
+            assert_eq!(rx_arm_bound_ms(500, site, 125_000, 8), 500 + settle);
+        }
+        for site in [RxSite::Idle, RxSite::Ack, RxSite::Hold, RxSite::Yield] {
+            assert_eq!(rx_arm_bound_ms(500, site, 125_000, 8), 500);
+        }
+    }
+
+    /// Single mode stays single mode — a pad would turn the unbounded idle
+    /// listen into a bounded one — and a radio with no modulation has no
+    /// honest pad, so the asked bound stands.
+    #[test]
+    fn the_arm_bound_keeps_single_mode_and_survives_no_modulation() {
+        assert_eq!(rx_arm_bound_ms(0, RxSite::Jitter, 125_000, 8), 0);
+        assert_eq!(rx_arm_bound_ms(500, RxSite::Jitter, 0, 8), 500);
+        assert_eq!(rx_arm_bound_ms(500, RxSite::Csma, 125_000, 0), 500);
+        assert_eq!(
+            rx_arm_bound_ms(u32::MAX, RxSite::Jitter, 125_000, 8),
+            u32::MAX
+        );
     }
 
     /// The defect instance: a 184-byte announce at SF12/BW125/CR4:8 with the

@@ -75,7 +75,7 @@ use alloc::vec::Vec;
 
 /// How many peer identities the rate limit remembers.
 ///
-/// `MAX_LINKS` is 4 on both boards (`crate::ble::MAX_LINKS`), so eight
+/// `MAX_LINKS` is 4 on both boards (`leviculum_heap_budget::MAX_LINKS`), so eight
 /// slots hold every currently linked peer plus four that have come and
 /// gone inside the fifteen-minute window. Overflowing it costs one extra
 /// announce on one link, never a wrongly withheld one — see
@@ -106,7 +106,7 @@ const NEIGHBOUR_SLOTS: usize = 32;
 /// objects with two lifetimes — [`AnnounceGate`] and
 /// [`crate::pn::Engine`], the second of which exists only on a boot that
 /// runs the propagation role — and the decision is one. Same locking
-/// shape as [`crate::identity`]'s statics, uncontended on the
+/// shape as [`leviculum_firmware::identity`]'s statics, uncontended on the
 /// single-core cooperative executor.
 static CADENCE: embassy_sync::blocking_mutex::Mutex<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
@@ -150,7 +150,7 @@ pub fn with_cadence<T>(f: impl FnOnce(&mut AnnounceCadence) -> T) -> T {
 /// halves are decided together and a budget for one of them would be a
 /// budget for a cadence nobody runs.
 pub fn note_duty_budget(now_ms: u64, frame_airtime_ms: u64, lawful_duty_e4: u16) {
-    let frames_per_set = if crate::identity::propagation_hash().is_some() {
+    let frames_per_set = if leviculum_firmware::identity::propagation_hash().is_some() {
         2
     } else {
         1
@@ -261,7 +261,7 @@ pub fn movement_fix() -> Option<leviculum_telemetry_policy::Fix> {
 /// its first sentence.
 #[cfg(feature = "gnss")]
 fn gnss_reading() -> Option<leviculum_announce_policy::GnssReading> {
-    let fix = crate::baseboard::GNSS_FIX.try_get()?;
+    let fix = leviculum_firmware::board_state::GNSS_FIX.try_get()?;
     Some(leviculum_announce_policy::GnssReading {
         valid: fix.valid,
         latitude: fix.latitude,
@@ -472,7 +472,7 @@ impl AnnounceGate {
 }
 
 /// A double press of the user button got past its debouncer and its rate
-/// limit (`crate::button`): both announces, booked in the one cadence.
+/// limit (`leviculum_firmware::button`): both announces, booked in the one cadence.
 ///
 /// The cadence decides first ([`AnnounceCadence::manual`]) so that the
 /// press is paid for in the carrier's duty budget like every other

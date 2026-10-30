@@ -20,6 +20,63 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- loquax reactions (#232, 1104): the LXMF `FIELD_REACTION` as Columba,
+  Ratspeak and MeshChatX send it, drawn under the message it reacts to with
+  a count and yours marked, never as a message of its own; a reaction that
+  arrives before its target appears with it. `e` or the palette's `react`
+  opens a picker of Columba's six emoji or free text, sent like any message.
+  `leviculum-lxmf` gains the codec, pinned against the reference.
+- loquax import and export, slice one (#232, 1103): `loquax import` brings
+  over a NomadNet tree (contacts, blocks, the propagation node, the history
+  with signatures checked where the bytes are intact), raw identity files of
+  NomadNet, MeshChat, MeshChatX, Sideband and Ratspeak, and a pasted Base32
+  key; `--dry-run` lists and writes nothing; the identity is adopted only on
+  a typed `yes`, and the old one is set aside, not deleted. The first start
+  of the messenger scans the apps' default places and asks; the palette has
+  `import`. `loquax export <dir>` writes NomadNet's shape, which the import
+  reads back. Store schema 6. See `docs/src/concepts/loquax-import.md`.
+- loquax home node, slice one (#232, 1101): `loquax --daemon` holds the LXMF
+  identity on an always-on host, takes DIRECT delivery, keeps every message
+  in an archive with a sequence under a disk cap (`archive_cap_mb`, 1 GiB by
+  default) and collects from its propagation node. `loquax home admit`,
+  `join`, `devices` and `revoke` admit other devices with a single-use code;
+  each has its own RNS identity, registers no delivery destination, and
+  pulls the archive by cursor in the messenger and with `loquax fetch`.
+  Pulling deletes nothing. See `docs/src/concepts/loquax-home-node.md`.
+- Every program ships as a nightly `.deb` (1000). New are `lnmsg`, built with
+  its `tui`, for amd64 and arm64, and `lnflash`, for amd64: the flasher in
+  `/usr/bin` and the firmware bundle under `/usr/share/lnflash`, where it
+  looks, so `sudo lnflash` works from any directory. `lnflash --version`,
+  `lnpnd --version` and the first line `lnflash` prints now name the build id
+  and, in parentheses, the commit, as lnsd and lnomad already did.
+- `lnmsg tui`, the interactive messenger, slice one (#232), behind lnmsg's
+  `tui` cargo feature: conversations, messages and a compose line, `Tab`
+  between them, a command palette on `Ctrl-P`. `Enter` sends the way
+  `lnmsg send --via auto` does, and each sent message shows its delivery
+  mark (`○` queued, `◇` sent, `⌂` in a mailbox, `✓` proven, `✗`). Messages
+  live for the session only; lnmsg keeps no history yet. `--script` drives
+  it from a key script and writes the frames to a file. lnmsg(1) is new.
+- lnsd reads an `[auto]` section, which rnsd ignores: `lan`, `servers`,
+  `bluetooth`, `serial`, each yes or no, the media lnsd may start on its
+  own (#471 step 2). A file without the section starts nothing automatic;
+  no file runs the shipped defaults (`lan = yes`, the rest `no` until their
+  steps land), which `lnsd --writeconfig` now appends to rnsd's
+  first-start file. `[auto] lan = yes` adds an AutoInterface to a file that
+  names none. The host marker `/etc/leviculum/no-auto` and
+  `LEVICULUM_NO_AUTO=1` turn every medium off; `scripts/install-ci.sh`
+  installs the marker. lnsd states the decision once at start,
+  `AUTO_LAYER state= reason= lan= servers= bluetooth= serial=`, and
+  `lnstatus` prints it as `Auto layer`.
+
+- lnsd started on a config directory without a `config` file runs the
+  configuration rnsd writes on its first start, held in memory and written
+  nowhere: one AutoInterface, a shared instance, transport off (#471 step
+  1). It said "0 interfaces" before and served no shared instance. `lnsd
+  --writeconfig` writes that file, byte for byte what rnsd would have
+  written. `lnstatus` prints each interface's `Origin` (`configured` or
+  `default`), served as the `origin` key; lnsd logs `CONFIG source=` and one
+  `IFACE_CONFIG ... origin=` per section at start.
+
 - A double press on a board's button now also sends one position report
   when a telemetry recipient is configured, through the ordinary telemetry
   path, and the board blinks (and on the T1000-E beeps) two short when the
@@ -455,6 +512,17 @@ Toolchain: Rust 1.97.1
 
 ### Changed
 
+- The messenger's name is Loquax, with a capital L (#232, 1147): the
+  terminal's list title and help, the window title, the messages it prints
+  for people, the fallback display name and the docs say Loquax. The
+  command, package, crate, paths, config keys and variables stay `loquax`.
+  `just loquax-name` refuses a prose `loquax` in `docs/src`.
+- lnmsg is now loquax (#232): crate, binary, package (it replaces the lnmsg
+  package), man page and concept pages. The config directory moves on first
+  start: `~/.config/lnmsg` becomes `~/.config/loquax` when only the old one
+  exists. The `LNMSG_HOME` and `LNMSG_DISPLAY_NAME` variables and the
+  `LNMSG_*` event names keep their names.
+
 - The boards' build banner (`[FW_BUILD]` with `[TIME_SOURCE]`, `[MEDIA]`,
   `[NAME ]` and `[IDENTITY]`) repeats every 5 s only for the first two
   minutes after boot, where every post-flash reader reads it, and every
@@ -720,6 +788,22 @@ Toolchain: Rust 1.97.1
   cancellation path passes a fresh `StampCancel::new()`.
 
 ### Fixed
+
+- A board no longer loses a frame whose preamble begins inside the last
+  detector horizon of a pre-transmit listening window (#466): the
+  acquisition-jitter and CSMA-backoff windows now run their hardware RX
+  timeout one latch-settle bound (~25 ms at SF8/BW125, about one CSMA
+  slot) past the asked bound, so such a preamble latches and
+  stop-timer-on-preamble holds the window through the frame instead of
+  the chip leaving RX mid-preamble on its own. Before the pad, the CAD
+  that followed read the dying frame as a busy channel — correctly — but
+  the backoff re-arms it licensed restarted the preamble detector with
+  too little preamble left to sync, so the frame was lost without ever
+  being receivable: both witnessed receiver-side losses in the 2026-10-22
+  `t1000e_rnode_pair` acceptance runs were jitter expiries 11–17 ms into
+  the lost probe's preamble, followed by `busy=true` CAD runs through the
+  rest of the frame. Both drivers (LR11xx, SX1262); the asked bound still
+  governs adoption, so the pad cannot compound across re-arms.
 
 - A board no longer loses the second frame of a back-to-back LoRa burst
   to its own receive re-arm (#466): an empty IRQ latch younger than the

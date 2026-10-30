@@ -1,0 +1,28 @@
+[package]
+name = "leviculum-map-tool"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Cuts a map region file from a Protomaps PMTiles archive, for leviculum-map (#474)"
+# A desktop tool run by hand; no package ships it and nothing links it.
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+leviculum-map = { path = "../leviculum-map", features = ["std"] }
+leviculum-mapfill = { path = "../leviculum-mapfill", features = ["std"] }
+# The cut itself, shared with loquax's autoload (1089); `http` for an
+# `https://` input read by range requests.
+leviculum-mapcut = { path = "../leviculum-mapcut", features = ["http"] }
+embedded-graphics = "0.8"
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+# The allocator lnsd runs on (leviculum-cli/Cargo.toml). The cut allocates
+# per feature and per ring on every worker; on musl's allocator a Hessen cut
+# spent twice as long in the kernel as in user space.
+mimalloc = { version = "0.1", default-features = false }

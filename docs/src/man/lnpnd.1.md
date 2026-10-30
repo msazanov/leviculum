@@ -96,7 +96,7 @@ The three announced costs default to `propagation_stamp_cost_target = 13`, `prop
 
 `[propagation] announce_at_start` works as in lxmd: the node announces 20 s after start either way, and with the key on a second announce follows 10 s later, after which the `announce_interval` runs from the second. Unlike lxmd, an absent key means on, the value lxmd's generated config carries, so a fresh node gets two chances to be heard before its peers wait out a whole interval.
 
-`enable_node = no` is refused: the propagation node is what lnpnd is. For a mailbox-only daemon use lxmd; for a client, **lnmsg**.
+`enable_node = no` is refused: the propagation node is what lnpnd is. For a mailbox-only daemon use lxmd; for a client, **loquax**.
 
 ## FILES
 

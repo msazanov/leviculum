@@ -10,7 +10,9 @@ lnstatus -- Reticulum network stack status
 
 ## DESCRIPTION
 
-**lnstatus** displays the status of the interfaces on a running Reticulum daemon. It is compatible with Python's **rnstatus** and produces the same per-interface layout. It connects to a running daemon (**lnsd** or **rnsd**) via shared instance IPC, querying `interface_stats` (and `link_count` for **-l**), so `lnstatus | diff rnstatus` against the same daemon passes.
+**lnstatus** displays the status of the interfaces on a running Reticulum daemon. It is compatible with Python's **rnstatus** and produces the same per-interface layout. It connects to a running daemon (**lnsd** or **rnsd**) via shared instance IPC, querying `interface_stats` (and `link_count` for **-l**), so `lnstatus | diff rnstatus` against the same **rnsd** passes.
+
+Against **lnsd**, each interface carries one line **rnstatus** does not print, `Origin    : configured` or `Origin    : default`: whether the interface comes from a configuration file or from the configuration **lnsd** runs when there is none (see lnsd(1)). The same value is the `origin` key of **-j**. Against **rnsd**, which serves no such key, the line is absent and the output stays the same as **rnstatus**'s. The same holds for the last line, `Auto layer   : off reason=config lan=no servers=no bluetooth=no serial=no`, **lnsd**'s automatic-layer decision at start (its `AUTO_LAYER` line, see lnsd(1)), served as the top-level `auto_layer` key of **-j**.
 
 Without a *filter*, all up interfaces are shown. Give a *filter* string to only display interfaces whose name contains it.
 
@@ -82,6 +84,17 @@ With **-R** it queries a remote transport instance over a link, the way `rnstatu
     causes an error and exit status 2. With **-j** the raw response is
     printed instead. Not available with **-R**, **-d**/**-D**, **--tables**
     or **-m**. See **IDENTITY LISTING** below.
+
+**--origin**
+:   Under each interface's `Status` line, print an `Origin` line saying where
+    lnsd took the interface from: `configured` (a config file) or `default`
+    (the configuration it holds when there is none). After the trailer, print
+    one `Auto layer` line with lnsd's start decision for the automatic layer,
+    as its `AUTO_LAYER` log line states it. Leviculum extension, off by
+    default: lnsd serves both on every query, and without the flag the output
+    is byte-identical to `rnstatus`'s. Long form only, so no single letter
+    `rnstatus` may take later collides. Against a Python `rnsd`, which serves
+    neither, the flag prints nothing extra.
 
 **-m**, **--monitor**
 :   Continuously monitor status, clearing and redrawing on each interval.

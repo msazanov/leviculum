@@ -17,7 +17,9 @@
 //! [`propagation_node::PropagationNode`] (leviculum#384 part 1): the role
 //! that stores uploads and answers `/get`, over the
 //! [`propagation_store::PropagationStore`] boundary a host directory or the
-//! boards' record log implements. A host built on these still owns links,
+//! boards' record log implements, with the body read split out into
+//! [`propagation_store::PropagationBodyStore`] for media that are not
+//! memory-mapped. A host built on these still owns links,
 //! resources and stamp-validation scheduling: this crate performs no I/O.
 //!
 //! The *node ↔ node* direction (leviculum#384 part 2) lives in
@@ -39,6 +41,31 @@ extern crate std;
 
 extern crate alloc;
 
+#[cfg(feature = "tracing")]
+pub(crate) mod tracing {
+    pub(crate) use ::tracing::debug;
+
+    /// The first eight bytes of an id as hex, enough to follow one message
+    /// or destination through a log.
+    pub(crate) struct Short<'a>(pub &'a [u8]);
+
+    impl core::fmt::Display for Short<'_> {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            self.0
+                .iter()
+                .take(8)
+                .try_for_each(|byte| write!(f, "{byte:02x}"))
+        }
+    }
+}
+#[cfg(not(feature = "tracing"))]
+pub(crate) mod tracing {
+    macro_rules! noop {
+        ($($tt:tt)*) => {{}};
+    }
+    pub(crate) use noop as debug;
+}
+
 pub mod active_delivery;
 pub mod announce;
 pub mod attachments;
@@ -53,6 +80,8 @@ pub mod propagation;
 pub mod propagation_client;
 pub mod propagation_node;
 pub mod propagation_store;
+pub mod reaction;
+pub mod reply;
 pub mod router;
 pub mod stamp;
 pub mod storage;
@@ -76,9 +105,10 @@ pub use node::{
 pub use paper::{PaperError, PaperMessage};
 pub use peering::{
     answer_offer, build_offer, offer_reply, peering_key_material, plan_sync_batch, response_action,
-    DeclineReason, DropReason, InboundGate, MemoryPeerStore, OfferPlan, OfferReply, OfferResponse,
-    Peer, PeerChange, PeerOffer, PeerRecord, PeerStore, PeerSyncEnvelope, PeerTable, PeerTraffic,
-    PeeringConfig, ResponseAction, SyncBatch, SyncPhase, SyncSource, WantedIds, OFFER_REQUEST_PATH,
+    DeclineReason, DropReason, InboundGate, MemoryPeerStore, OfferBuilder, OfferPlan, OfferReply,
+    OfferResponse, Peer, PeerChange, PeerOffer, PeerRecord, PeerStore, PeerSyncEnvelope, PeerTable,
+    PeerTraffic, PeeringConfig, ResponseAction, SyncBatch, SyncPhase, SyncSource, WantedIds,
+    OFFER_REQUEST_PATH,
 };
 pub use propagation::{
     MessageGetRequest, MessageGetResponse, MessageListResponse, MetadataEntry, PeerError,
@@ -92,10 +122,13 @@ pub use propagation_client::{
     PROPAGATION_ASPECT,
 };
 pub use propagation_node::{
-    Eviction, EvictionReason, FetchPlan, FetchSource, GetError, GetOutcome, PropagationNode,
-    PropagationNodeConfig, UploadOutcome, MESSAGE_EXPIRY_SECS, PN_META_NAME,
+    Eviction, EvictionReason, FetchPlan, FetchSource, GetError, GetOutcome, PreparedFetch,
+    PreparedGet, PropagationNode, PropagationNodeConfig, UploadOutcome, MESSAGE_EXPIRY_SECS,
+    PN_META_NAME,
 };
-pub use propagation_store::{MemoryPropagationStore, PropagationStore, StoredMessage};
+pub use propagation_store::{
+    ConfirmedPurge, MemoryPropagationStore, PropagationBodyStore, PropagationStore, StoredMessage,
+};
 pub use router::{
     BuiltResource, DeliveryStampRequest, InboundStampRequest, PendingResourceBuild,
     PropagationStampRequest,

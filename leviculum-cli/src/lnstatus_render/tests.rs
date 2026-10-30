@@ -34,6 +34,8 @@ fn opts_from_json(o: &Value) -> StatusOptions {
         // reference byte-for-byte; `lnstatus` passes 0 because it never
         // attaches. See `StatusOptions::observer_clients`.
         observer_clients: 1,
+        // rnstatus has no `--origin`; the golden cases are its default render.
+        origin: false,
     }
 }
 
@@ -871,5 +873,91 @@ fn announce_rate_discount_follows_the_observer_footprint() {
         !attached.contains("0.9 Hz"),
         "an attached observer discounts its own share (0.9 - 0.9/2), \
          got:\n{attached}"
+    );
+}
+
+#[test]
+fn origin_renders_where_lnsd_serves_it_and_nowhere_else() {
+    // `origin` (#471) says whether lnsd took the interface from a file or
+    // from the configuration it holds when there is none. Behind `--origin`
+    // a line under Status where the key is served; an rnsd entry has no key
+    // and renders as rnstatus renders it. Without the flag no line at all,
+    // since lnsd serves the key on every row and the default render is
+    // rnstatus's.
+    let mut from_default = iface("AutoInterface[Default Interface]", 10_000_000, 0, 0);
+    from_default["origin"] = serde_json::json!("default");
+    let mut from_file = iface("TCPInterface[Uplink/127.0.0.1:4242]", 10_000_000, 0, 0);
+    from_file["origin"] = serde_json::json!("configured");
+    let rnsd_shaped = iface("UDPInterface[Bare]", 10_000_000, 0, 0);
+    let stats = serde_json::json!({
+        "interfaces": [from_default, from_file, rnsd_shaped],
+        "rxb": 0, "txb": 0, "rxs": 0.0, "txs": 0.0, "rss": null
+    });
+
+    let plain = render_status(&stats, None, &StatusOptions::default());
+    assert!(
+        !plain.contains("Origin"),
+        "no line without --origin:\n{plain}"
+    );
+
+    let origin = StatusOptions {
+        origin: true,
+        ..Default::default()
+    };
+    let text = render_status(&stats, None, &origin);
+    let blocks: Vec<&str> = text.split("\n\n").collect();
+    assert!(
+        blocks[0].contains("    Status    : Up\n    Origin    : default\n"),
+        "the default's interface says so under Status:\n{text}"
+    );
+    assert!(
+        blocks[1].contains("    Origin    : configured\n"),
+        "a file's interface says configured:\n{text}"
+    );
+    assert!(
+        !blocks[2].contains("Origin"),
+        "an rnsd entry without the key renders no line:\n{text}"
+    );
+
+    let json: Value = serde_json::from_str(&render_json(&stats)).unwrap();
+    let ifs = json["interfaces"].as_array().unwrap();
+    assert_eq!(ifs[0]["origin"], serde_json::json!("default"));
+    assert!(ifs[2].get("origin").is_none());
+}
+
+#[test]
+fn auto_layer_renders_where_lnsd_serves_it_and_nowhere_else() {
+    // `auto_layer` (#471 step 2) is lnsd's start decision, served as its
+    // `AUTO_LAYER` line reads after `state=`. Behind `--origin` one line at
+    // the end of the trailer where it is served; a stats dict without it
+    // (rnsd, a node built in code), or any dict without the flag, renders
+    // exactly as before.
+    let bare = serde_json::json!({
+        "interfaces": [iface("UDPInterface[Bare]", 10_000_000, 0, 0)],
+        "rxb": 0, "txb": 0, "rxs": 0.0, "txs": 0.0, "rss": null
+    });
+    let mut served = bare.clone();
+    served["auto_layer"] =
+        serde_json::json!("off reason=config lan=no servers=no bluetooth=no serial=no");
+
+    let origin = StatusOptions {
+        origin: true,
+        ..Default::default()
+    };
+    let without = render_status(&bare, None, &origin);
+    let with = render_status(&served, None, &origin);
+    assert!(!without.contains("Auto layer"), "{without}");
+    assert_eq!(
+        render_status(&served, None, &StatusOptions::default()),
+        render_status(&bare, None, &StatusOptions::default()),
+        "without --origin the served key renders nothing"
+    );
+    assert_eq!(
+        with,
+        format!(
+            "{}\n\n Auto layer   : off reason=config lan=no servers=no bluetooth=no serial=no\n\n",
+            without.trim_end_matches('\n')
+        ),
+        "the line is the only difference:\n{with}"
     );
 }

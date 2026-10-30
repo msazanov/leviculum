@@ -42,11 +42,11 @@ the vocabulary it is expressed in; the firmware supplies the I/O and the
 clock and does what it is told. `leviculum-rx-arming` is the sharpest
 example already in the tree — it holds the order in which the receive
 path re-arms and hands a frame up, and `src/sx1262.rs` supplies a chip to
-drive (`stand_down_for_rx`, `leviculum-nrf/src/sx1262.rs:975`).
+drive (`stand_down_for_rx`, `leviculum-nrf/src/sx1262.rs:984`).
 
 ## Where the seam runs today
 
-The `leviculum-nrf` workspace has 35 members besides the firmware crate,
+The `leviculum-nrf` workspace has 38 members besides the firmware crate,
 every one of them pure and host-testable: `screen`, `sd-policy`,
 `gnss-time`, `gnss-presence`, `gnss-init`, `telemetry-policy`, `ble-tx`,
 `announce-policy`, `queue-budget`, `log-line`, `tx-spacing`, `rx-arming`,
@@ -54,7 +54,7 @@ every one of them pure and host-testable: `screen`, `sd-policy`,
 `media-state`, `record-log`, `pn-store`, `store-spike`, `qspi-bitbang`,
 `battery-scale`, `settle-budget`, `drop-budget`, `heap-budget`,
 `node-name`, `sync-batch`, `upload-proof`, `mute-lease`, `qspi-selftest`,
-`qspi-boot`, `usb-policy`, `time-floor`, `motion`, `feedback` (`members`, `leviculum-nrf/Cargo.toml:14`). Before
+`qspi-boot`, `usb-policy`, `time-floor`, `motion`, `feedback`, `serial-mux`, `rtc-pcf8563`, `firmware` (`members`, `leviculum-nrf/Cargo.toml:14`). Before
 `heap-budget` and `node-name` joined them they carried **806 host assertions across 61 test targets** —
 measured 2026-09-25 by the host-triple lines of `lint-nrf`
 (`Justfile:80`). `mute-lease` is the
@@ -161,9 +161,9 @@ this page singled out first, in the order it is cheap to move:
 
 **1. The `[TRANSPORT]` ticker.** The re-arm deliberately drops missed
 periods so a busy loop does not then emit a burst of catch-up lines
-(`poll`, `leviculum-nrf/src/transport_stats.rs:107`), and the line is
+(`poll`, `leviculum-nrf/src/transport_stats.rs:108`), and the line is
 byte-exact because capture consumers grep it (`log`,
-`leviculum-nrf/src/transport_stats.rs:115`). `leviculum-log-line` already
+`leviculum-nrf/src/transport_stats.rs:116`). `leviculum-log-line` already
 exists for the second half.
 
 See also: [Checks that are actually

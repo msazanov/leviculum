@@ -71,7 +71,7 @@
 //! ([`crate::vext`]).
 //!
 //! **Sleep while still** (#457 step two). On a board that publishes a
-//! motion state ([`crate::baseboard::MOTION_STATE`], the T1000-E's
+//! motion state ([`leviculum_firmware::board_state::MOTION_STATE`], the T1000-E's
 //! accelerometer) and whose receiver has a power enable, the task selects
 //! between its UART read and the motion watch, and the pure
 //! [`leviculum_gnss_presence::PowerGate`] decides: `still` sleeps the
@@ -111,7 +111,7 @@ use embassy_time::{with_timeout, Duration, Instant, Timer};
 use leviculum_gnss_init::{AirohaInit, L76kInit, ModuleInit, UbxInit};
 use leviculum_gnss_presence::{Output, Power, PowerEdge, PowerGate, Presence, PresenceMachine};
 
-use crate::baseboard::{GnssFix, GnssPresenceState, GNSS_FIX, GNSS_PRESENCE};
+use leviculum_firmware::board_state::{GnssFix, GnssPresenceState, GNSS_FIX, GNSS_PRESENCE};
 
 /// Which receiver is on the other end of the UART, and therefore which
 /// command language the one-shot boot init speaks. The board knows; the
@@ -369,7 +369,7 @@ pub async fn gnss_task(wiring: GnssWiring) {
     // part did not answer) the watch never gets a value, the gate never
     // leaves `Awake`, and this task runs exactly as it did before.
     let mut motion_rx = if power_enable.is_some() {
-        crate::baseboard::MOTION_STATE.receiver()
+        leviculum_firmware::board_state::MOTION_STATE.receiver()
     } else {
         None
     };
@@ -584,4 +584,15 @@ pub async fn gnss_task(wiring: GnssWiring) {
 /// Convenience wrapper invoked from the bin file.
 pub fn init(spawner: &Spawner, wiring: GnssWiring) {
     spawner.must_spawn(gnss_task(wiring));
+}
+
+/// The boot anchor (#240, D2 of order 1085): "machinery armed, answer
+/// pending", printed once by every GNSS board before the task's first
+/// transition. The settled states are the task's `state=<no-hardware|
+/// no-fix|fix>` transitions (`apply_output`); this line marks the wait for
+/// them, so a log tail always carries a `[GNSS_PRESENCE]` anchor. A replay
+/// keyed on the three settled states treats it like no line at all. `baud`
+/// is the rate the board's module ships at.
+pub fn log_detecting(baud: u32) {
+    crate::log_critical!("[GNSS_PRESENCE] state=detecting baud={}", baud);
 }

@@ -434,7 +434,7 @@ fn the_rule_bounds_the_age_of_everything_that_airs() {
 
 /// The derivation, asserted rather than only written down: the cap is the
 /// shortest relay entry the transport grants, `(1 + 0 + 2) × 6 s`
-/// (`proof_timeout_ms`, `leviculum-core/src/transport.rs:6791-6794`); it has
+/// (`proof_timeout_ms`, `leviculum-core/src/transport.rs:6811-6814`); it has
 /// to sit above the short-term airtime window (a lock that engaged on
 /// short-term airtime alone releases within 2 × 7500 ms as the bins roll off,
 /// and a cap below that would drop frames the lock was about to release) and

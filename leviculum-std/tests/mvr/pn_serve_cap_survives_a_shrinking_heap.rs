@@ -284,11 +284,14 @@ block={largest_block}"
          servable block of {LARGEST_AT_PANIC} B"
     );
 
-    // 5. Positive control, and the red this rule removes: the cap the
-    //    same heap funds with NO margin serves twice as many messages
-    //    and overruns the heap as soon as the arrivals land. Measured,
-    //    not modelled -- the margin has to be load-bearing on the real
-    //    path or it is decoration.
+    // 5. The cap the same heap funds with NO margin serves twice as many
+    //    messages. Until the fetch streamed its bodies through
+    //    `read_body_at` (leviculum#470 group 4) it also overran the heap
+    //    once the arrivals landed: 31 003 B live against 30 380 B. Since
+    //    then it holds 29 557 B (the margined serve 22 948 B, from
+    //    24 659 B), so on this path the margin is no longer what keeps the
+    //    serve inside the heap, and the overrun is not asserted any more.
+    //    The reading is printed so the margin's next sizing starts from it.
     let unmargined_cap = serve_cap_for_peak(FREE_AT_PANIC, BOARD_RESOURCE_SDU);
     let (greedy_role, greedy_plan) = planned_at_cap(unmargined_cap);
     let greedy_served = greedy_plan.count();
@@ -302,11 +305,5 @@ response={} peak={greedy_peak} free={FREE_AT_PANIC}",
         greedy_completed && greedy_served > served,
         "the margin-free cap must be the greedier one: {greedy_served} \
          against {served}"
-    );
-    assert!(
-        greedy_peak > FREE_AT_PANIC,
-        "the margin-free cap held only {greedy_peak} B live against \
-         {FREE_AT_PANIC} B of heap -- if it fits, this test is no longer \
-         measuring why the margin exists"
     );
 }

@@ -15,22 +15,22 @@ today:
 
 - **LoRa transport, with the receiver always on.** When the queue is
   empty the radio task parks in continuous receive and does not re-arm a
-  window (`leviculum-nrf/src/lora.rs:2559-2561`). There is no receive
+  window (`leviculum-nrf/src/lora.rs:2602-2604`). There is no receive
   duty cycle anywhere in the image.
 - **BLE for Columba** ([Bluetooth interfaces](bluetooth-interfaces.md)).
 - **The propagation node role** ([An LXMF propagation node on a
   board](propagation-node-on-a-board.md)). `pn.rs` is in every image: all
   four board binaries load its configuration at boot
-  (`leviculum-nrf/src/bin/t114.rs:635`,
-  `leviculum-nrf/src/bin/rak4631.rs:654`,
-  `leviculum-nrf/src/bin/solarnode.rs:721`,
-  `leviculum-nrf/src/bin/t1000e.rs:642`).
+  (`leviculum-nrf/src/node_loop.rs:720`,
+  `leviculum-nrf/src/bin/rak4631.rs:652`,
+  `leviculum-nrf/src/bin/solarnode.rs:707`,
+  `leviculum-nrf/src/bin/t1000e.rs:626`).
 - **Telemetry at the announce cadence** ([Announce
   cadence](announce-cadence.md), [Telemetry](telemetry.md)).
 
 Nothing ever sleeps. The T1000-E board file says so in as many words:
 the GNSS receiver's RTC supply goes low only in Meshtastic's deep sleep,
-"which this firmware has none of" (`leviculum-nrf/src/boards/t1000e.rs:178-179`).
+"which this firmware has none of" (`leviculum-nrf/src/boards/t1000e.rs:176-177`).
 
 ## Tracker
 
@@ -84,7 +84,7 @@ announce that arrives sooner than the target after the last one passed
 counts a violation, one that arrives later forgives one, and a sixth
 outstanding violation blocks rebroadcast until the last passed announce
 plus the target (`Transport.py:1853-1865`, ours `update_announce_rate`,
-`leviculum-core/src/transport.rs:14286-14318`). Worked through for the
+`leviculum-core/src/transport.rs:14336-14368`). Worked through for the
 300 s moving cadence: the first six announces, over 25 minutes, are
 rebroadcast by each transit node; after that about one in thirteen is,
 one every 65 minutes. The tracker's own neighbours hear every announce;
@@ -99,6 +99,11 @@ The user switches with the long press ([One button](one-button.md)). The
 mode persists in flash across reboot and power-off. The default is Mesh,
 and `lnflash` sets the default at flash time the way it sets the
 propagation node's stamp cost (`lnflash/src/main.rs:159`).
+
+Decided 2026-10-25 (Lew): the 8 s press puts the board to sleep in
+either mode, and a press wakes it ([One button](one-button.md)). A
+sleeping board is no propagation node and no relay, so it is neither
+mode while it sleeps.
 
 ## Open
 
@@ -135,3 +140,5 @@ sources, the stored key and path, and the `lnflash` default.
   battery, a button and an accelerometer.
 - [The ThinkNode M9](thinknode-m9.md), a handheld that runs both modes
   with a keyboard instead of one button.
+- [Firmware layers](firmware-layers.md), for where the mode logic lives
+  once it runs on more than one chip family.

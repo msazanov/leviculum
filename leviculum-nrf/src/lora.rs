@@ -32,6 +32,33 @@ use crate::radio::Radio;
 /// always-present atomics cost nothing on display-less builds.
 pub static LORA_TX_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
+/// Packets the interface has accepted into `LORA_OUTGOING`, wrapping. The
+/// count after a packet's acceptance is that packet's number: the button
+/// arm reads it around a dispatch to learn which packets were its
+/// announces (order 930, `leviculum_feedback::AirWatch`).
+static LORA_ACCEPTED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Packets the LoRa task has settled, keyed or dropped, wrapping. The queue
+/// is FIFO and every packet leaves it through `admit_for_transmit` into
+/// either the mute's drop or `pending_tx`, which ends in the stale drop or
+/// a transmission; those three settle it, in acceptance order, so the
+/// count after a settle is the settled packet's number.
+static LORA_SETTLED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Packets accepted so far, which is the number of the latest one.
+pub fn accepted_packets() -> u32 {
+    LORA_ACCEPTED.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Settle the oldest unsettled packet; `keyed` is whether it went on the
+/// air. Only the LoRa task calls this.
+fn settle_packet(keyed: bool) {
+    let packet = LORA_SETTLED
+        .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+        .wrapping_add(1);
+    leviculum_firmware::feedback::lora_packet_settled(packet, keyed);
+}
+
 /// Cumulative count of fully reassembled LoRa packets handed off to NodeCore
 /// (one increment per `[LORA] RX … bytes` followed by a successful
 /// reassembler feed).
@@ -363,8 +390,8 @@ pub fn config_applied() -> &'static embassy_sync::signal::Signal<CriticalSection
     &CONFIG_APPLIED
 }
 
-/// Index of the LoRa carrier in the node's interface table — the one the
-/// binaries name [`crate::radio::IFACE_NAME`], and the one [`LoRaInterface::id`] answers
+/// Index of the LoRa carrier in the node's interface table — the entry of
+/// the board's `IFACE_NAMES` that names the radio, and the one [`LoRaInterface::id`] answers
 /// with. Spelled once so a caller that has to address this interface without
 /// holding it (the announce cap, #402) cannot address a different one.
 pub const IFACE_INDEX: usize = 1;
@@ -394,7 +421,7 @@ impl Interface for LoRaInterface {
         InterfaceId(IFACE_INDEX)
     }
     fn name(&self) -> &str {
-        crate::iface_bytes::NAMES[crate::iface_bytes::LORA]
+        leviculum_firmware::iface_bytes::names()[leviculum_firmware::iface_bytes::LORA]
     }
     fn mtu(&self) -> usize {
         500
@@ -439,13 +466,13 @@ impl Interface for LoRaInterface {
                 // most needs explaining (#255). Same rule as `dispatch::settle`
                 // and `Reporter::note_state`: the transition is the signal.
                 if let Some(run) = self.drops.dropped(data.len()) {
-                    crate::media::log_tx_drop(self.name(), run);
+                    leviculum_firmware::media::log_tx_drop(self.name(), run);
                 }
                 return Ok(());
             }
             Outbound::Refuse(bound) => {
                 if let Some(run) = self.drops.resumed() {
-                    crate::media::log_tx_resumed(self.name(), run);
+                    leviculum_firmware::media::log_tx_resumed(self.name(), run);
                 }
                 crate::log::log_fmt(
                     "[IFACE_FULL] ",
@@ -464,7 +491,7 @@ impl Interface for LoRaInterface {
             }
             Outbound::Queue => {
                 if let Some(run) = self.drops.resumed() {
-                    crate::media::log_tx_resumed(self.name(), run);
+                    leviculum_firmware::media::log_tx_resumed(self.name(), run);
                 }
             }
         }
@@ -481,7 +508,13 @@ impl Interface for LoRaInterface {
             // unframed packet as the interface accepts it
             // (`RNodeInterface.py:725`), so split-frame headers and the
             // airtime a retry costs stay out of the number.
-            .map(|()| crate::iface_bytes::note_tx(crate::iface_bytes::LORA, bytes))
+            .map(|()| {
+                LORA_ACCEPTED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                leviculum_firmware::iface_bytes::note_tx(
+                    leviculum_firmware::iface_bytes::LORA,
+                    bytes,
+                )
+            })
             .map_err(|_| {
                 // Unreachable while the reservation and the channel agree — the
                 // slot bound the budget enforces is the channel's own capacity.
@@ -842,7 +875,7 @@ impl AnnounceCap {
             "[ANNOUNCE_CAP] ",
             format_args!(
                 "iface={} bitrate_bps={} cap_pct={} holdoff_ms={} ref_bytes={} sf={} bw={} cr={} preamble={}",
-                crate::radio::IFACE_NAME,
+                leviculum_firmware::iface_bytes::names()[IFACE_INDEX],
                 bitrate_bps,
                 cap_pct,
                 holdoff_ms,
@@ -1117,13 +1150,15 @@ fn apply_airtime_limits(config: &RadioConfig) {
 /// spacing is the number that appears on the air. The spacing applies per
 /// *packet*: the split frames below still go out back-to-back, because the
 /// receiver's reassembler requires that.
+///
+/// Returns whether the packet counts as sent, the `TX done` verdict.
 async fn transmit_all_frames(
     radio: &mut Radio,
     data: &[u8],
     rng_state: &mut u32,
     config: &RadioConfig,
     spacer: &mut leviculum_tx_spacing::TxSpacer,
-) {
+) -> bool {
     let wait_ms = spacer.wait_ms(embassy_time::Instant::now().as_millis());
     if wait_ms > 0 {
         embassy_time::Timer::after(embassy_time::Duration::from_millis(wait_ms)).await;
@@ -1236,12 +1271,13 @@ async fn transmit_all_frames(
         crate::log::log_fmt("[LORA] ", format_args!("TX done"));
         LORA_TX_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         #[cfg(feature = "display")]
-        crate::baseboard::LORA_TX_FLASH.signal(());
+        leviculum_firmware::board_state::LORA_TX_FLASH.signal(());
     }
     crate::log::log_fmt(
         "[T114_LORA_LOOP] ",
         format_args!("op=tx duration_ms={}", tx_ms),
     );
+    packet.sent()
 }
 
 // RX helper
@@ -1351,7 +1387,7 @@ impl leviculum_rx_arming::FrameSink for CoreHandoff<'_> {
             }
             LORA_RX_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             #[cfg(feature = "display")]
-            crate::baseboard::LORA_RX_FLASH.signal(());
+            leviculum_firmware::board_state::LORA_RX_FLASH.signal(());
             let plen = data.len();
             let d = data.as_slice();
             let m = d.len().min(8);
@@ -1364,7 +1400,7 @@ impl leviculum_rx_arming::FrameSink for CoreHandoff<'_> {
                     p8[0], p8[1], p8[2], p8[3], p8[4], p8[5], p8[6], p8[7], plen
                 ),
             );
-            crate::iface_bytes::note_rx(crate::iface_bytes::LORA, plen);
+            leviculum_firmware::iface_bytes::note_rx(leviculum_firmware::iface_bytes::LORA, plen);
             self.incoming_tx.send(data).await;
         } else if len >= 2 && (frame[0] & leviculum_core::rnode::FLAG_SPLIT) != 0 {
             crate::log::log_fmt(
@@ -1639,16 +1675,17 @@ async fn rx_window(
 // Init
 //
 // Board-agnostic: GPIO pins arrive as AnyPin (degraded in the bin file),
-// the SPI clock comes from `BoardConfig`, and what the transceiver needs
-// beyond its bus and its three lines is the part's own `FrontEnd`
-// (`crate::radio`): a TCXO byte and an optional RX-enable line on the
-// SX1262, the whole board description on the LR11xx. SPI peripheral is
-// still typed because embassy-nrf does not expose an erased-instance
-// Spim. SPI2 is used on every board (SPI3 has a MISO read bug on the
-// T114) — same instance keeps the shared Spim<'static> type stable.
+// and what the transceiver needs beyond its bus and its three lines is the
+// part's own `FrontEnd` (`crate::radio`): a TCXO byte and an optional
+// RX-enable line on the SX1262, the whole board description on the LR11xx.
+// SPI2 stays typed (embassy-nrf has no erased-instance Spim) and serves
+// every board (SPI3 has a MISO read bug on the T114), which keeps the
+// shared Spim<'static> type stable. The SPI clock is 4 MHz on every board,
+// so it is set here, not passed in: Meshtastic's value, well inside both
+// parts' 16 MHz. A board that needs another brings the parameter back.
 //
-// 10 parameters: the radio's full pin/bus/board wiring arrives here once
-// at boot. A grouping struct would only move the same ten names one file
+// 9 parameters: the radio's full pin/bus/board wiring arrives here once
+// at boot. A grouping struct would only move the same nine names one file
 // up; every caller is a board bring-up that lists them all anyway.
 #[allow(clippy::too_many_arguments)]
 pub async fn init(
@@ -1662,11 +1699,10 @@ pub async fn init(
     // DIO1 on the SX1262, DIO9 on the LR11xx: the line the chip raises
     // for an interrupt.
     irq: Peri<'static, AnyPin>,
-    spi_freq: spim::Frequency,
     front_end: crate::radio::FrontEnd,
 ) -> Radio {
     let mut spi_config = spim::Config::default();
-    spi_config.frequency = spi_freq;
+    spi_config.frequency = spim::Frequency::M4;
 
     let spi = Spim::new(spi_periph, SpiIrqs, sck, miso, mosi, spi_config);
 
@@ -1695,16 +1731,16 @@ pub async fn init(
 ///
 /// The hardware RNG is the source because it is the only per-board, per-boot
 /// entropy reachable here. It is reachable on both sides of BLE bring-up:
-/// [`crate::rng::RawHwRng`] goes through the SoftDevice syscall once the SD
-/// is enabled and falls back to direct register access while it is off, and
-/// the board binaries call this from `main` before `Softdevice::enable`.
+/// [`leviculum_firmware::entropy::Entropy`] ends in `rng.rs`'s fill, the
+/// SoftDevice syscall once the SD is enabled and direct register access
+/// while it is off, and the binaries call this before `Softdevice::enable`.
 ///
 /// A board's own sequence stays reproducible from its seed, so a host test
 /// drives the same decisions the firmware makes (see
 /// `leviculum_channel_access`); only the seed differs between boards.
 pub fn channel_seed() -> u32 {
     use rand_core::RngCore as _;
-    crate::rng::RawHwRng::new().next_u32()
+    leviculum_firmware::entropy::Entropy.next_u32()
 }
 
 /// Program a runtime config override into the radio and refresh every piece
@@ -1757,7 +1793,8 @@ async fn apply_runtime_config(
 
 /// What the task does with a packet the outgoing queue has just handed it:
 /// either it becomes the packet being transmitted, or the host's mute
-/// swallows it here. Returns whether it became `pending_tx`.
+/// swallows it here, which settles it unkeyed. Returns whether it became
+/// `pending_tx`.
 ///
 /// The mute is the LEASE and not `RadioConfig::radio_silent`, which is only
 /// the host's request for one. The two differ exactly where it matters: a
@@ -1789,6 +1826,7 @@ fn admit_for_transmit(
     access: &mut leviculum_channel_access::ChannelAccess,
 ) -> bool {
     if lease.is_muted(now_ms) {
+        settle_packet(false);
         if let Some(run) = muted.dropped(frame.data.len()) {
             leviculum_log_line::facts::lora_tx_muted(
                 &mut FirmwareLog,
@@ -1913,6 +1951,7 @@ async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: u32)
     // runtime path cannot come to disagree about what a config means.
     let mut mute_lease = leviculum_mute_lease::MuteLease::new();
 
+    leviculum_firmware::boot_trace::lora_phase(leviculum_firmware::boot_trace::LoraPhase::Config);
     match crate::radio::configure_lora(
         &mut radio,
         config.frequency_hz,
@@ -1940,6 +1979,7 @@ async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: u32)
     }
 
     crate::log::log_fmt("[LORA] ", format_args!("task started"));
+    leviculum_firmware::boot_trace::lora_phase(leviculum_firmware::boot_trace::LoraPhase::Ready);
 
     let mut rx_buf = [0u8; 255];
     let mut rx_timeout_count: u32 = 0;
@@ -2181,6 +2221,7 @@ async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: u32)
                     // backlog of fossils is swept in consecutive turns rather
                     // than one age per frame.
                     pending_tx = None;
+                    settle_packet(false);
                     continue;
                 }
                 HoldVerdict::Hold { .. } => {
@@ -2421,9 +2462,11 @@ async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: u32)
                             access.drawn_band()
                         ),
                     );
-                    transmit_all_frames(&mut radio, data, &mut rng_state, &config, &mut spacer)
-                        .await;
+                    let keyed =
+                        transmit_all_frames(&mut radio, data, &mut rng_state, &config, &mut spacer)
+                            .await;
                     pending_tx = None;
+                    settle_packet(keyed);
                     // Counted on every key-up, the one that skips the ack
                     // window below included, so the burst bounds stay
                     // accurate.

@@ -53,7 +53,8 @@
 //! assert_eq!(fragments.len(), 1); // fits in a single START fragment
 //!
 //! // Defragment received data
-//! let mut defrag = BleDefragmenter::new();
+//! let limits = BleReassemblyLimits::new(564, 38);
+//! let mut defrag = BleDefragmenter::new(limits);
 //! for frag in &fragments {
 //!     if let DefragResult::Complete(data) = defrag.process(frag, 1000) {
 //!         assert_eq!(&data, packet);
@@ -63,7 +64,7 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeMap;
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 // Constants
@@ -137,7 +138,7 @@ const HANDSHAKE_PAYLOAD: usize = HANDSHAKE_FRAME_LEN - FRAGMENT_HEADER_SIZE;
 /// Below ATT 21 (`ppf <= 12`) a full fragment is itself 16 bytes or
 /// shorter and no single move helps; those MTUs are under the BLE floor
 /// of 23 and keep the plain split.
-fn fragment_layout(data_len: usize, ppf: usize) -> (usize, Option<usize>) {
+const fn fragment_layout(data_len: usize, ppf: usize) -> (usize, Option<usize>) {
     if ppf == 0 || data_len == 0 {
         return (1, None);
     }
@@ -157,7 +158,7 @@ fn fragment_layout(data_len: usize, ppf: usize) -> (usize, Option<usize>) {
 /// Number of fragments needed to send `data_len` bytes at the given BLE MTU.
 ///
 /// Always returns at least 1 (a zero-length packet produces one fragment).
-pub fn fragment_count(data_len: usize, mtu: usize) -> usize {
+pub const fn fragment_count(data_len: usize, mtu: usize) -> usize {
     fragment_layout(data_len, payload_per_fragment(mtu)).0
 }
 
@@ -186,6 +187,32 @@ pub fn build_fragment_header(index: usize, total: usize) -> [u8; FRAGMENT_HEADER
         (tot >> 8) as u8,
         tot as u8,
     ]
+}
+
+/// Length of the payload in fragment `index`, including the handshake-size
+/// boundary adjustment. This also lets fixed-heap adapters fund the exact
+/// allocations made by [`fragment_packet`].
+pub const fn fragment_payload_len(data_len: usize, index: usize, mtu: usize) -> usize {
+    let ppf = payload_per_fragment(mtu);
+    let (count, last_cut) = fragment_layout(data_len, ppf);
+    if ppf == 0 || index >= count {
+        return 0;
+    }
+    let start = index * ppf;
+    let end = if start + ppf < data_len {
+        start + ppf
+    } else {
+        data_len
+    };
+    if let Some(cut) = last_cut {
+        if index == count - 2 {
+            return cut - start;
+        }
+        if index == count - 1 {
+            return data_len - cut;
+        }
+    }
+    end - start
 }
 
 /// Get the payload slice for fragment `index` from `data`.
@@ -249,8 +276,54 @@ pub enum DefragResult {
     NeedMore,
     /// All fragments received; contains the reassembled packet.
     Complete(Vec<u8>),
-    /// Invalid fragment (bad type, too short, sequence out of range).
+    /// Invalid fragment, exceeded reassembly limit, or unavailable heap.
     Error,
+}
+
+/// Explicit receive limits for one Columba link.
+///
+/// The wire's `u16` count is not an allocation budget. A carrier must choose
+/// both limits from its supported packet size and narrowest legal fragment
+/// payload, independently of the peer's currently negotiated ATT MTU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BleReassemblyLimits {
+    packet_bytes: usize,
+    fragments: u16,
+}
+
+impl BleReassemblyLimits {
+    /// Bound the assembled packet and the number of retained fragment slots.
+    pub const fn new(packet_bytes: usize, fragments: u16) -> Self {
+        assert!(packet_bytes <= isize::MAX as usize);
+        assert!(fragments > 0);
+        let spine = fragments as usize * core::mem::size_of::<Option<Box<[u8]>>>();
+        assert!(packet_bytes <= (usize::MAX - spine) / 2);
+        Self {
+            packet_bytes,
+            fragments,
+        }
+    }
+
+    /// Largest packet this receiver accepts, before any payload copy.
+    pub const fn packet_bytes(self) -> usize {
+        self.packet_bytes
+    }
+
+    /// Largest advertised fragment count this receiver accepts.
+    pub const fn fragments(self) -> u16 {
+        self.fragments
+    }
+
+    /// Exact maximum requested size of the sequence-indexed slot allocation.
+    pub const fn spine_bytes(self) -> usize {
+        self.fragments as usize * core::mem::size_of::<Option<Box<[u8]>>>()
+    }
+
+    /// Maximum requested heap bytes, including assembly or duplicate-copy
+    /// overlap. Allocator rounding and minimum block size are carrier-owned.
+    pub const fn peak_bytes(self) -> usize {
+        self.spine_bytes() + 2 * self.packet_bytes
+    }
 }
 
 /// Per-peer BLE fragment reassembler.
@@ -266,7 +339,10 @@ pub enum DefragResult {
 /// reset when a new START/LONE fragment arrives while a previous reassembly
 /// is in progress.
 pub struct BleDefragmenter {
-    fragments: BTreeMap<u16, Vec<u8>>,
+    limits: BleReassemblyLimits,
+    fragments: Vec<Option<Box<[u8]>>>,
+    pending: usize,
+    payload_bytes: usize,
     expected_total: u16,
     last_fragment_ms: u64,
     abandoned: u32,
@@ -274,10 +350,14 @@ pub struct BleDefragmenter {
 }
 
 impl BleDefragmenter {
-    /// Create a new defragmenter with no pending reassembly.
-    pub fn new() -> Self {
+    /// Create an idle receiver with explicit, finite packet and count limits.
+    /// Construction allocates nothing.
+    pub const fn new(limits: BleReassemblyLimits) -> Self {
         Self {
-            fragments: BTreeMap::new(),
+            limits,
+            fragments: Vec::new(),
+            pending: 0,
+            payload_bytes: 0,
             expected_total: 0,
             last_fragment_ms: 0,
             abandoned: 0,
@@ -288,7 +368,8 @@ impl BleDefragmenter {
     /// Process a received BLE fragment.
     ///
     /// `fragment` must be at least [`FRAGMENT_HEADER_SIZE`] bytes (5).
-    /// `now_ms` is the current monotonic time in milliseconds.
+    /// `now_ms` is the current monotonic time in milliseconds. Invalid counts,
+    /// individual payloads and aggregate lengths are refused before copying.
     pub fn process(&mut self, fragment: &[u8], now_ms: u64) -> DefragResult {
         if fragment.len() < FRAGMENT_HEADER_SIZE {
             return DefragResult::Error;
@@ -298,68 +379,79 @@ impl BleDefragmenter {
         let seq = u16::from_be_bytes([fragment[1], fragment[2]]);
         let total = u16::from_be_bytes([fragment[3], fragment[4]]);
         let payload = &fragment[FRAGMENT_HEADER_SIZE..];
-
-        // Validate fragment type
-        if ftype > FRAGMENT_TYPE_END {
+        if ftype > FRAGMENT_TYPE_END
+            || total == 0
+            || total > self.limits.fragments
+            || seq >= total
+            || payload.len() > self.limits.packet_bytes
+        {
             return DefragResult::Error;
         }
 
-        // Validate total > 0
-        if total == 0 {
-            return DefragResult::Error;
-        }
-
-        // Validate sequence < total
-        if seq >= total {
-            return DefragResult::Error;
-        }
-
-        // LONE fragment, complete packet in one piece
-        if ftype == FRAGMENT_TYPE_LONE {
+        // A new START still supersedes a partial packet: v2.2 has no packet ID.
+        // LONE remains accepted for older senders, without a slot allocation.
+        if ftype == FRAGMENT_TYPE_LONE || (ftype == FRAGMENT_TYPE_START && seq == 0) {
             self.discard_partial();
-            self.expected_total = 0;
-            self.completed_fragments = 1;
-            return DefragResult::Complete(payload.to_vec());
-        }
-
-        // New multi-fragment sequence starting, reset any previous partial
-        if ftype == FRAGMENT_TYPE_START && seq == 0 {
-            self.discard_partial();
+            if ftype == FRAGMENT_TYPE_LONE || total == 1 {
+                let Some(packet) = copy_payload(payload) else {
+                    return DefragResult::Error;
+                };
+                self.completed_fragments = 1;
+                return DefragResult::Complete(packet);
+            }
+            if self.fragments.try_reserve_exact(total as usize).is_err() {
+                return DefragResult::Error;
+            }
+            self.fragments.resize_with(total as usize, || None);
             self.expected_total = total;
         }
 
-        // Check consistency with current reassembly
         if total != self.expected_total {
-            // Fragment from a different packet or corrupted, discard
             self.discard_partial();
-            self.expected_total = 0;
             return DefragResult::Error;
         }
 
-        // Store fragment payload
-        self.fragments.insert(seq, payload.to_vec());
+        let slot = seq as usize;
+        let old_bytes = self.fragments[slot].as_ref().map_or(0, |p| p.len());
+        let retained = self.payload_bytes - old_bytes;
+        if payload.len() > self.limits.packet_bytes - retained {
+            return DefragResult::Error;
+        }
+        // Allocate the replacement only after subtracting its predecessor.
+        // Until the swap, both exist: peak_bytes funds that same two-copy peak
+        // as final assembly. Failed allocation leaves the old fragment intact.
+        let Some(copy) = copy_payload(payload) else {
+            return DefragResult::Error;
+        };
+        if self.fragments[slot]
+            .replace(copy.into_boxed_slice())
+            .is_none()
+        {
+            self.pending += 1;
+        }
+        self.payload_bytes = retained + payload.len();
         self.last_fragment_ms = now_ms;
 
-        // Check if all fragments received
-        if self.fragments.len() == self.expected_total as usize {
-            // Reassemble in sequence order
-            let mut packet = Vec::new();
-            for i in 0..self.expected_total {
-                match self.fragments.get(&i) {
-                    Some(p) => packet.extend_from_slice(p),
-                    None => {
-                        // Should not happen, len check passed but gap found
-                        self.reset();
-                        return DefragResult::Error;
-                    }
-                }
-            }
-            self.completed_fragments = self.expected_total;
-            self.reset();
-            DefragResult::Complete(packet)
-        } else {
-            DefragResult::NeedMore
+        if self.pending != self.expected_total as usize {
+            return DefragResult::NeedMore;
         }
+
+        // One exact-capacity allocation; no geometric growth or third payload
+        // copy. The bounded spine orders even an inverted or duplicate tail.
+        let mut packet = Vec::new();
+        if packet.try_reserve_exact(self.payload_bytes).is_err() {
+            return DefragResult::Error;
+        }
+        for fragment in &self.fragments {
+            let Some(fragment) = fragment else {
+                self.reset();
+                return DefragResult::Error;
+            };
+            packet.extend_from_slice(fragment);
+        }
+        self.completed_fragments = self.expected_total;
+        self.reset();
+        DefragResult::Complete(packet)
     }
 
     /// How many fragments made up the most recently completed packet: 1
@@ -377,10 +469,10 @@ impl BleDefragmenter {
     /// five relayed two-fragment packets vanished with no drop line on
     /// any surface). Completion is not a discard and does not count.
     fn discard_partial(&mut self) {
-        if !self.fragments.is_empty() {
+        if self.pending != 0 {
             self.abandoned = self.abandoned.saturating_add(1);
-            self.fragments.clear();
         }
+        self.reset();
     }
 
     /// How many in-progress reassemblies were discarded before they
@@ -396,16 +488,14 @@ impl BleDefragmenter {
     /// caller that hard-resets on error uses this to tell "discarded a
     /// partial packet" from "nothing was pending" (#373).
     pub fn pending_fragments(&self) -> usize {
-        self.fragments.len()
+        self.pending
     }
 
-    /// Estimated heap bytes the reassembly in progress pins: the
-    /// fragment payloads plus the map's node structure (#388 census).
-    /// 0 when idle — completion hands the assembled packet away and
-    /// clears the map.
+    /// Requested heap bytes pinned by the current reassembly: exact fragment
+    /// payload lengths and the bounded slot spine, excluding allocator padding.
+    /// Completion, reset and abandonment release every allocation.
     pub fn held_bytes(&self) -> usize {
-        crate::heap_census::btree_map_bytes(&self.fragments)
-            + self.fragments.values().map(|f| f.capacity()).sum::<usize>()
+        self.fragments.capacity() * core::mem::size_of::<Option<Box<[u8]>>>() + self.payload_bytes
     }
 
     /// Discard the reassembly in progress and count it when one was
@@ -415,8 +505,6 @@ impl BleDefragmenter {
     /// the one total for "reassemblies this receiver lost" (#373).
     pub fn abandon(&mut self) {
         self.discard_partial();
-        self.expected_total = 0;
-        self.last_fragment_ms = 0;
     }
 
     /// [`process`](Self::process) one inbound frame and, when it is
@@ -442,8 +530,7 @@ impl BleDefragmenter {
     /// Returns `true` if fragments are pending and the timeout has elapsed
     /// since the last fragment was received.
     pub fn is_timed_out(&self, now_ms: u64) -> bool {
-        !self.fragments.is_empty()
-            && now_ms.saturating_sub(self.last_fragment_ms) >= REASSEMBLY_TIMEOUT_MS
+        self.pending != 0 && now_ms.saturating_sub(self.last_fragment_ms) >= REASSEMBLY_TIMEOUT_MS
     }
 
     /// Discard any in-progress reassembly without counting it as an
@@ -452,16 +539,21 @@ impl BleDefragmenter {
     /// *defragmenter* decides count via
     /// [`abandoned_count`](BleDefragmenter::abandoned_count).
     pub fn reset(&mut self) {
-        self.fragments.clear();
+        self.fragments = Vec::new();
+        self.pending = 0;
+        self.payload_bytes = 0;
         self.expected_total = 0;
         self.last_fragment_ms = 0;
     }
 }
 
-impl Default for BleDefragmenter {
-    fn default() -> Self {
-        Self::new()
-    }
+/// Copy exactly once, retaining no geometric capacity. Try-reservation lets a
+/// bounded firmware allocator refuse a train without aborting the whole node.
+fn copy_payload(payload: &[u8]) -> Option<Vec<u8>> {
+    let mut copy = Vec::new();
+    copy.try_reserve_exact(payload.len()).ok()?;
+    copy.extend_from_slice(payload);
+    Some(copy)
 }
 
 // Tests
@@ -469,6 +561,8 @@ impl Default for BleDefragmenter {
 mod tests {
     use super::*;
     use alloc::vec;
+
+    const TEST_LIMITS: BleReassemblyLimits = BleReassemblyLimits::new(564, 38);
 
     /// A packet that fits in one fragment must go out as START with total=1.
     ///
@@ -494,7 +588,7 @@ mod tests {
         );
 
         // Round-trip through our own defragmenter still completes.
-        let mut defrag = BleDefragmenter::new();
+        let mut defrag = BleDefragmenter::new(TEST_LIMITS);
         match defrag.process(&frags[0], 1000) {
             DefragResult::Complete(result) => assert_eq!(result, data),
             other => panic!("Expected Complete, got {:?}", other),
@@ -511,7 +605,7 @@ mod tests {
         let mut lone = vec![FRAGMENT_TYPE_LONE, 0x00, 0x00, 0x00, 0x01];
         lone.extend_from_slice(data);
 
-        let mut defrag = BleDefragmenter::new();
+        let mut defrag = BleDefragmenter::new(TEST_LIMITS);
         match defrag.process(&lone, 1000) {
             DefragResult::Complete(result) => assert_eq!(result, data),
             other => panic!("Expected Complete, got {:?}", other),
@@ -536,7 +630,7 @@ mod tests {
         }
 
         // Reassemble in order
-        let mut defrag = BleDefragmenter::new();
+        let mut defrag = BleDefragmenter::new(TEST_LIMITS);
         assert_eq!(defrag.process(&frags[0], 1000), DefragResult::NeedMore);
         assert_eq!(defrag.process(&frags[1], 1000), DefragResult::NeedMore);
         match defrag.process(&frags[2], 1000) {
@@ -550,7 +644,7 @@ mod tests {
     /// completed, and the previous value survives NeedMore frames.
     #[test]
     fn last_completed_fragments_reports_how_the_peer_fragmented() {
-        let mut defrag = BleDefragmenter::new();
+        let mut defrag = BleDefragmenter::new(TEST_LIMITS);
         assert_eq!(defrag.last_completed_fragments(), 0, "nothing completed");
 
         let data: Vec<u8> = (0..500).map(|i| (i % 256) as u8).collect();
@@ -583,7 +677,7 @@ mod tests {
         assert_eq!(frags.len(), 3);
 
         // Deliver out of order: START, END, CONTINUE
-        let mut defrag = BleDefragmenter::new();
+        let mut defrag = BleDefragmenter::new(TEST_LIMITS);
         assert_eq!(defrag.process(&frags[0], 1000), DefragResult::NeedMore);
         assert_eq!(defrag.process(&frags[2], 1000), DefragResult::NeedMore);
         match defrag.process(&frags[1], 1000) {
@@ -621,7 +715,7 @@ mod tests {
         assert_eq!(frags[2].len() - FRAGMENT_HEADER_SIZE, 500 - 2 * ppf); // remainder
 
         // Reassemble and verify
-        let mut defrag = BleDefragmenter::new();
+        let mut defrag = BleDefragmenter::new(TEST_LIMITS);
         let mut result = DefragResult::NeedMore;
         for frag in &frags {
             result = defrag.process(frag, 1000);
@@ -637,7 +731,7 @@ mod tests {
         let data: Vec<u8> = (0..500).map(|i| (i % 256) as u8).collect();
         let frags = fragment_packet(&data, DEFAULT_MTU);
 
-        let mut defrag = BleDefragmenter::new();
+        let mut defrag = BleDefragmenter::new(TEST_LIMITS);
         assert_eq!(defrag.process(&frags[0], 1000), DefragResult::NeedMore);
         assert!(!defrag.is_timed_out(1000));
         assert!(!defrag.is_timed_out(30_999));
@@ -655,7 +749,7 @@ mod tests {
         assert_eq!(frags.len(), 1);
         assert_eq!(frags[0].len(), FRAGMENT_HEADER_SIZE); // header only
 
-        let mut defrag = BleDefragmenter::new();
+        let mut defrag = BleDefragmenter::new(TEST_LIMITS);
         match defrag.process(&frags[0], 1000) {
             DefragResult::Complete(result) => assert!(result.is_empty()),
             other => panic!("Expected Complete, got {:?}", other),
@@ -677,7 +771,7 @@ mod tests {
 
     #[test]
     fn test_too_short_fragment() {
-        let mut defrag = BleDefragmenter::new();
+        let mut defrag = BleDefragmenter::new(TEST_LIMITS);
         // Less than 5 bytes → Error
         assert_eq!(defrag.process(&[0x00, 0x01], 1000), DefragResult::Error);
         assert_eq!(defrag.process(&[], 1000), DefragResult::Error);
@@ -685,14 +779,14 @@ mod tests {
 
     #[test]
     fn test_invalid_fragment_type() {
-        let mut defrag = BleDefragmenter::new();
+        let mut defrag = BleDefragmenter::new(TEST_LIMITS);
         let invalid = [0x04, 0x00, 0x00, 0x00, 0x01]; // type 4 doesn't exist
         assert_eq!(defrag.process(&invalid, 1000), DefragResult::Error);
     }
 
     #[test]
     fn test_sequence_exceeds_total() {
-        let mut defrag = BleDefragmenter::new();
+        let mut defrag = BleDefragmenter::new(TEST_LIMITS);
         // seq=1, total=1 → seq >= total → Error
         let bad = [FRAGMENT_TYPE_CONTINUE, 0x00, 0x01, 0x00, 0x01];
         assert_eq!(defrag.process(&bad, 1000), DefragResult::Error);
@@ -700,7 +794,7 @@ mod tests {
 
     #[test]
     fn test_zero_total() {
-        let mut defrag = BleDefragmenter::new();
+        let mut defrag = BleDefragmenter::new(TEST_LIMITS);
         let bad = [FRAGMENT_TYPE_LONE, 0x00, 0x00, 0x00, 0x00];
         assert_eq!(defrag.process(&bad, 1000), DefragResult::Error);
     }
@@ -714,7 +808,7 @@ mod tests {
         assert_eq!(ppf, 15);
         assert_eq!(frags.len(), 4); // ceil(50/15) = 4
 
-        let mut defrag = BleDefragmenter::new();
+        let mut defrag = BleDefragmenter::new(TEST_LIMITS);
         let mut result = DefragResult::NeedMore;
         for frag in &frags {
             result = defrag.process(frag, 1000);
@@ -737,7 +831,7 @@ mod tests {
             [0x01, 0x00, 0x00, 0x00, 0x01]
         );
 
-        let mut defrag = BleDefragmenter::new();
+        let mut defrag = BleDefragmenter::new(TEST_LIMITS);
         match defrag.process(&frags[0], 1000) {
             DefragResult::Complete(r) => assert_eq!(r, data),
             other => panic!("Expected Complete, got {:?}", other),
@@ -751,7 +845,7 @@ mod tests {
         let frags1 = fragment_packet(&data1, DEFAULT_MTU);
         let frags2 = fragment_packet(&data2, DEFAULT_MTU);
 
-        let mut defrag = BleDefragmenter::new();
+        let mut defrag = BleDefragmenter::new(TEST_LIMITS);
         // Start reassembling packet 1, then abandon it with packet 2's START
         assert_eq!(defrag.process(&frags1[0], 1000), DefragResult::NeedMore);
         assert_eq!(defrag.process(&frags2[0], 2000), DefragResult::NeedMore);
@@ -777,7 +871,7 @@ mod tests {
         assert_eq!(frags_a.len(), 2);
         assert_eq!(frags_b.len(), 2);
 
-        let mut defrag = BleDefragmenter::new();
+        let mut defrag = BleDefragmenter::new(TEST_LIMITS);
         assert_eq!(defrag.process(&frags_a[0], 1000), DefragResult::NeedMore);
         assert_eq!(defrag.abandoned_count(), 0, "A is still in progress");
         assert_eq!(defrag.process(&frags_b[0], 1001), DefragResult::NeedMore);
@@ -794,7 +888,7 @@ mod tests {
     #[test]
     fn test_completion_and_idle_start_do_not_count_as_abandonment() {
         let data: Vec<u8> = (0..500).map(|i| (i % 256) as u8).collect();
-        let mut defrag = BleDefragmenter::new();
+        let mut defrag = BleDefragmenter::new(TEST_LIMITS);
         for _ in 0..3 {
             for frag in fragment_packet(&data, DEFAULT_MTU) {
                 defrag.process(&frag, 1000);
@@ -812,7 +906,7 @@ mod tests {
         let mut lone = vec![FRAGMENT_TYPE_LONE, 0x00, 0x00, 0x00, 0x01];
         lone.extend_from_slice(b"hello");
 
-        let mut defrag = BleDefragmenter::new();
+        let mut defrag = BleDefragmenter::new(TEST_LIMITS);
         assert_eq!(defrag.process(&frags_a[0], 1000), DefragResult::NeedMore);
         match defrag.process(&lone, 1001) {
             DefragResult::Complete(r) => assert_eq!(r, b"hello"),
@@ -832,7 +926,7 @@ mod tests {
         // A CONTINUE claiming total=2 amid a total=3 reassembly.
         let alien = [FRAGMENT_TYPE_CONTINUE, 0x00, 0x01, 0x00, 0x02];
 
-        let mut defrag = BleDefragmenter::new();
+        let mut defrag = BleDefragmenter::new(TEST_LIMITS);
         assert_eq!(defrag.process(&frags_a[0], 1000), DefragResult::NeedMore);
         assert_eq!(defrag.process(&alien, 1001), DefragResult::Error);
         assert_eq!(defrag.abandoned_count(), 1);
@@ -862,12 +956,12 @@ mod tests {
         let frags_b = fragment_packet(&b, DEFAULT_MTU);
         let garbage = [0x07, 0x00, 0x01, 0x00, 0x02];
 
-        let mut kept = BleDefragmenter::new();
+        let mut kept = BleDefragmenter::new(TEST_LIMITS);
         assert_eq!(kept.process(&frags_a[0], 1000), DefragResult::NeedMore);
         assert_eq!(kept.process(&garbage, 1001), DefragResult::Error);
         assert_eq!(kept.pending_fragments(), 1, "process alone keeps A's head");
 
-        let mut reset = BleDefragmenter::new();
+        let mut reset = BleDefragmenter::new(TEST_LIMITS);
         assert_eq!(
             reset.process_or_abandon(&frags_a[0], 1000),
             DefragResult::NeedMore
@@ -890,7 +984,7 @@ mod tests {
     /// frames pass through `process_or_abandon` as through `process`.
     #[test]
     fn test_process_or_abandon_passes_good_frames_and_counts_no_idle_garbage() {
-        let mut defrag = BleDefragmenter::new();
+        let mut defrag = BleDefragmenter::new(TEST_LIMITS);
         assert_eq!(
             defrag.process_or_abandon(&[0x07, 0x00, 0x00, 0x00, 0x01], 1000),
             DefragResult::Error
@@ -922,7 +1016,7 @@ mod tests {
         let frags_a = fragment_packet(&a, DEFAULT_MTU);
         let frags_b = fragment_packet(&b, DEFAULT_MTU);
 
-        let mut defrag = BleDefragmenter::new();
+        let mut defrag = BleDefragmenter::new(TEST_LIMITS);
         assert_eq!(defrag.process(&frags_a[0], 1000), DefragResult::NeedMore);
         // B's START never arrives (sender tore mid-A and mid-B); B's END
         // carries seq=1 total=2, exactly what A's reassembly expects.
@@ -1002,6 +1096,10 @@ mod tests {
                     assert_eq!(
                         &frame[FRAGMENT_HEADER_SIZE..],
                         fragment_payload(&data, i, mtu)
+                    );
+                    assert_eq!(
+                        frame.len() - FRAGMENT_HEADER_SIZE,
+                        fragment_payload_len(len, i, mtu)
                     );
                 }
                 assert_eq!(

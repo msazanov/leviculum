@@ -1,0 +1,292 @@
+[package]
+name = "loquax"
+# Versioned independently of the leviculum stack, like lnomad: a messenger's
+# releases track its own UI and message handling, not the protocol core it
+# happens to be built from.
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Terminal LXMF messenger for Reticulum: a send command and a terminal UI"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+# The package ships the binary built with `--features tui` (scripts/build-deb.sh),
+# so plain `loquax` opens the messenger; the CLI alone is what a script needs, the package is
+# what a person installs. No service: loquax is a client of a running shared
+# instance, like lnomad.
+[package.metadata.deb]
+name = "loquax"
+maintainer = "Lew Palm <lp@lew-palm.de>"
+copyright = "2026, Lew Palm"
+license-file = ["../LICENSE", "0"]
+extended-description = """\
+Terminal LXMF messenger for the Reticulum network. Plain `loquax` is the
+interactive messenger with conversations and a compose line, `loquax send`
+delivers one message from a script. It attaches to a local shared RNS
+instance: leviculum's lnsd or the Python rnsd.
+
+The package also carries Loquax Mailbox, the always-on part that keeps
+your mail while your devices are off, as the system service
+loquax-mailbox.service under a dedicated 'loquax' user. It is installed
+switched off; `sudo loquax mailbox enable` switches it on.
+"""
+section = "net"
+priority = "optional"
+# musl-static, and any RNS instance satisfies the runtime need, so leviculum
+# is a Recommends. adduser because postinst creates the mailbox's service
+# user (1153), as lnpnd's does.
+depends = "adduser"
+recommends = "leviculum"
+# The package was called lnmsg until #232; these two let an install of
+# loquax take the old package's place instead of failing on it.
+replaces = "lnmsg"
+conflicts = "lnmsg"
+assets = [
+    # Exactly "target/release/...", so cargo-deb substitutes the --target
+    # triple; see leviculum-cli/Cargo.toml.
+    ["target/release/loquax", "usr/bin/", "755"],
+    # Rendered from docs/src/man/ by scripts/md2man.py in scripts/build-deb.sh.
+    ["../target/man/loquax.1", "usr/share/man/man1/loquax.1", "644"],
+    ["README.md", "usr/share/doc/loquax/README.md", "644"],
+    ["../packaging/lintian/loquax", "usr/share/lintian/overrides/loquax", "644"],
+    # Codeberg #288; see leviculum-cli/Cargo.toml.
+    ["../THIRD-PARTY-NOTICES", "usr/share/doc/loquax/THIRD-PARTY-NOTICES", "644"],
+]
+changelog = "../target/deb-changelog/loquax"
+maintainer-scripts = "../packaging/loquax/"
+
+# Loquax Mailbox as a system service (1153). Installed disabled and not
+# started: the mailbox answers for a person's identity, and only they decide
+# that this machine is the one. `loquax mailbox enable` runs systemctl
+# enable --now. An upgrade try-restarts it, so a running mailbox comes back
+# and a stopped one stays stopped (lnpnd/Cargo.toml has the measurement of
+# that pair against cargo-deb 3.7.0). Asserted on the built .deb in
+# scripts/verify-deb-packaging.sh.
+[package.metadata.deb.systemd-units]
+unit-name = "loquax-mailbox"
+unit-scripts = "../packaging/loquax/"
+enable = false
+start = false
+restart-after-upgrade = true
+
+[features]
+# The shell: the CLI, the daemon socket, the clock, files and the process.
+# Without it the crate is the messenger core, `no_std` plus `alloc`, and
+# `just loquax-core-no-std` checks it for the firmware target
+# (docs/src/concepts/loquax-architecture.md, "the core must not know it has a
+# terminal"). Green since 993, and in `just guards`.
+default = ["std"]
+std = [
+    "dep:leviculum-std",
+    "dep:clap",
+    "dep:tokio",
+    "leviculum-lxmf/compression",
+    "rand_core/std",
+    "rand_core/getrandom",
+    "serde_json/std",
+]
+# Plain `loquax` (and `loquax tui`): the terminal frontend over the core's `ui` model, on the
+# shared widgets (leviculum-ui-ratatui). Off by default: the CLI is what a
+# script installs, and it carries no terminal crate.
+# The message store (`loquax::store`): SQLite with its FTS5 index, the
+# history of docs/src/concepts/loquax-storage.md. The terminal messenger
+# reads and writes it; the CLI does not yet.
+history = ["std", "dep:rusqlite"]
+# The map's picture (`loquax::picture`): the region files and one view of
+# them drawn into a frame, for the terminal and the GUI alike.
+picture = [
+    "std",
+    "leviculum-map/std",
+    "dep:leviculum-mapfill",
+    "dep:embedded-graphics",
+]
+# The map's autoload (`loquax::mapload`, 1089): regions cut from a PMTiles
+# archive read by HTTP range requests, through the cut the map tool runs.
+# Both frontends carry it; the CLI and the core do not.
+mapload = ["picture", "dep:leviculum-mapcut"]
+# The map on a pixel screen (`loquax::screenmap`, 1128): the picture with
+# the map's names set in Fira Sans by cosmic-text and swash
+# (`loquax::mapnames`, 1100) and the pins drawn in. The window and the
+# Android app draw through it; the terminal and the CLI do not carry it.
+screenmap = ["picture", "dep:cosmic-text"]
+tui = [
+    "std",
+    "history",
+    "picture",
+    "mapload",
+    "leviculum-ui/std",
+    "dep:leviculum-ui-ratatui",
+    # The map's sixel and kitty pictures go through ratatui-image, the
+    # crate lnomad's inline pictures use (loquax-map.md, section 6).
+    "leviculum-ui-ratatui/images",
+    "dep:ratatui",
+    "dep:crossterm",
+    "dep:futures",
+    "dep:tui-input",
+    "dep:open",
+    "dep:qrcodegen",
+]
+# `loquax gui`: the window (docs/src/concepts/gui-toolkit.md, option B,
+# iced on the desktop), over the same shell and model as the terminal. Off
+# by default and off in `tui`, so iced is in no graph that does not ask for
+# it: not the CLI's, not the terminal's, not the core's. Its first view is
+# the map (loquax-map.md, slice (d)). Built for the gnu target: winit opens
+# X11 and Wayland with dlopen, which a musl-static binary cannot do.
+gui = [
+    "std",
+    "history",
+    "picture",
+    "mapload",
+    "screenmap",
+    "leviculum-ui/std",
+    "dep:tui-input",
+    "dep:futures",
+    "dep:iced",
+]
+
+[dependencies]
+# The LXMF router, node and message codec. Everything protocol-shaped lives
+# there; this crate is wiring, a CLI and a bounded run loop.
+leviculum-lxmf = { path = "../leviculum-lxmf", default-features = false, features = ["pow"] }
+# The driver seam. `CoreProcessor` is the only feed that does not drop the
+# event types LXMF needs (docs/src/concepts/loquax-architecture.md §3), so the
+# router runs inside the driver's tick and this dependency is not optional.
+leviculum-std = { path = "../leviculum-std", optional = true }
+# Identity minting and the on-disk identity record shared with lnomad.
+leviculum-core = { path = "../leviculum-core" }
+clap = { version = "4", features = ["derive"], optional = true }
+tokio = { workspace = true, optional = true }
+# The screen's model (`ui`): the delivery glyphs, the palette's names, the
+# key events, the styled lines. `no_std` without its `std` feature, so the
+# model stays core.
+leviculum-ui = { path = "../leviculum-ui", default-features = false }
+# The map's model (`ui::map`): the projection, the viewport, fitting and
+# placing the pins. `no_std` with `alloc` without its `std` feature, held
+# there by `just map-core-no-std`, so the model stays core.
+leviculum-map = { path = "../leviculum-map" }
+# The terminal's map picture (`tui`): the frame the map core draws into and
+# its colours, the crates leviculum-map draws through.
+leviculum-mapfill = { path = "../leviculum-mapfill", optional = true }
+embedded-graphics = { version = "0.8", optional = true }
+# The names on a pixel screen (`screenmap`): the shaper and rasteriser iced
+# sets its text with, at iced's version, so the window's graph holds one
+# copy. Without its default `fontconfig`: the one face is embedded, no
+# host font is looked for.
+cosmic-text = { version = "0.15", default-features = false, features = ["std", "swash"], optional = true }
+# The autoload (`mapload`): the PMTiles reader, the MVT decoder and the cut,
+# shared with leviculum-map-tool, and its HTTP range reader (ureq on rustls).
+leviculum-mapcut = { path = "../leviculum-mapcut", features = ["http"], optional = true }
+# The terminal frontend (`tui`), lnomad's crates at lnomad's versions.
+leviculum-ui-ratatui = { path = "../leviculum-ui-ratatui", optional = true }
+ratatui = { version = "0.30.2", optional = true }
+crossterm = { version = "0.29.0", features = ["event-stream"], optional = true }
+futures = { version = "0.3", optional = true }
+# Default features off: the default `ratatui-crossterm` feature pulls both
+# terminal crates in for a backend `leviculum_ui::input` restates.
+tui-input = { version = "0.15", default-features = false, optional = true }
+# The window (`gui`): iced 0.14, the version the toolkit spike measured,
+# with its software renderer alone (tiny-skia; no wgpu, no GPU driver), the
+# canvas the map is drawn on, raster images without decoders (the map's
+# frame is raw RGBA), and `advanced` for measuring a label's text the way
+# the window sets it.
+iced = { version = "0.14", default-features = false, features = [
+    "tiny-skia",
+    "x11",
+    "wayland",
+    "thread-pool",
+    "canvas",
+    "image-without-codecs",
+    "advanced",
+    # Fira Sans embedded: the map's names are set in it on every host, so a
+    # picture and its golden agree (1100). It is the window's default font
+    # with the feature, the same on every host for the same reason.
+    "fira-sans",
+], optional = true }
+# A web or mail link in a message body, clicked, goes to the system's
+# handler as lnomad hands it one (`xdg-open` on Linux).
+open = { version = "5", optional = true }
+# `loquax home admit` prints its code as a QR code too, for a phone to
+# take in one go: Nayuki's encoder, MIT, one file, no dependencies.
+qrcodegen = { version = "1.8.0", optional = true }
+# The history (`history`): bundled, so the musl-static binary carries its
+# SQLite and FTS5 (the build probe of loquax-storage.md, "Options", C), at
+# the version leviculum-cli already ships.
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"], optional = true }
+# The structured event log (docs/src/structured-event-logs.md) is a tracing
+# layer, so the emit sites are `tracing::debug!` calls with an `event` field.
+tracing.workspace = true
+rand_core.workspace = true
+# The daemon's path table arrives as the JSON `leviculum_std::rpc_query`
+# decodes it into; the mailbox rule reads it to tell a node on this device
+# from one elsewhere.
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+tempfile = "3"
+# `test-util` for the paused runtime clock: the send loop's timeouts are
+# measured on tokio's clock precisely so they can be tested without waiting.
+tokio = { version = "1", features = ["full", "test-util"] }
+hex = "0.4"
+# A propagation node for `tests/tui_snapshot.rs`, the mailbox schedule's
+# session: lnpnd's own engine on the test's daemon, so a sync drains a real
+# node's store.
+lnpnd = { path = "../lnpnd" }
+# The loopback map source of the autoload tests (1089).
+leviculum-mapcut = { path = "../leviculum-mapcut" }
+# The window's golden picture of the map's names is a PNG (1100); in the
+# lock already, through leviculum-map's goldens.
+png = "0.18"
+# The emoji table's test counts graphemes (1137); in the lock already,
+# through ratatui.
+unicode-segmentation = "1"
+
+[lib]
+name = "loquax"
+path = "src/lib.rs"
+
+[[bin]]
+name = "loquax"
+path = "src/main.rs"
+required-features = ["std"]
+
+[[test]]
+name = "tui_snapshot"
+required-features = ["tui"]
+
+# The import and the export: the history feature's store.
+[[test]]
+name = "import"
+required-features = ["history"]
+
+# The home node end to end: `--daemon` and `home` are the terminal build's.
+[[test]]
+name = "home_node"
+required-features = ["tui"]
+
+# A throwaway: the samples and cost table of
+# docs/drafts/terminal-map-rendering-2026-10.md (1090). Never in a package.
+[[example]]
+name = "term_map_samples"
+required-features = ["picture"]
+
+# The host draw time per map profile (1099), for the reviewer and the
+# commit messages; the gates count instead. Never in a package.
+[[example]]
+name = "map_bench"
+required-features = ["picture"]
+
+# The cost of the outline under a frame no cached tile covers (1143), for
+# the reviewer and the commit message. Never in a package.
+[[example]]
+name = "outline_cost"
+required-features = ["picture"]
+
+# The window's frame time before and after it took the phone's frames
+# (1144), for the reviewer and the commit message. Never in a package.
+[[example]]
+name = "window_fps"
+required-features = ["screenmap"]

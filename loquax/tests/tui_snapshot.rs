@@ -1,0 +1,2977 @@
+//! The messenger (`loquax`, and its `loquax tui` alias) through the real
+//! binary, scripted, against a real daemon: open the conversation, type two lines (`Alt-Enter` between them), send,
+//! watch the delivery mark move from `○` to `✓`, read the two-line reply. The frames the script asks for are pinned in
+//! `tests/fixtures/tui_session.frames`.
+//!
+//! The keymap's sessions (`docs/src/concepts/loquax-keys-and-layout.md`,
+//! section 7, slice 1) need no correspondent: one driven only by vi
+//! spellings and one only by Emacs spellings reach the same frames, the
+//! enhanced and the plain keyboard reach the same two-line body, `Ctrl-c`
+//! outside compose says what quits and the session goes on, and
+//! `send_on_enter` off swaps `Enter` and `Alt-Enter`. Pinned in
+//! `tests/fixtures/tui_keys.frames`.
+//!
+//! The chat layout's session (section 7, slice 2) runs one exchange at 80 x
+//! 24 and at 120 x 40, the two mockups' sizes: a message from the peer on
+//! one day, ours on it and on the next, the peer's two replies arriving while
+//! the reader is scrolled up (the `new` rule above them, the view not moved),
+//! back to the newest, a reply, and the detail view of our first message with
+//! its proof. Pinned in `tests/fixtures/tui_chat.frames`. While the reader
+//! is scrolled up, with both sides, a date, the `new` rule, a selected block
+//! and the palette's `theme` toast on screen, the 80 x 24 session writes the
+//! screen's style map in each tier and theme (section 5, "Colour", part 5),
+//! pinned in `tests/fixtures/tui_chat.styles`; the frames stay the
+//! monochrome ones.
+//!
+//! The mouse's sessions (section 7, slice 3) click a conversation, the
+//! compose box, `send` on its border, a message, its mark and the footer's
+//! `? help`; turn the wheel over the conversation while the list has the
+//! focus; and drag across two messages, whose release copies them by OSC 52.
+//! Pinned in `tests/fixtures/tui_mouse.frames`.
+//!
+//! The search's session (section 7, slice 4) runs at 120 x 40 and at 80 x
+//! 24: four messages in two conversations, `/` and `tripod` (the messages
+//! group, three), the third result opened at its message with the match
+//! marked in place, `n` and `N` stepping the matches there, a query that
+//! is a conversation's name and a word of a message (both groups), and
+//! `Esc` bringing the list back with the conversation as it was. Pinned in
+//! `tests/fixtures/tui_search_session.frames`.
+//!
+//! The names' session (section 7, slice 5) lists three correspondents by
+//! address, then each attaches and announces: Bob's name replaces his
+//! address in the list, the header and the compose box with its short hash;
+//! a second peer announcing `B0b` marks both with `≈` and the header says
+//! whose name it shares; and the third, whom the contacts file names
+//! `Carol`, keeps that name over the `Caroline` it announces and is `known`.
+//! Then the palette renames her (`rename`, the petname in the palette to
+//! edit), blocks her (her conversation leaves the list) and lists the
+//! blocked (`blocked`), and the contacts file says both, its comment kept.
+//! Pinned in `tests/fixtures/tui_names.frames`.
+//!
+//! The history's session (section 7, slice 6) runs loquax three times over
+//! one home: an exchange with Bob and a send to Carol, who never answers,
+//! cut off by quitting; a restart with no `--to`, which lists both from the
+//! store, Bob by the name he announced in the first run, our proven message
+//! `✓` and the cut-off send `○` with the restart in its ledger, then pins
+//! Bob and deletes his reply (`d`, `y`); and a third start that shows the
+//! pin above its rule and the reply gone. Pinned in
+//! `tests/fixtures/tui_history.frames`.
+//!
+//! The telemetry session (`docs/src/concepts/loquax-map.md`, slice (a)) runs
+//! at 80 x 24 and at 120 x 40: the peer writes a line, then sends two
+//! position reports with no text, as Sideband and Columba do. The header
+//! carries the position, at 120 columns with its accuracy and age, at 80
+//! only `pos` and the age; the two reports fold into one `◎ position` line
+//! and no empty block is drawn; `v` opens the detail view (`Enter` on a
+//! report opens the map), which lists the sensors. Pinned in
+//! `tests/fixtures/tui_telemetry.frames`.
+//!
+//! The mailbox schedule's session (`docs/src/concepts/loquax-mailbox.md`,
+//! section 1, "When to sync") runs against a real propagation node, lnpnd's
+//! engine on the same daemon: one message waits there before the start and
+//! the start's sync collects it, a second is deposited while loquax runs and
+//! arrives without a key, inside the activity cadence and well before the
+//! bound. `--sync-interval 30s` scales the schedule down: a four-second
+//! cadence for twenty seconds after the first message. No frames are pinned;
+//! the counts and `tui.log`'s `SYNC` lines are what is under test.
+//!
+//! The daemon is the in-process one `mailbox_cli.rs` uses. The correspondent
+//! is a second loquax engine attached to it in this process
+//! (`loquax::engine::attach`), a full LXMF router, so the proof that turns the
+//! mark green is a real one. Both identities are fixed, which is what makes
+//! the addresses on the screen, and so the frames, the same on every run.
+//!
+//! The order matters once: the correspondent attaches after the TUI is ready,
+//! so its one announce reaches an engine that is already listening.
+
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+use leviculum_core::identity_store::encode_identity;
+use leviculum_std::Identity;
+use loquax::clock::Tokio;
+use loquax::effects::Terminal;
+use loquax::engine::{attach, delivery_address, AttachConfig};
+use loquax::fanout::Fanout;
+use loquax::outbox::{SendRequest, Via};
+use loquax::send::{run_send, SendOptions};
+
+mod support;
+
+use support::daemon;
+
+const LNMSG: &str = env!("CARGO_BIN_EXE_loquax");
+const EXPECTED: &str = include_str!("fixtures/tui_session.frames");
+const EXPECTED_LATE: &str = include_str!("fixtures/tui_late.frames");
+const EXPECTED_KEYS: &str = include_str!("fixtures/tui_keys.frames");
+const EXPECTED_CHAT: &str = include_str!("fixtures/tui_chat.frames");
+const EXPECTED_MOUSE: &str = include_str!("fixtures/tui_mouse.frames");
+const EXPECTED_STYLES: &str = include_str!("fixtures/tui_chat.styles");
+const EXPECTED_SEARCH: &str = include_str!("fixtures/tui_search_session.frames");
+const EXPECTED_NAMES: &str = include_str!("fixtures/tui_names.frames");
+const EXPECTED_HISTORY: &str = include_str!("fixtures/tui_history.frames");
+const EXPECTED_TELEMETRY: &str = include_str!("fixtures/tui_telemetry.frames");
+const EXPECTED_MAP: &str = include_str!("fixtures/tui_map.frames");
+const EXPECTED_MAPLOAD: &str = include_str!("fixtures/tui_mapload.frames");
+const EXPECTED_MAP_CYCLE: &str = include_str!("fixtures/tui_map_cycle.frames");
+
+const SCRIPT: &str = "\
+until ready 20
+frame attached
+# conversations -> messages -> compose
+key enter
+key i
+type hello from the tui
+newline
+type on two lines
+frame typed
+key enter
+frame queued
+until delivery delivered 30
+frame delivered
+until received 1 30
+frame reply
+key esc
+key q
+";
+
+/// A send to a correspondent that is not there yet: the row carries the
+/// direct leg and its seconds, then the correspondent attaches and the proof
+/// lands, and the script leaves in the pump that showed it.
+const LATE_SCRIPT: &str = "\
+until ready 20
+frame attached
+key enter
+key i
+type are you there
+key enter
+until leg direct 5
+sleep 2500
+frame waiting
+until delivery delivered 30
+frame delivered
+key esc
+key q
+";
+
+fn fixed_identity(seed: u8) -> Identity {
+    Identity::from_private_key_bytes(&[seed; 64]).expect("a 64-byte key")
+}
+
+/// Wait for the frames file to hold a frame with this label.
+async fn wait_for_frame(frames: &Path, label: &str, within: Duration) {
+    let deadline = Instant::now() + within;
+    let marker = format!(": {label} ---");
+    loop {
+        let text = std::fs::read_to_string(frames).unwrap_or_default();
+        if text.contains(&marker) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the TUI never drew {label:?}; frames so far:\n{text}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scripted_session_sends_sees_the_proof_and_reads_the_reply() {
+    let daemon = daemon("tui", |b| b).await;
+    let home = tempfile::tempdir().expect("tui home");
+    let ours = fixed_identity(0x11);
+    std::fs::write(
+        home.path().join("identity"),
+        encode_identity(&ours).expect("storable"),
+    )
+    .expect("write the identity");
+    let our_address = delivery_address(&ours).expect("our address");
+    let theirs = fixed_identity(0x22);
+    let their_address = delivery_address(&theirs).expect("their address");
+    let their_hex: String = their_address.iter().map(|b| format!("{b:02x}")).collect();
+
+    let script = home.path().join("session.script");
+    let frames = home.path().join("session.frames");
+    std::fs::write(&script, SCRIPT).expect("write the script");
+
+    let args: Vec<String> = vec![
+        "tui".into(),
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        daemon.config_dir.path().display().to_string(),
+        "--to".into(),
+        their_hex,
+        "--script".into(),
+        script.display().to_string(),
+        "--frames".into(),
+        frames.display().to_string(),
+        "--size".into(),
+        "80x16".into(),
+    ];
+    let child_home = home.path().to_path_buf();
+    let child = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &child_home)
+            .env("LNMSG_DISPLAY_NAME", "tui")
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax");
+        child.wait_with_output().expect("wait for loquax")
+    });
+
+    wait_for_frame(&frames, "attached", Duration::from_secs(20)).await;
+    let storage = tempfile::tempdir().expect("their storage");
+    let mut them = attach(AttachConfig {
+        instance: daemon.instance.clone(),
+        config_dir: Some(daemon.config_dir.path().to_path_buf()),
+        storage_dir: storage.path().to_path_buf(),
+        identity: theirs,
+        display_name: b"them".to_vec(),
+        notices: Terminal::new(storage.path().to_path_buf()),
+    })
+    .await
+    .expect("the correspondent attaches");
+
+    wait_for_frame(&frames, "delivered", Duration::from_secs(40)).await;
+    let reply = run_send(
+        &mut them.outbox,
+        SendRequest {
+            destination: our_address,
+            title: Vec::new(),
+            body: b"hello back\nalso on two lines".to_vec(),
+            fields: Vec::new(),
+            via: Via::Direct,
+        },
+        &SendOptions::new(daemon.instance.clone(), Duration::from_secs(20)),
+        &Tokio::new(),
+    )
+    .await;
+    assert!(reply.is_ok(), "the reply did not go out: {reply:?}");
+
+    let output = child.await.expect("the loquax child thread");
+    them.stop().await;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let got = std::fs::read_to_string(&frames).expect("read the frames");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {stderr}\nframes:\n{got}"
+    );
+    if got != EXPECTED {
+        // Kept where a reader can diff it and, when the change is on purpose,
+        // copy it over the fixture.
+        let kept = std::env::temp_dir().join("loquax-tui-session.frames");
+        let _ = std::fs::write(&kept, &got);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_session.frames\n{got}",
+            kept.display()
+        );
+    }
+}
+
+/// The leg label's seconds come from the script's clock: `until leg` applies
+/// no tick and `sleep 2500` applies ten, one per 250 ms of its own length,
+/// so the row reads `direct 2 s` however long the host took. And a script
+/// that quits on the proof still leaves the direct leg's `sending` and
+/// `proof` lines in `tui.log`: before leviculum 1014 the runner was cut off
+/// before it read them (the late-recipient arm of periculum 1013).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_recipient_shows_the_direct_leg_and_the_log_keeps_its_steps() {
+    let daemon = daemon("tui-late", |b| b).await;
+    let home = tempfile::tempdir().expect("tui home");
+    let ours = fixed_identity(0x11);
+    std::fs::write(
+        home.path().join("identity"),
+        encode_identity(&ours).expect("storable"),
+    )
+    .expect("write the identity");
+    let theirs = fixed_identity(0x22);
+    let their_address = delivery_address(&theirs).expect("their address");
+    let their_hex: String = their_address.iter().map(|b| format!("{b:02x}")).collect();
+
+    let script = home.path().join("late.script");
+    let frames = home.path().join("late.frames");
+    std::fs::write(&script, LATE_SCRIPT).expect("write the script");
+    // The bare form, plain `loquax` with the messenger's options; the session
+    // above runs the `tui` alias, so both spellings reach a daemon.
+    let args: Vec<String> = vec![
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        daemon.config_dir.path().display().to_string(),
+        "--to".into(),
+        their_hex.clone(),
+        "--script".into(),
+        script.display().to_string(),
+        "--frames".into(),
+        frames.display().to_string(),
+        "--size".into(),
+        "80x16".into(),
+    ];
+    let child_home = home.path().to_path_buf();
+    let child = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &child_home)
+            .env("LNMSG_DISPLAY_NAME", "tui")
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .env_remove("RUST_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax");
+        child.wait_with_output().expect("wait for loquax")
+    });
+
+    // Only once the label is on screen does the correspondent appear.
+    wait_for_frame(&frames, "waiting", Duration::from_secs(30)).await;
+    let storage = tempfile::tempdir().expect("their storage");
+    let them = attach(AttachConfig {
+        instance: daemon.instance.clone(),
+        config_dir: Some(daemon.config_dir.path().to_path_buf()),
+        storage_dir: storage.path().to_path_buf(),
+        identity: theirs,
+        display_name: b"them".to_vec(),
+        notices: Terminal::new(storage.path().to_path_buf()),
+    })
+    .await
+    .expect("the correspondent attaches");
+
+    let output = child.await.expect("the loquax child thread");
+    them.stop().await;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let got = std::fs::read_to_string(&frames).expect("read the frames");
+    let log = std::fs::read_to_string(home.path().join("tui.log")).unwrap_or_default();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {stderr}\nframes:\n{got}\ntui.log:\n{log}"
+    );
+
+    let to = format!("to={}", &their_hex[..8]);
+    let steps: Vec<&str> = log
+        .lines()
+        .filter(|line| line.contains("SEND leg=direct") && line.contains(&to))
+        .filter_map(|line| line.split(" state=").nth(1))
+        .filter_map(|rest| rest.split(' ').next())
+        .collect();
+    assert_eq!(
+        steps,
+        ["path_wait", "sending", "proof"],
+        "the direct leg's steps in tui.log:\n{log}"
+    );
+
+    if got != EXPECTED_LATE {
+        let kept = std::env::temp_dir().join("loquax-tui-late.frames");
+        let _ = std::fs::write(&kept, &got);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_late.frames\n{got}",
+            kept.display()
+        );
+    }
+}
+
+/// The vi reader's session: `j`/`k`/`G`/`g`, `i` to write, arrows to edit,
+/// `Esc` back out, `:` for the palette.
+const VI_SCRIPT: &str = "\
+until ready 20
+frame attached
+key j
+frame second
+key k
+key G
+key g
+frame first
+key enter
+frame messages
+key i
+type helo
+key left
+type l
+frame compose
+key esc
+key esc
+frame list
+key :
+type help
+key enter
+frame help
+key esc
+frame closed
+key q
+";
+
+/// The same session in Emacs spellings: `Ctrl-n`/`Ctrl-p`, `Alt->`/`Alt-<`,
+/// `Ctrl-b` to edit, `Ctrl-g` back out, `Alt-x` for the palette. Compose is
+/// `Tab`, since Emacs has no key that means "start writing".
+const EMACS_SCRIPT: &str = "\
+until ready 20
+frame attached
+key ctrl-n
+frame second
+key ctrl-p
+key alt->
+key alt-<
+frame first
+key enter
+frame messages
+key tab
+type helo
+key ctrl-b
+type l
+frame compose
+key ctrl-g
+key ctrl-g
+frame list
+key alt-x
+type help
+key enter
+frame help
+key ctrl-g
+frame closed
+key ctrl-q
+";
+
+/// The enhanced world: `Shift-Enter` breaks the line, `Ctrl-Enter` sends,
+/// and `Ctrl-c` outside compose says what quits without quitting.
+const ENHANCED_SCRIPT: &str = "\
+until ready 20
+keyboard enhanced
+key enter
+key i
+type one
+key shift-enter
+type two
+frame body
+key ctrl-enter
+frame sent
+key esc
+key esc
+key ctrl-c
+frame ctrl-c
+key j
+frame still here
+key q
+";
+
+/// The plain world: `Alt-Enter` breaks the line.
+const PLAIN_ALT_SCRIPT: &str = "\
+until ready 20
+key enter
+key i
+type one
+key alt-enter
+type two
+frame body
+key esc
+key esc
+key q
+";
+
+/// The plain world: `Ctrl-j` breaks the line too.
+const PLAIN_CTRL_J_SCRIPT: &str = "\
+until ready 20
+key enter
+key i
+type one
+key ctrl-j
+type two
+frame body
+key esc
+key esc
+key q
+";
+
+/// `send_on_enter` off from the palette: `Enter` breaks the line,
+/// `Alt-Enter` sends, and the hint says so.
+const ENTER_OFF_SCRIPT: &str = "\
+until ready 20
+key :
+type send on enter
+key enter
+frame switched
+key enter
+key i
+type one
+key enter
+type two
+frame body
+key alt-enter
+frame sent
+key esc
+key esc
+key q
+";
+
+/// Run one script against `daemon` with two correspondents that never
+/// answer, and hand back its frames.
+async fn run_keys_script(daemon: &support::Daemon, name: &str, script: &str) -> String {
+    run_script_at(daemon, name, script, "80x16").await.0
+}
+
+/// The same at `size`, with `tui.log` beside the frames.
+async fn run_script_at(
+    daemon: &support::Daemon,
+    name: &str,
+    script: &str,
+    size: &str,
+) -> (String, String) {
+    let home = tempfile::tempdir().expect("tui home");
+    std::fs::write(
+        home.path().join("identity"),
+        encode_identity(&fixed_identity(0x11)).expect("storable"),
+    )
+    .expect("write the identity");
+    let peer = |seed: u8| -> String {
+        let address = delivery_address(&fixed_identity(seed)).expect("an address");
+        address.iter().map(|b| format!("{b:02x}")).collect()
+    };
+    let script_path = home.path().join(format!("{name}.script"));
+    let frames = home.path().join(format!("{name}.frames"));
+    std::fs::write(&script_path, script).expect("write the script");
+    let args: Vec<String> = vec![
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        daemon.config_dir.path().display().to_string(),
+        "--to".into(),
+        peer(0x22),
+        "--to".into(),
+        peer(0x33),
+        "--script".into(),
+        script_path.display().to_string(),
+        "--frames".into(),
+        frames.display().to_string(),
+        "--size".into(),
+        size.into(),
+    ];
+    let child_home = home.path().to_path_buf();
+    let output = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &child_home)
+            .env("LNMSG_DISPLAY_NAME", "tui")
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .env_remove("RUST_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax");
+        child.wait_with_output().expect("wait for loquax")
+    })
+    .await
+    .expect("the loquax child thread");
+    let got = std::fs::read_to_string(&frames).expect("read the frames");
+    let log = std::fs::read_to_string(home.path().join("tui.log")).unwrap_or_default();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{name}: stderr: {}\nframes:\n{got}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The script runner says once which world it starts in.
+    assert!(
+        log.contains("KEYS enhancement=no newline=Alt-Enter send=Enter"),
+        "{name}: tui.log:\n{log}"
+    );
+    (got, log)
+}
+
+/// A frame without the compose pane's border, which carries the hint.
+fn without_hint(frame: &str) -> Vec<&str> {
+    frame
+        .lines()
+        .filter(|line| !line.contains(" send · "))
+        .collect()
+}
+
+/// The frame labelled `label` in a frames file.
+fn frame<'a>(frames: &'a str, label: &str) -> &'a str {
+    let marker = format!(": {label} ---\n");
+    let start = frames
+        .find(&marker)
+        .map(|at| at + marker.len())
+        .unwrap_or_else(|| panic!("no frame {label:?} in:\n{frames}"));
+    let end = frames[start..]
+        .find("--- frame ")
+        .map_or(frames.len(), |at| start + at);
+    &frames[start..end]
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_keymap_sessions_reach_the_same_screens_in_every_spelling() {
+    let daemon = daemon("tui-keys", |b| b).await;
+    let mut all = String::new();
+    let mut sessions = Vec::new();
+    for (name, script) in [
+        ("vi", VI_SCRIPT),
+        ("emacs", EMACS_SCRIPT),
+        ("enhanced", ENHANCED_SCRIPT),
+        ("plain-alt-enter", PLAIN_ALT_SCRIPT),
+        ("plain-ctrl-j", PLAIN_CTRL_J_SCRIPT),
+        ("enter-off", ENTER_OFF_SCRIPT),
+    ] {
+        let frames = run_keys_script(&daemon, name, script).await;
+        all.push_str(&format!("=== {name} ===\n{frames}"));
+        sessions.push(frames);
+    }
+    let [vi, emacs, enhanced, plain_alt, plain_ctrl_j, enter_off] = sessions
+        .try_into()
+        .unwrap_or_else(|_| panic!("six sessions"));
+
+    // vi and Emacs reach the same screens, frame for frame.
+    assert_eq!(vi, emacs, "the vi and the Emacs session differ");
+
+    // The two-line body is the same in both worlds; only the hint differs,
+    // and it names the world's own chord.
+    let body = frame(&enhanced, "body");
+    assert!(body.contains("Enter send · Shift-Enter newline"), "{body}");
+    let plain = frame(&plain_alt, "body");
+    assert!(plain.contains("Enter send · Alt-Enter newline"), "{plain}");
+    assert_eq!(without_hint(body), without_hint(plain));
+    assert_eq!(plain, frame(&plain_ctrl_j, "body"));
+    assert!(frame(&enhanced, "sent").contains("you: one"), "{enhanced}");
+
+    // Ctrl-c outside compose says what quits, and the session goes on.
+    assert!(
+        frame(&enhanced, "ctrl-c").contains("Ctrl-q quits"),
+        "{enhanced}"
+    );
+    assert!(
+        frame(&enhanced, "still here").contains("Loquax"),
+        "{enhanced}"
+    );
+
+    // send_on_enter off: Enter broke the line, Alt-Enter sent.
+    let off = frame(&enter_off, "body");
+    assert!(off.contains("Alt-Enter send · Enter newline"), "{off}");
+    assert!(off.contains("│one"), "{off}");
+    assert!(
+        frame(&enter_off, "sent").contains("you: one"),
+        "{enter_off}"
+    );
+
+    if all != EXPECTED_KEYS {
+        let kept = std::env::temp_dir().join("loquax-tui-keys.frames");
+        let _ = std::fs::write(&kept, &all);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_keys.frames\n{all}",
+            kept.display()
+        );
+    }
+}
+
+/// The chat session. Every time on screen comes from a `clock` step, and the
+/// test sends each of the peer's messages only once the frame before it is
+/// drawn, so each arrives under its own clock.
+const CHAT_SCRIPT: &str = "\
+until ready 20
+frame attached
+clock 2026-10-24 13:58
+until received 1 30
+clock 2026-10-24 14:02
+key enter
+key i
+type yes, from ten. Shall I bring the T114 and the long antenna?
+key enter
+until delivery delivered 30
+clock 2026-10-26 09:12
+type on my way
+key enter
+until delivery delivered 30
+key esc
+key k
+key k
+tick 12
+frame reading
+clock 2026-10-26 14:04
+until received 2 30
+tick 12
+frame first reply
+clock 2026-10-26 14:05
+until received 3 30
+tick 12
+frame new while reading
+key :
+type theme
+key enter
+tier truecolor
+theme dark
+styles truecolor dark
+theme light
+styles truecolor light
+tier 256
+theme dark
+styles 256 dark
+theme light
+styles 256 light
+tier 16
+theme dark
+styles 16 dark
+theme light
+styles 16 light
+tier mono
+styles mono
+theme dark
+tick 12
+key G
+frame newest
+clock 2026-10-26 14:06
+key i
+type the tripod fits
+key enter
+until delivery delivered 30
+tick 12
+frame replied
+key esc
+key g
+key j
+key enter
+frame detail
+key esc
+key q
+";
+
+/// A frame's lines with the message ids, which hash the LXMF timestamp and so
+/// differ on every run, written as `x`s of the same width.
+fn without_ids(frames: &str) -> String {
+    let mut out = String::new();
+    for line in frames.lines() {
+        let masked = match (line.find("id     "), line.find("router as ")) {
+            (Some(at), _) => {
+                let start = at + "id     ".len();
+                format!(
+                    "{}{}{}",
+                    &line[..start],
+                    "x".repeat(64),
+                    &line[start + 64..]
+                )
+            }
+            (None, Some(at)) => {
+                let start = at + "router as ".len();
+                format!("{}{}{}", &line[..start], "x".repeat(8), &line[start + 8..])
+            }
+            (None, None) => line.to_string(),
+        };
+        out.push_str(&masked);
+        out.push('\n');
+    }
+    out
+}
+
+/// One chat session at `size` against its own daemon, the peer answering on
+/// the script's frames. The frames, and the style maps the script wrote
+/// beside them.
+async fn chat_session(size: &str) -> (String, String) {
+    let daemon = daemon(&format!("tui-chat-{size}"), |b| b).await;
+    let home = tempfile::tempdir().expect("tui home");
+    let ours = fixed_identity(0x11);
+    std::fs::write(
+        home.path().join("identity"),
+        encode_identity(&ours).expect("storable"),
+    )
+    .expect("write the identity");
+    let our_address = delivery_address(&ours).expect("our address");
+    let theirs = fixed_identity(0x22);
+    let hex = |seed: u8| -> String {
+        let address = delivery_address(&fixed_identity(seed)).expect("an address");
+        address.iter().map(|b| format!("{b:02x}")).collect()
+    };
+    let script = home.path().join("chat.script");
+    let frames = home.path().join("chat.frames");
+    std::fs::write(&script, CHAT_SCRIPT).expect("write the script");
+    // A second correspondent that never answers, so the list has two rows.
+    let args: Vec<String> = vec![
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        daemon.config_dir.path().display().to_string(),
+        "--to".into(),
+        hex(0x22),
+        "--to".into(),
+        hex(0x33),
+        "--script".into(),
+        script.display().to_string(),
+        "--frames".into(),
+        frames.display().to_string(),
+        "--size".into(),
+        size.into(),
+    ];
+    let child_home = home.path().to_path_buf();
+    let child = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &child_home)
+            .env("LNMSG_DISPLAY_NAME", "tui")
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .env_remove("RUST_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax");
+        child.wait_with_output().expect("wait for loquax")
+    });
+
+    wait_for_frame(&frames, "attached", Duration::from_secs(20)).await;
+    let storage = tempfile::tempdir().expect("their storage");
+    let mut them = attach(AttachConfig {
+        instance: daemon.instance.clone(),
+        config_dir: Some(daemon.config_dir.path().to_path_buf()),
+        storage_dir: storage.path().to_path_buf(),
+        identity: theirs,
+        display_name: b"them".to_vec(),
+        notices: Terminal::new(storage.path().to_path_buf()),
+    })
+    .await
+    .expect("the correspondent attaches");
+    let options = SendOptions::new(daemon.instance.clone(), Duration::from_secs(20));
+    // The engine says `Ready` once, and each send waits for it: the sends go
+    // through taps of one fan-out, as the TUI's own runners do.
+    let mut fanout = Fanout::default();
+    for (after, body) in [
+        (None, "are you at the field site tomorrow?"),
+        (Some("reading"), "ok, bring the T114."),
+        (
+            Some("first reply"),
+            "and the small tripod\nif it fits in the bag",
+        ),
+    ] {
+        if let Some(label) = after {
+            wait_for_frame(&frames, label, Duration::from_secs(60)).await;
+        }
+        let mut tap = fanout.tap();
+        let clock = Tokio::new();
+        let send = run_send(
+            &mut tap,
+            SendRequest {
+                destination: our_address,
+                title: Vec::new(),
+                body: body.as_bytes().to_vec(),
+                fields: Vec::new(),
+                via: Via::Direct,
+            },
+            &options,
+            &clock,
+        );
+        tokio::pin!(send);
+        let sent = loop {
+            tokio::select! {
+                sent = &mut send => break sent,
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {
+                    let _ = fanout.pump(&mut them.outbox);
+                }
+            }
+        };
+        assert!(sent.is_ok(), "{body:?} did not go out: {sent:?}");
+    }
+
+    let output = child.await.expect("the loquax child thread");
+    them.stop().await;
+    let got = std::fs::read_to_string(&frames).expect("read the frames");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{size}: stderr: {}\nframes:\n{got}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let styles = std::fs::read_to_string(home.path().join("chat.frames.styles"))
+        .expect("read the style maps");
+    (got, styles)
+}
+
+/// One map of a styles file, by its label.
+fn styles_of<'a>(styles: &'a str, label: &str) -> &'a str {
+    let marker = format!("--- styles: {label} ---\n");
+    let start = styles
+        .find(&marker)
+        .unwrap_or_else(|| panic!("no style map {label:?} in:\n{styles}"))
+        + marker.len();
+    let end = styles[start..]
+        .find("--- styles:")
+        .map_or(styles.len(), |end| start + end);
+    &styles[start..end]
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_chat_layout_draws_the_mockups_at_both_sizes() {
+    let mut all = String::new();
+    let mut maps = String::new();
+    for size in ["80x24", "120x40"] {
+        let (frames, styles) = chat_session(size).await;
+        if size == "80x24" {
+            maps = styles;
+        }
+        // Read while scrolled up: the rule above the replies, and the block
+        // being read still selected and on screen. (The whole exchange fits
+        // both panes, so it is drawn from the bottom and grows upward.)
+        let reading = frame(&frames, "reading");
+        let first = frame(&frames, "first reply");
+        let new = frame(&frames, "new while reading");
+        assert!(first.contains(" 1 new "), "{size}: {first}");
+        assert!(new.contains(" 2 new "), "{size}: {new}");
+        let selected = |f: &str| -> Vec<String> {
+            f.lines()
+                .filter_map(|row| row.split_once("││").map(|(_, pane)| pane))
+                .filter(|pane| pane.contains('▌'))
+                .map(str::to_string)
+                .collect()
+        };
+        assert!(!selected(reading).is_empty(), "{size}: {reading}");
+        assert_eq!(selected(reading), selected(new), "{size}: the cursor moved");
+        assert!(frame(&frames, "newest").contains("if it fits in the bag"));
+        let detail = frame(&frames, "detail");
+        assert!(
+            detail.contains("delivered: proof received"),
+            "{size}: {detail}"
+        );
+        assert!(detail.contains("from you to them ·"), "{size}: {detail}");
+        all.push_str(&format!("=== {size} ===\n{}", without_ids(&frames)));
+    }
+    if all != EXPECTED_CHAT {
+        let kept = std::env::temp_dir().join("loquax-tui-chat.frames");
+        let _ = std::fs::write(&kept, &all);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_chat.frames\n{all}",
+            kept.display()
+        );
+    }
+
+    // The colour of the same screen (loquax-keys-and-layout.md, section 5,
+    // "Colour", part 5): six maps, one a tier and theme, and the monochrome
+    // one. They differ where the table differs.
+    let has = |label: &str, letter: char| styles_of(&maps, label).contains(letter);
+    for label in [
+        "truecolor dark",
+        "truecolor light",
+        "256 dark",
+        "256 light",
+        "16 dark",
+        "16 light",
+    ] {
+        for letter in ['.', '^', '!'] {
+            assert!(has(label, letter), "{label}: no {letter:?}");
+        }
+    }
+    for label in ["truecolor dark", "truecolor light", "256 dark", "256 light"] {
+        for letter in [',', '=', 't'] {
+            assert!(has(label, letter), "{label}: no {letter:?}");
+        }
+    }
+    // In 16 colours their blocks are untinted on dark, and the toast is
+    // reverse video in both.
+    for letter in [',', '=', 't'] {
+        assert!(!has("16 dark", letter), "16 dark: {letter:?}");
+    }
+    assert!(has("16 light", ','), "16 light: their blocks");
+    assert!(!has("16 light", 't'), "16 light: the toast");
+    assert!(
+        styles_of(&maps, "mono")
+            .chars()
+            .all(|c| matches!(c, ' ' | '^' | '\n')),
+        "monochrome holds only blanks and reverse video:\n{}",
+        styles_of(&maps, "mono")
+    );
+    if maps != EXPECTED_STYLES {
+        let kept = std::env::temp_dir().join("loquax-tui-chat.styles");
+        let _ = std::fs::write(&kept, &maps);
+        panic!(
+            "the style maps moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_chat.styles\n{maps}",
+            kept.display()
+        );
+    }
+}
+
+/// The mouse (section 7, slice 3), by clicks alone: the second
+/// conversation's row, the compose box, `send` on its border (the send
+/// goes out: its leg is in `tui.log`), the message, its mark (the detail
+/// view), outside the view (closed), and the footer's `? help`. Cells count
+/// from 1, as the frames do.
+const CLICK_SCRIPT: &str = "\
+until ready 20
+frame attached
+click 5 5
+frame second conversation
+click 40 22
+type hello by mouse
+frame typed
+click 55 21
+frame sent by click
+click 60 20
+frame message selected
+click 78 20
+frame detail
+click 2 2
+frame closed
+click 62 24
+frame help
+key esc
+key q
+";
+
+/// The wheel over the conversation while the list has the focus: the
+/// conversation scrolls six rows for two notches, the focus and the list
+/// stay, and two notches back are the newest again.
+const WHEEL_SCRIPT: &str = "\
+until ready 20
+key i
+type message 1
+key enter
+type message 2
+key enter
+type message 3
+key enter
+type message 4
+key enter
+type message 5
+key enter
+type message 6
+key enter
+type message 7
+key enter
+type message 8
+key enter
+type message 9
+key enter
+type message 10
+key enter
+key esc
+key esc
+frame list focused
+wheel up 50 10 2
+frame wheeled up
+wheel down 50 10 2
+frame wheeled down
+key q
+";
+
+/// A drag across two of our messages copies their text by OSC 52, without
+/// the times and the marks.
+const DRAG_SCRIPT: &str = "\
+until ready 20
+key i
+type first line
+key enter
+type second line
+key enter
+key esc
+frame two sent
+drag 60 18 69 20
+frame dragged
+tick 12
+frame selected
+key q
+";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_mouse_clicks_wheels_and_drags_through_the_screen() {
+    let daemon = daemon("tui-mouse", |b| b).await;
+    let mut all = String::new();
+    let mut runs = Vec::new();
+    for (name, script) in [
+        ("click", CLICK_SCRIPT),
+        ("wheel", WHEEL_SCRIPT),
+        ("drag", DRAG_SCRIPT),
+    ] {
+        let (frames, log) = run_script_at(&daemon, name, script, "80x24").await;
+        all.push_str(&format!("=== {name} ===\n{frames}"));
+        runs.push((frames, log));
+    }
+    let [(click, click_log), (wheel, _), (drag, _)] =
+        runs.try_into().unwrap_or_else(|_| panic!("three sessions"));
+
+    // The click on the second row opened it; the one on `send` sent, the
+    // runner's first leg is in the log.
+    assert!(
+        frame(&click, "second conversation").contains("│▌<5ec0ea2e…>"),
+        "{click}"
+    );
+    assert!(
+        frame(&click, "sent by click").contains("hello by mouse  12:00 ○"),
+        "{click}"
+    );
+    assert!(
+        click_log.contains("SEND leg=direct to=5ec0ea2e"),
+        "tui.log:\n{click_log}"
+    );
+    assert!(frame(&click, "message selected").contains("▌hello by mouse"));
+    assert!(frame(&click, "detail").contains("from you to <5ec0ea2e…>"));
+    assert!(!frame(&click, "closed").contains("from you to"));
+    assert!(frame(&click, "help").contains("Loquax help"), "{click}");
+
+    // The wheel moved the conversation and nothing else.
+    let up = frame(&wheel, "wheeled up");
+    assert_ne!(up, frame(&wheel, "list focused"));
+    assert!(up.contains("● Loquax"), "the list kept the focus: {up}");
+    assert!(!up.contains("message 10  12:00"), "{up}");
+    assert_eq!(frame(&wheel, "wheeled down"), frame(&wheel, "list focused"));
+
+    // The drag's release copied the two lines and only them.
+    let copied = format!(
+        "--- osc52 {} ---",
+        leviculum_ui::clipboard::osc52("first line\nsecond line").replace('\x1b', "\\e")
+    );
+    assert!(drag.contains(&copied), "{copied}\n{drag}");
+    assert!(
+        frame(&drag, "dragged").contains("copied 22 chars"),
+        "{drag}"
+    );
+    if all != EXPECTED_MOUSE {
+        let kept = std::env::temp_dir().join("loquax-tui-mouse.frames");
+        let _ = std::fs::write(&kept, &all);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_mouse.frames\n{all}",
+            kept.display()
+        );
+    }
+}
+
+/// The search, by keys alone, against correspondents that never answer: our
+/// messages are what it finds. No step waits on the engine after `ready`,
+/// so every frame is the same on every run.
+const SEARCH_SCRIPT: &str = "\
+until ready 20
+clock 2026-10-23 19:40
+key enter
+key i
+type did the board come back from the soak?
+key enter
+clock 2026-10-26 14:05
+type and the small tripod
+newline
+type if it fits in the bag
+key enter
+clock 2026-10-26 14:06
+type the tripod fits
+key enter
+key esc
+key esc
+key j
+key enter
+key i
+clock 2026-10-26 14:07
+type the tripod stays in the van, 61ddb79a has the bag
+key enter
+key esc
+key esc
+key /
+type tripod
+frame typed
+key tab
+key j
+key j
+key enter
+frame opened
+key n
+frame next
+key N
+frame previous
+key /
+key backspace
+key backspace
+key backspace
+key backspace
+key backspace
+key backspace
+type 61dd
+frame both groups
+key esc
+frame closed
+key q
+";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_search_finds_opens_and_steps_in_place_at_both_sizes() {
+    let daemon = daemon("tui-search", |b| b).await;
+    let mut all = String::new();
+    for size in ["120x40", "80x24"] {
+        let (frames, _) =
+            run_script_at(&daemon, &format!("search-{size}"), SEARCH_SCRIPT, size).await;
+        let typed = frame(&frames, "typed");
+        assert!(typed.contains("● Search"), "{size}: {typed}");
+        assert!(typed.contains(" esc closes "), "{size}: {typed}");
+        assert!(typed.contains("│ / tripod"), "{size}: {typed}");
+        assert!(typed.contains("│ MESSAGES "), "{size}: {typed}");
+        assert!(!typed.contains("│ CONVERSATIONS "), "{size}: {typed}");
+        assert!(typed.contains("Esc close search"), "{size}: {typed}");
+        // The third result, opened at its message: the block selected and
+        // the match marked in place.
+        let opened = frame(&frames, "opened");
+        assert!(
+            opened.contains("▌and the small «tripod»"),
+            "{size}: {opened}"
+        );
+        assert!(opened.contains("the «tripod» fits"), "{size}: {opened}");
+        assert!(opened.contains("n / N next, previous"), "{size}: {opened}");
+        assert!(
+            frame(&frames, "next").contains("▌the «tripod» fits"),
+            "{size}"
+        );
+        assert_eq!(opened, frame(&frames, "previous"), "{size}: N went back");
+        let both = frame(&frames, "both groups");
+        assert!(both.contains("│ CONVERSATIONS "), "{size}: {both}");
+        assert!(both.contains("│ MESSAGES "), "{size}: {both}");
+        assert!(both.contains("<«61dd»b79a…>"), "{size}: {both}");
+        // Closed: the list and its `/ search` back, nothing marked, the
+        // conversation still the one the result opened.
+        let closed = frame(&frames, "closed");
+        assert!(closed.contains("● Loquax"), "{size}: {closed}");
+        assert!(closed.contains(" / search "), "{size}: {closed}");
+        assert!(!closed.contains('«'), "{size}: {closed}");
+        assert!(closed.contains("<61ddb79a…>  unknown"), "{size}: {closed}");
+        all.push_str(&format!("=== {size} ===\n{frames}"));
+    }
+    if all != EXPECTED_SEARCH {
+        let kept = std::env::temp_dir().join("loquax-tui-search-session.frames");
+        let _ = std::fs::write(&kept, &all);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_search_session.frames\n{all}",
+            kept.display()
+        );
+    }
+}
+
+/// Each correspondent attaches only after the screen has drawn the frame
+/// before its own, so its one announce reaches an engine that is listening,
+/// and `until named` holds the script until the name is there.
+const NAMES_SCRIPT: &str = "\
+until ready 20
+frame attached
+until named 1 30
+frame named
+until named 2 30
+frame collision
+until named 3 30
+key j
+key j
+frame petname
+key :
+type rename
+key enter
+key ctrl-u
+type Carol Meyer
+frame rename
+key enter
+frame renamed
+key :
+type block
+key enter
+frame blocked
+key :
+type blocked
+key enter
+frame blocked view
+key q
+";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn names_from_announces_carry_their_hash_collide_and_yield_to_a_petname() {
+    let daemon = daemon("tui-names", |b| b).await;
+    let home = tempfile::tempdir().expect("tui home");
+    std::fs::write(
+        home.path().join("identity"),
+        encode_identity(&fixed_identity(0x11)).expect("storable"),
+    )
+    .expect("write the identity");
+    let hex = |seed: u8| -> String {
+        let address = delivery_address(&fixed_identity(seed)).expect("an address");
+        address.iter().map(|b| format!("{b:02x}")).collect()
+    };
+    std::fs::write(
+        home.path().join("contacts"),
+        format!("# the reader's own names\nname {} Carol\n", hex(0x44)),
+    )
+    .expect("write the contacts");
+    let script = home.path().join("names.script");
+    let frames = home.path().join("names.frames");
+    std::fs::write(&script, NAMES_SCRIPT).expect("write the script");
+    let mut args: Vec<String> = vec![
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        daemon.config_dir.path().display().to_string(),
+    ];
+    for seed in [0x22, 0x33, 0x44] {
+        args.extend(["--to".into(), hex(seed)]);
+    }
+    args.extend([
+        "--script".into(),
+        script.display().to_string(),
+        "--frames".into(),
+        frames.display().to_string(),
+        "--size".into(),
+        "80x16".into(),
+    ]);
+    let child_home = home.path().to_path_buf();
+    let child = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &child_home)
+            .env("LNMSG_DISPLAY_NAME", "tui")
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax");
+        child.wait_with_output().expect("wait for loquax")
+    });
+
+    let mut attached = Vec::new();
+    let mut storages = Vec::new();
+    for (seed, name, after) in [
+        (0x22, "Bob", "attached"),
+        (0x33, "B0b", "named"),
+        (0x44, "Caroline", "collision"),
+    ] {
+        wait_for_frame(&frames, after, Duration::from_secs(40)).await;
+        let storage = tempfile::tempdir().expect("their storage");
+        let them = attach(AttachConfig {
+            instance: daemon.instance.clone(),
+            config_dir: Some(daemon.config_dir.path().to_path_buf()),
+            storage_dir: storage.path().to_path_buf(),
+            identity: fixed_identity(seed),
+            display_name: name.as_bytes().to_vec(),
+            notices: Terminal::new(storage.path().to_path_buf()),
+        })
+        .await
+        .expect("a correspondent attaches");
+        attached.push(them);
+        storages.push(storage);
+    }
+
+    let output = child.await.expect("the loquax child thread");
+    for them in attached {
+        them.stop().await;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let got = std::fs::read_to_string(&frames).expect("read the frames");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {stderr}\nframes:\n{got}"
+    );
+    let named = frame(&got, "named");
+    assert!(named.contains("Bob ·61dd  unknown"), "{named}");
+    assert!(named.contains("to Bob ·61dd"), "{named}");
+    let collision = frame(&got, "collision");
+    assert!(collision.contains("same name as ·"), "{collision}");
+    // Both list rows, the header and the compose box.
+    assert_eq!(collision.matches(" ≈").count(), 4, "{collision}");
+    let petname = frame(&got, "petname");
+    assert!(
+        petname.contains("Carol ·") && petname.contains("known · announces Caroline"),
+        "{petname}"
+    );
+    // The palette's rename asks with the petname to edit, and its answer
+    // is the header's name; block takes Carol off the list, and the
+    // `blocked` view lists her.
+    let rename = frame(&got, "rename");
+    assert!(rename.contains("> Carol Meyer"), "{rename}");
+    assert!(rename.contains("your name for Carol ·"), "{rename}");
+    let renamed = frame(&got, "renamed");
+    assert!(
+        renamed.contains("Carol Meyer ·") && renamed.contains("known · announces Caroline"),
+        "{renamed}"
+    );
+    let blocked = frame(&got, "blocked");
+    assert!(
+        blocked
+            .lines()
+            .all(|row| !row.starts_with("│ Carol") && !row.starts_with("│▌Carol")),
+        "{blocked}"
+    );
+    assert!(blocked.contains("blocked Carol Meyer ·"), "{blocked}");
+    let view = frame(&got, "blocked view");
+    assert!(
+        view.contains("Blocked") && view.contains("Carol Meyer ·"),
+        "{view}"
+    );
+    assert!(view.contains("blocked · announces Caroline"), "{view}");
+    // The file says it, its comment kept.
+    let contacts = std::fs::read_to_string(home.path().join("contacts")).expect("the contacts");
+    assert_eq!(
+        contacts,
+        format!(
+            "# the reader's own names\nname {carol} Carol Meyer\nblock {carol}\n",
+            carol = hex(0x44)
+        )
+    );
+    if got != EXPECTED_NAMES {
+        let kept = std::env::temp_dir().join("loquax-tui-names.frames");
+        let _ = std::fs::write(&kept, &got);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_names.frames\n{got}",
+            kept.display()
+        );
+    }
+}
+
+/// The first run: the exchange, then a send to Carol, who is never there,
+/// and quit while the runner still waits for her.
+const HISTORY_FIRST: &str = "\
+until ready 20
+frame attached
+key enter
+key i
+type are you at the field site?
+key enter
+until delivery delivered 30
+frame delivered
+until received 1 30
+key esc
+key alt-down
+key i
+type leaving in ten
+key enter
+until leg direct 10
+frame cut off
+key esc
+key q
+";
+
+/// The restart, with no `--to`: what the list holds is the store's.
+const HISTORY_SECOND: &str = "\
+until ready 20
+frame restarted
+key enter
+key enter
+frame ledger
+key esc
+key esc
+key alt-down
+frame bob
+key :
+type pin
+key enter
+frame pinned
+key tab
+key d
+frame asked
+key y
+frame deleted
+key q
+";
+
+const HISTORY_THIRD: &str = "\
+until ready 20
+frame again
+key q
+";
+
+/// One run of loquax over `home`, `--to` each of `to`.
+async fn history_run(
+    daemon: &support::Daemon,
+    home: &Path,
+    name: &str,
+    script: &str,
+    to: &[u8],
+) -> tokio::task::JoinHandle<std::process::Output> {
+    let script_path = home.join(format!("{name}.script"));
+    let frames = home.join(format!("{name}.frames"));
+    std::fs::write(&script_path, script).expect("write the script");
+    let _ = std::fs::remove_file(&frames);
+    let mut args: Vec<String> = vec![
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        daemon.config_dir.path().display().to_string(),
+    ];
+    for &seed in to {
+        let address = delivery_address(&fixed_identity(seed)).expect("an address");
+        args.extend([
+            "--to".into(),
+            address.iter().map(|b| format!("{b:02x}")).collect(),
+        ]);
+    }
+    args.extend([
+        "--script".into(),
+        script_path.display().to_string(),
+        "--frames".into(),
+        frames.display().to_string(),
+        "--size".into(),
+        "80x24".into(),
+    ]);
+    let child_home = home.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &child_home)
+            .env("LNMSG_DISPLAY_NAME", "tui")
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax");
+        child.wait_with_output().expect("wait for loquax")
+    })
+}
+
+/// A run's frames, after it ended well.
+async fn history_frames(
+    run: tokio::task::JoinHandle<std::process::Output>,
+    home: &Path,
+    name: &str,
+) -> String {
+    let output = run.await.expect("the loquax child thread");
+    let got = std::fs::read_to_string(home.join(format!("{name}.frames"))).unwrap_or_default();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{name}: stderr: {}\nframes:\n{got}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    got
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_shows_the_earlier_exchange_with_its_marks() {
+    let daemon = daemon("tui-history", |b| b).await;
+    let home = tempfile::tempdir().expect("tui home");
+    std::fs::write(
+        home.path().join("identity"),
+        encode_identity(&fixed_identity(0x11)).expect("storable"),
+    )
+    .expect("write the identity");
+    let our_address = delivery_address(&fixed_identity(0x11)).expect("our address");
+
+    // The first run, with Bob there for the exchange.
+    let first = history_run(&daemon, home.path(), "first", HISTORY_FIRST, &[0x22, 0x33]).await;
+    wait_for_frame(
+        &home.path().join("first.frames"),
+        "attached",
+        Duration::from_secs(20),
+    )
+    .await;
+    let storage = tempfile::tempdir().expect("bob's storage");
+    let mut bob = attach(AttachConfig {
+        instance: daemon.instance.clone(),
+        config_dir: Some(daemon.config_dir.path().to_path_buf()),
+        storage_dir: storage.path().to_path_buf(),
+        identity: fixed_identity(0x22),
+        display_name: b"Bob".to_vec(),
+        notices: Terminal::new(storage.path().to_path_buf()),
+    })
+    .await
+    .expect("Bob attaches");
+    wait_for_frame(
+        &home.path().join("first.frames"),
+        "delivered",
+        Duration::from_secs(40),
+    )
+    .await;
+    let reply = run_send(
+        &mut bob.outbox,
+        SendRequest {
+            destination: our_address,
+            title: Vec::new(),
+            body: b"yes, from ten".to_vec(),
+            fields: Vec::new(),
+            via: Via::Direct,
+        },
+        &SendOptions::new(daemon.instance.clone(), Duration::from_secs(20)),
+        &Tokio::new(),
+    )
+    .await;
+    assert!(reply.is_ok(), "Bob's reply did not go out: {reply:?}");
+    let first = history_frames(first, home.path(), "first").await;
+    bob.stop().await;
+    let cut = frame(&first, "cut off");
+    assert!(cut.contains("leaving in ten"), "{cut}");
+
+    // The restart: no `--to`, and nobody else attached.
+    let second = history_run(&daemon, home.path(), "second", HISTORY_SECOND, &[]).await;
+    let second = history_frames(second, home.path(), "second").await;
+    let restarted = frame(&second, "restarted");
+    assert!(restarted.contains("leaving in ten"), "{restarted}");
+    assert!(
+        restarted.contains(" ○"),
+        "the cut-off send is queued: {restarted}"
+    );
+    assert!(
+        restarted.contains("Bob ·61dd"),
+        "Bob's name from the first run: {restarted}"
+    );
+    assert!(
+        frame(&second, "ledger").contains("Loquax restarted: no longer being sent"),
+        "{second}"
+    );
+    let bob_frame = frame(&second, "bob");
+    assert!(
+        bob_frame.contains("are you at the field site?"),
+        "{bob_frame}"
+    );
+    assert!(bob_frame.contains(" ✓"), "the proof survived: {bob_frame}");
+    assert!(bob_frame.contains("yes, from ten"), "{bob_frame}");
+    assert!(frame(&second, "pinned").contains('┄'), "{second}");
+    assert!(frame(&second, "asked").contains("y deletes"), "{second}");
+    assert!(
+        !frame(&second, "deleted").contains("yes, from ten"),
+        "{second}"
+    );
+
+    // A third start: the pin and the delete were written.
+    let third = history_run(&daemon, home.path(), "third", HISTORY_THIRD, &[]).await;
+    let third = history_frames(third, home.path(), "third").await;
+    let again = frame(&third, "again");
+    assert!(again.contains('┄'), "{again}");
+    assert!(!again.contains("yes, from ten"), "{again}");
+
+    let all = format!("=== first ===\n{first}=== second ===\n{second}=== third ===\n{third}");
+    if all != EXPECTED_HISTORY {
+        let kept = std::env::temp_dir().join("loquax-tui-history.frames");
+        let _ = std::fs::write(&kept, &all);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_history.frames\n{all}",
+            kept.display()
+        );
+    }
+}
+
+/// The telemetry session: every time on screen is the script's, and the
+/// fixes the peer sends are stamped against that same clock, so the ages
+/// are the same on every run.
+const TELEMETRY_SCRIPT: &str = "\
+clock 2026-10-26 14:00
+until ready 20
+frame attached
+until received 3 60
+tick 12
+frame folded
+key enter
+key v
+frame detail
+key esc
+key q
+";
+
+/// 2026-10-26 14:00 UTC, the script's clock.
+const TELEMETRY_NOW: i64 = 1_793_023_200;
+
+/// One position report as the peer's Telemeter packs it.
+fn position_report(minutes_ago: i64, lat_e6: i32) -> Vec<(i64, Vec<u8>)> {
+    use leviculum_lxmf::telemetry::{Location, Telemetry};
+    let at = TELEMETRY_NOW - minutes_ago * 60;
+    let telemetry = Telemetry {
+        time: Some(at),
+        location: Some(Location {
+            latitude_e6: lat_e6,
+            longitude_e6: 11_256_000,
+            altitude_e2: 5_120,
+            speed_e2: 0,
+            bearing_e2: 0,
+            accuracy_e2: 500,
+            last_update: at,
+        }),
+        ..Telemetry::default()
+    };
+    vec![(
+        leviculum_lxmf::constants::FIELD_TELEMETRY,
+        telemetry.encode_field_value(),
+    )]
+}
+
+async fn telemetry_session(size: &str) -> String {
+    let messages = |_: [u8; 16]| {
+        vec![
+            ("leaving the hut now", Vec::new()),
+            ("", position_report(10, 43_770_000)),
+            ("", position_report(4, 43_773_100)),
+        ]
+    };
+    peer_session("telemetry", size, TELEMETRY_SCRIPT, &[], |_| {}, messages)
+        .await
+        .0
+}
+
+/// A scripted session against a fresh daemon in which one peer, `0x22`,
+/// sends us `messages(our_address)` directly once the frame `attached` is
+/// written: the bodies and fields of each. `prepare` fills the home before
+/// loquax starts; `extra` are more arguments. The frames, ids masked, and
+/// the session's `tui.log`.
+async fn peer_session(
+    name: &str,
+    size: &str,
+    script_text: &str,
+    extra: &[&str],
+    prepare: impl FnOnce(&Path),
+    messages: impl FnOnce([u8; 16]) -> Vec<(&'static str, Vec<(i64, Vec<u8>)>)>,
+) -> (String, String) {
+    let daemon = daemon(&format!("tui-{name}-{size}"), |b| b).await;
+    let home = tempfile::tempdir().expect("tui home");
+    prepare(home.path());
+    // No session reaches the network (1089): the map's autoload is off
+    // unless the session's own config names a source on the loopback.
+    if !home.path().join("config").exists() {
+        std::fs::write(home.path().join("config"), "map_autoload = off\n").expect("config");
+    }
+    let ours = fixed_identity(0x11);
+    std::fs::write(
+        home.path().join("identity"),
+        encode_identity(&ours).expect("storable"),
+    )
+    .expect("write the identity");
+    let our_address = delivery_address(&ours).expect("our address");
+    let theirs = fixed_identity(0x22);
+    let their_hex: String = delivery_address(&theirs)
+        .expect("their address")
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let script = home.path().join(format!("{name}.script"));
+    let frames = home.path().join(format!("{name}.frames"));
+    std::fs::write(&script, script_text).expect("write the script");
+    let mut args: Vec<String> = vec![
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        daemon.config_dir.path().display().to_string(),
+        "--to".into(),
+        their_hex,
+        "--script".into(),
+        script.display().to_string(),
+        "--frames".into(),
+        frames.display().to_string(),
+        "--size".into(),
+        size.into(),
+    ];
+    args.extend(extra.iter().map(|a| a.to_string()));
+    let child_home = home.path().to_path_buf();
+    let child = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &child_home)
+            .env("LNMSG_DISPLAY_NAME", "tui")
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .env_remove("RUST_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax");
+        child.wait_with_output().expect("wait for loquax")
+    });
+
+    wait_for_frame(&frames, "attached", Duration::from_secs(20)).await;
+    let storage = tempfile::tempdir().expect("their storage");
+    let mut them = attach(AttachConfig {
+        instance: daemon.instance.clone(),
+        config_dir: Some(daemon.config_dir.path().to_path_buf()),
+        storage_dir: storage.path().to_path_buf(),
+        identity: theirs,
+        display_name: b"them".to_vec(),
+        notices: Terminal::new(storage.path().to_path_buf()),
+    })
+    .await
+    .expect("the correspondent attaches");
+    let options = SendOptions::new(daemon.instance.clone(), Duration::from_secs(20));
+    let mut fanout = Fanout::default();
+    for (body, fields) in messages(our_address) {
+        let mut tap = fanout.tap();
+        let clock = Tokio::new();
+        let send = run_send(
+            &mut tap,
+            SendRequest {
+                destination: our_address,
+                title: Vec::new(),
+                body: body.as_bytes().to_vec(),
+                fields,
+                via: Via::Direct,
+            },
+            &options,
+            &clock,
+        );
+        tokio::pin!(send);
+        let sent = loop {
+            tokio::select! {
+                sent = &mut send => break sent,
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {
+                    let _ = fanout.pump(&mut them.outbox);
+                }
+            }
+        };
+        assert!(sent.is_ok(), "{body:?} did not go out: {sent:?}");
+    }
+
+    let output = child.await.expect("the loquax child thread");
+    them.stop().await;
+    let got = std::fs::read_to_string(&frames).expect("read the frames");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{size}: stderr: {}\nframes:\n{got}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let log = std::fs::read_to_string(home.path().join("tui.log")).unwrap_or_default();
+    (without_ids(&got), log)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peers_position_shows_in_the_header_and_its_reports_fold_into_one_line() {
+    let mut all = String::new();
+    for size in ["80x24", "120x40"] {
+        let frames = telemetry_session(size).await;
+        let folded = frame(&frames, "folded");
+        assert_eq!(
+            folded.matches("◎ position 4").count(),
+            1,
+            "{size}: the two reports are one line\n{folded}"
+        );
+        assert!(
+            folded.contains("◎ position 43.77310 N 11.25600 E"),
+            "{size}: the latest\n{folded}"
+        );
+        match size {
+            "80x24" => assert!(folded.contains("pos 4 min"), "{folded}"),
+            _ => assert!(
+                folded.contains("at 43.77310 N 11.25600 E · ±5 m · 4 min ago"),
+                "{folded}"
+            ),
+        }
+        let detail = frame(&frames, "detail");
+        assert!(
+            detail.contains("position  43.77310 N 11.25600 E"),
+            "{size}: {detail}"
+        );
+        assert!(detail.contains("fix       2026-10-26 13:56:00"), "{detail}");
+        all.push_str(&format!("=== {size} ===\n{frames}"));
+    }
+    if all != EXPECTED_TELEMETRY {
+        let kept = std::env::temp_dir().join("loquax-tui-telemetry.frames");
+        let _ = std::fs::write(&kept, &all);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_telemetry.frames\n{all}",
+            kept.display()
+        );
+    }
+}
+
+/// The map session (`docs/src/concepts/loquax-map.md`, slice (c)): the
+/// peer reports its own position and, as a collector, a stream row for a
+/// third peer three hours old and one for us. With the Florence fixture
+/// installed as the only region, `M` fits the three pins on it; `Tab`
+/// moves the selection; a drag that starts on the selected pin moves the
+/// map ten cells left and three up under the pointer and opens nothing;
+/// zooming out past the region's shallowest zoom
+/// to z5 draws the world outline, the coast of Italy and San Marino's
+/// border; `0` fits again; `Enter` opens the selected
+/// peer's conversation; the map again and `Esc` bring the conversation
+/// back.
+const MAP_SCRIPT: &str = "\
+clock 2026-10-26 14:00
+until ready 20
+frame attached
+until received 1 60
+tick 12
+key M
+frame map
+key tab
+frame next pin
+drag 50 11 40 8
+frame dragged
+key -
+key -
+key -
+key -
+key -
+key -
+key -
+key -
+key -
+frame outline
+key 0
+key enter
+frame opened
+key M
+key esc
+frame back
+key enter
+frame from the report
+key esc
+frame report closed
+key q
+";
+
+/// The third peer the stream reports.
+const CAROL: [u8; 16] = [0x33; 16];
+
+fn located(minutes_ago: i64, lat_e6: i32, lon_e6: i32) -> leviculum_lxmf::telemetry::Telemetry {
+    use leviculum_lxmf::telemetry::{Location, Telemetry};
+    let at = TELEMETRY_NOW - minutes_ago * 60;
+    Telemetry {
+        time: Some(at),
+        location: Some(Location {
+            latitude_e6: lat_e6,
+            longitude_e6: lon_e6,
+            altitude_e2: 5_120,
+            speed_e2: 0,
+            bearing_e2: 0,
+            accuracy_e2: 500,
+            last_update: at,
+        }),
+        ..Telemetry::default()
+    }
+}
+
+async fn map_session(graphics: &str) -> (String, String) {
+    map_session_of("map", MAP_SCRIPT, graphics).await
+}
+
+/// The map session's peers and region, `script` played with `--graphics`.
+async fn map_session_of(name: &str, script: &str, graphics: &str) -> (String, String) {
+    use leviculum_lxmf::msgpack::Number;
+    use leviculum_lxmf::telemetry::{encode_stream_field_value, StreamEntry};
+    let install = |home: &Path| {
+        let maps = home.join("maps");
+        std::fs::create_dir_all(&maps).expect("maps dir");
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../leviculum-map/fixtures/firenze.lmr"
+            ),
+            maps.join("firenze.lmr"),
+        )
+        .expect("install the fixture region");
+    };
+    let messages = |ours: [u8; 16]| {
+        let row = |source: [u8; 16], telemetry: Vec<u8>| StreamEntry {
+            source: source.to_vec(),
+            timestamp: Number::Int(TELEMETRY_NOW),
+            telemetry,
+            appearance: None,
+        };
+        let stream = encode_stream_field_value(&[
+            row(CAROL, located(180, 43_776_000, 11_266_000).encode()),
+            row(ours, located(1, 43_774_000, 11_258_000).encode()),
+        ]);
+        let own = vec![
+            (
+                leviculum_lxmf::constants::FIELD_TELEMETRY,
+                located(4, 43_775_000, 11_261_000).encode_field_value(),
+            ),
+            (leviculum_lxmf::constants::FIELD_TELEMETRY_STREAM, stream),
+        ];
+        vec![("", own)]
+    };
+    let flag = format!("--graphics={graphics}");
+    peer_session(name, "80x24", script, &[&flag], install, messages).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_halfblocks() {
+    let mut all = String::new();
+    for graphics in ["braille", "halfblocks"] {
+        let (frames, log) = map_session(graphics).await;
+        let line = log
+            .lines()
+            .find_map(|l| l.find("GRAPHICS ").map(|at| &l[at..]))
+            .unwrap_or_default();
+        assert_eq!(
+            line,
+            format!(
+                "GRAPHICS backend={graphics} reason=forced detected=none between=none cell={} zooms=0-20 \
+                 context=local:unknown",
+                match graphics {
+                    "braille" => "2x4",
+                    _ => "1x2",
+                }
+            ),
+            "{log}"
+        );
+        let map = frame(&frames, "map");
+        assert!(
+            map.contains("● map"),
+            "the map has the pane and the focus\n{map}"
+        );
+        assert!(map.contains("© OpenStreetMap contributors"), "{map}");
+        assert_eq!(
+            map.matches('●').count(),
+            3,
+            "the title's mark and two pins\n{map}"
+        );
+        assert_eq!(map.matches('◉').count(), 1, "the selected pin\n{map}");
+        assert!(map.contains("● you · 1 min"), "{map}");
+        // Tab: the selection moves from the first pin by name to the next.
+        let next = frame(&frames, "next pin");
+        assert!(map.contains("· 3 h ◉") && next.contains("◉ them"), "{next}");
+        assert!(map.contains("· 3 h"), "the stale one with its age\n{map}");
+        // The drag: every pin ten cells left and three up, the map open.
+        let dragged = frame(&frames, "dragged");
+        assert!(dragged.contains("● map"), "nothing opened\n{dragged}");
+        let at = |frame: &str| {
+            frame.lines().enumerate().find_map(|(row, line)| {
+                line.find("◉ them")
+                    .map(|byte| (line[..byte].chars().count(), row))
+            })
+        };
+        let (Some(was), Some(now)) = (at(next), at(dragged)) else {
+            panic!("the selected pin in both\n{next}\n{dragged}");
+        };
+        assert_eq!((was.0 - now.0, was.1 - now.1), (10, 3), "{dragged}");
+        assert!(map.contains("· 4 min"), "{map}");
+        let outline = frame(&frames, "outline");
+        assert!(outline.contains("Natural Earth"), "{outline}");
+        let opened = frame(&frames, "opened");
+        assert!(
+            !opened.contains("● map"),
+            "the conversation is back\n{opened}"
+        );
+        let back = frame(&frames, "back");
+        assert!(
+            !back.contains("Natural Earth") && !back.contains("OpenStreetMap"),
+            "{back}"
+        );
+        // Enter on the report: the map at its fix, the region's deepest
+        // zoom, the sender's pin selected; Esc brings the conversation back.
+        let reported = frame(&frames, "from the report");
+        assert!(reported.contains("● map"), "{reported}");
+        assert!(reported.contains("z15 ·"), "{reported}");
+        assert!(reported.contains("◉ them"), "{reported}");
+        assert_eq!(frame(&frames, "report closed"), back);
+        all.push_str(&format!("=== {graphics} ===\n{frames}"));
+    }
+    if all != EXPECTED_MAP {
+        let kept = std::env::temp_dir().join("loquax-tui-map.frames");
+        let _ = std::fs::write(&kept, &all);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_map.frames\n{all}",
+            kept.display()
+        );
+    }
+}
+
+/// The map's drawing cycled live (1093): opened in octants, `t` steps
+/// through the text techniques in the ladder's order, the title naming each,
+/// `T` steps back, and `g` puts the glyph test over the map. A script
+/// writes no config and reads none, so its frames do not depend on a run
+/// before.
+const MAP_CYCLE_SCRIPT: &str = "\
+clock 2026-10-26 14:00
+until ready 20
+frame attached
+until received 1 60
+tick 12
+key M
+frame octant
+key t
+frame blocks
+key t
+frame halfblocks
+key t
+frame braille-thin
+key t
+frame mosaic
+key t
+frame braille
+key T
+frame back to mosaic
+tick 8
+frame the name gone
+key g
+frame glyph test
+key g
+frame glyph test closed
+key q
+";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_map_drawing_cycles_through_the_text_techniques() {
+    let (frames, log) = map_session_of("mapcycle", MAP_CYCLE_SCRIPT, "octant").await;
+    assert!(
+        log.contains(
+            "GRAPHICS backend=octant reason=forced detected=none between=none cell=2x4 zooms=0-20 \
+             context=local:unknown"
+        ),
+        "{log}"
+    );
+    // The picture's rows: inside the map pane's border, above the credit.
+    let picture = |label: &str| -> String {
+        frame(&frames, label)
+            .lines()
+            .skip(1)
+            .take(18)
+            .map(|l| l.chars().skip(27).take(52).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let octants = |p: &str| {
+        p.chars()
+            .filter(|c| ('\u{1CD00}'..='\u{1CDE5}').contains(c))
+            .count()
+    };
+    let braille = |p: &str| {
+        p.chars()
+            .filter(|c| ('\u{2801}'..='\u{28FF}').contains(c))
+            .count()
+    };
+    let octant = picture("octant");
+    assert!(octants(&octant) > 50, "{octant}");
+    let blocks = picture("blocks");
+    assert_eq!(octants(&blocks), 0, "{blocks}");
+    assert!(
+        blocks
+            .chars()
+            .any(|c| "▘▝▀▖▌▞▛▗▚▐▜▄▙▟▁▂▃▅▆▇▔▎▊".contains(c)),
+        "{blocks}"
+    );
+    let half = picture("halfblocks");
+    assert!(half.chars().filter(|&c| c == '▀').count() > 400, "{half}");
+    let thin = picture("braille-thin");
+    assert!(braille(&thin) > 50 && octants(&thin) == 0, "{thin}");
+    let mosaic = picture("mosaic");
+    assert_eq!(braille(&mosaic) + octants(&mosaic), 0, "{mosaic}");
+    let plain = picture("braille");
+    assert!(braille(&plain) > 50, "{plain}");
+    // The title names each new drawing, until the ticks pass.
+    for (label, name) in [
+        ("blocks", "blocks"),
+        ("halfblocks", "halfblocks"),
+        ("braille-thin", "braille-thin"),
+        ("mosaic", "mosaic"),
+        ("braille", "braille"),
+        ("back to mosaic", "mosaic"),
+    ] {
+        let top = frame(&frames, label).lines().next().unwrap_or_default();
+        assert!(top.contains(&format!("{name} · z14")), "{label}: {top}");
+    }
+    let top = frame(&frames, "octant").lines().next().unwrap_or_default();
+    assert!(top.contains("─ z14 ·"), "named only after a change: {top}");
+    let top = frame(&frames, "the name gone")
+        .lines()
+        .next()
+        .unwrap_or_default();
+    assert!(top.contains("─ z14 ·"), "{top}");
+    // Every frame keeps the pins and the credit.
+    for label in ["octant", "blocks", "braille-thin", "mosaic", "braille"] {
+        let shown = frame(&frames, label);
+        assert!(shown.contains("● you · 1 min"), "{label}\n{shown}");
+        assert!(
+            shown.contains("© OpenStreetMap contributors"),
+            "{label}\n{shown}"
+        );
+    }
+    let test = frame(&frames, "glyph test");
+    assert!(
+        test.contains("glyph test · g closes") && test.contains("octant"),
+        "{test}"
+    );
+    assert!(!frame(&frames, "glyph test closed").contains("glyph test"));
+    if frames != EXPECTED_MAP_CYCLE {
+        let kept = std::env::temp_dir().join("loquax-tui-map-cycle.frames");
+        let _ = std::fs::write(&kept, &frames);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_map_cycle.frames\n{frames}",
+            kept.display()
+        );
+    }
+}
+
+/// The autoload session (1089), against the loopback server serving the
+/// committed fixture `leviculum-mapcut/fixtures/oltrarno.pmtiles`, no maps
+/// installed. The peer reports a position in the fixture's box; `L` opens
+/// the map there over the outline and asks for the place's region, the
+/// title saying so; once it landed the map is fitted to it at z15 and the
+/// streets are drawn. `d` over the place's region says it is loaded
+/// already; zoomed out to z9 the view is wider than the place's box, and
+/// `d` loads it.
+const MAPLOAD_SCRIPT: &str = "\
+clock 2026-10-26 14:00
+until ready 20
+frame attached
+until received 1 60
+tick 12
+key L
+frame before the load
+until map 30
+frame after the load
+key d
+frame held already
+tick 40
+key -
+key -
+key -
+key -
+key -
+key -
+key d
+frame loading the area
+until map 30
+frame the area loaded
+key q
+";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn opening_the_map_at_a_place_loads_its_region_and_the_next_frame_draws_it() {
+    const FIXTURE: &[u8] = include_bytes!("../../leviculum-mapcut/fixtures/oltrarno.pmtiles");
+    let serve = leviculum_mapcut::serve::Serve::start(vec![(
+        "oltrarno.pmtiles".to_string(),
+        FIXTURE.to_vec(),
+    )])
+    .expect("serve the fixture");
+    let source = serve.url("oltrarno.pmtiles");
+    let prepare = move |home: &Path| {
+        std::fs::write(home.join("config"), format!("map_source = {source}\n")).expect("config");
+    };
+    let messages = |_: [u8; 16]| {
+        vec![(
+            "",
+            vec![(
+                leviculum_lxmf::constants::FIELD_TELEMETRY,
+                located(4, 43_747_300, 11_272_000).encode_field_value(),
+            )],
+        )]
+    };
+    let (frames, log) = peer_session(
+        "mapload",
+        "80x24",
+        MAPLOAD_SCRIPT,
+        &["--graphics=braille"],
+        prepare,
+        messages,
+    )
+    .await;
+    let before = frame(&frames, "before the load");
+    assert!(before.contains("· loading map"), "{before}");
+    assert!(
+        before.contains("Natural Earth"),
+        "the outline meanwhile\n{before}"
+    );
+    let after = frame(&frames, "after the load");
+    assert!(
+        after.contains("z15 · 1 in view"),
+        "fitted to the region\n{after}"
+    );
+    assert!(after.contains("© OpenStreetMap contributors"), "{after}");
+    assert!(!after.contains("loading map"), "{after}");
+    assert_ne!(before, after);
+    let held = frame(&frames, "held already");
+    assert!(held.contains("the map here is loaded already"), "{held}");
+    let loading = frame(&frames, "loading the area");
+    assert!(
+        loading.contains("z9 · 1 in view · loading map"),
+        "{loading}"
+    );
+    let lines: Vec<&str> = log
+        .lines()
+        .filter_map(|l| l.find("MAPLOAD ").map(|at| &l[at..]))
+        .collect();
+    let count = |word: &str| lines.iter().filter(|l| l.starts_with(word)).count();
+    assert_eq!(
+        (
+            count("MAPLOAD start"),
+            count("MAPLOAD done"),
+            count("MAPLOAD failed")
+        ),
+        (2, 2, 0),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("MAPLOAD start") && l.contains("reason=place")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("MAPLOAD start") && l.contains("reason=view")),
+        "{lines:#?}"
+    );
+    // Two regions written, each under the autoload's prefix.
+    let files: Vec<&str> = lines
+        .iter()
+        .filter(|l| l.starts_with("MAPLOAD done"))
+        .filter_map(|l| l.split(" file=").nth(1)?.split(' ').next())
+        .collect();
+    assert_eq!(files.len(), 2, "{lines:#?}");
+    assert_ne!(files[0], files[1]);
+    assert!(
+        files
+            .iter()
+            .all(|f| f.starts_with("auto-") && f.ends_with(".lmr")),
+        "{files:?}"
+    );
+    if frames != EXPECTED_MAPLOAD {
+        let kept = std::env::temp_dir().join("loquax-tui-mapload.frames");
+        let _ = std::fs::write(&kept, &frames);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_mapload.frames\n{frames}",
+            kept.display()
+        );
+    }
+}
+
+/// A propagation node on `daemon`: lnpnd's engine at stamp cost 0, no
+/// mailbox of its own, announced at once. The hash, and what keeps it alive.
+async fn propagation_node(
+    daemon: &support::Daemon,
+) -> (
+    [u8; 16],
+    leviculum_std::ReticulumNode,
+    std::sync::mpsc::Receiver<lnpnd::engine::EngineEvent>,
+    tempfile::TempDir,
+) {
+    use lnpnd::engine::{Engine, EngineConfig, EngineEvent};
+    let (engine, events) = Engine::new(EngineConfig {
+        identity: leviculum_std::generate_identity(),
+        node_config: leviculum_lxmf::PropagationNodeConfig {
+            stamp_cost: 0,
+            always_compute_stamp_value: false,
+            ..leviculum_lxmf::PropagationNodeConfig::default()
+        },
+        store: leviculum_lxmf::MemoryPropagationStore::new(64_000),
+        announce_interval_secs: 3600,
+        announce_delay_secs: 0,
+        announce_at_start: false,
+        peering: leviculum_lxmf::PeeringConfig::default(),
+        peer_store: Box::new(leviculum_lxmf::MemoryPeerStore::default()),
+        control_allowed: Vec::new(),
+        auth_allowed: None,
+        mailbox: None,
+        store_limit_bytes: 64_000,
+        delivery_limit_kb: 1000,
+    });
+    let storage = tempfile::tempdir().expect("pn storage");
+    let mut node = lnpnd::node_builder(engine, storage.path().to_path_buf())
+        .connect_to_shared_instance(&daemon.instance)
+        .build()
+        .await
+        .expect("build the propagation node");
+    node.start().await.expect("attach the propagation node");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let hash = loop {
+        match events.try_recv() {
+            Ok(EngineEvent::Ready { destination_hash }) => break destination_hash,
+            Ok(_) => {}
+            Err(_) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "the propagation node never got ready"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    };
+    (hash, node, events, storage)
+}
+
+/// One `loquax` CLI run against `daemon` from `home`, with `stdin`.
+async fn cli(
+    daemon: &support::Daemon,
+    home: &Path,
+    args: &[&str],
+    stdin: &[u8],
+) -> std::process::Output {
+    let mut all: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    all.extend([
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        daemon.config_dir.path().display().to_string(),
+    ]);
+    let (home, stdin) = (home.to_path_buf(), stdin.to_vec());
+    tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&all)
+            .env("LNMSG_HOME", &home)
+            .env("LEVICULUM_EVENT_LOG", home.join("events.log"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax");
+        if let Some(mut pipe) = child.stdin.take() {
+            std::io::Write::write_all(&mut pipe, &stdin).expect("write stdin");
+        }
+        child.wait_with_output().expect("wait for loquax")
+    })
+    .await
+    .expect("the loquax child thread")
+}
+
+/// Leave `body` at the node for `to`, as `loquax send --via propagated`
+/// does: exit 3, the node holds it.
+async fn deposit(daemon: &support::Daemon, home: &Path, to: &str, pn: &str, body: &str) {
+    let args = [
+        "send",
+        to,
+        "--via",
+        "propagated",
+        "--pn",
+        pn,
+        "--timeout",
+        "20",
+    ];
+    let sent = cli(daemon, home, &args, body.as_bytes()).await;
+    assert_eq!(
+        sent.status.code(),
+        Some(3),
+        "the node must hold {body:?}: {}\nevents:\n{}",
+        String::from_utf8_lossy(&sent.stderr),
+        std::fs::read_to_string(home.join("events.log")).unwrap_or_default()
+    );
+}
+
+/// The window the second message must arrive in, from the first one's
+/// frame: well inside the thirty-second bound, which the start's sync set
+/// running before the first frame, and above the four-second cadence plus a
+/// deposit and a drain on a loaded host.
+const ACTIVITY_SCRIPT: &str = "\
+until ready 20
+until received 1 30
+frame first
+until received 2 20
+frame second
+key q
+";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_left_at_the_mailbox_arrives_without_a_key() {
+    let daemon = daemon("sync", |b| b).await;
+    let (pn, _node, _events, _pn_storage) = propagation_node(&daemon).await;
+    let pn_hex: String = pn.iter().map(|b| format!("{b:02x}")).collect();
+    let home = tempfile::tempdir().expect("tui home");
+    let ours = fixed_identity(0x11);
+    std::fs::write(
+        home.path().join("identity"),
+        encode_identity(&ours).expect("storable"),
+    )
+    .expect("write the identity");
+    let our_hex: String = delivery_address(&ours)
+        .expect("our address")
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let sender = tempfile::tempdir().expect("sender home");
+
+    // We, attached in this process for the first deposit: the sender needs
+    // our announce to encrypt to us, and the daemon forgets the path of a
+    // client that has gone, so a CLI run of ours that announced and left
+    // would not do.
+    let storage = tempfile::tempdir().expect("our storage");
+    let early = attach(AttachConfig {
+        instance: daemon.instance.clone(),
+        config_dir: Some(daemon.config_dir.path().to_path_buf()),
+        storage_dir: storage.path().to_path_buf(),
+        identity: fixed_identity(0x11),
+        display_name: b"tui".to_vec(),
+        notices: Terminal::new(storage.path().to_path_buf()),
+    })
+    .await
+    .expect("we attach");
+    deposit(
+        &daemon,
+        sender.path(),
+        &our_hex,
+        &pn_hex,
+        "waiting before the start",
+    )
+    .await;
+    early.stop().await;
+
+    let script = home.path().join("sync.script");
+    let frames = home.path().join("sync.frames");
+    std::fs::write(&script, ACTIVITY_SCRIPT).expect("write the script");
+    let args: Vec<String> = vec![
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        daemon.config_dir.path().display().to_string(),
+        "--pn".into(),
+        pn_hex.clone(),
+        "--timeout".into(),
+        "5".into(),
+        "--sync-interval".into(),
+        "30s".into(),
+        "--script".into(),
+        script.display().to_string(),
+        "--frames".into(),
+        frames.display().to_string(),
+        "--size".into(),
+        "120x24".into(),
+    ];
+    let child_home = home.path().to_path_buf();
+    let child = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &child_home)
+            .env("LNMSG_DISPLAY_NAME", "tui")
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .env_remove("RUST_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax");
+        child.wait_with_output().expect("wait for loquax")
+    });
+
+    wait_for_frame(&frames, "first", Duration::from_secs(60)).await;
+    deposit(
+        &daemon,
+        sender.path(),
+        &our_hex,
+        &pn_hex,
+        "left while it runs",
+    )
+    .await;
+
+    let output = child.await.expect("the loquax child thread");
+    let got = std::fs::read_to_string(&frames).expect("read the frames");
+    let log = std::fs::read_to_string(home.path().join("tui.log")).unwrap_or_default();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}\nframes:\n{got}\ntui.log:\n{log}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let second = frame(&got, "second");
+    assert!(
+        second.contains("waiting before the start") && second.contains("left while it runs"),
+        "{second}"
+    );
+    let syncs: Vec<&str> = log
+        .lines()
+        .filter_map(|line| line.split("SYNC reason=").nth(1))
+        .collect();
+    assert!(log.contains("SYNC bound=30s"), "{log}");
+    assert_eq!(syncs.first(), Some(&"start"), "{log}");
+    assert!(
+        syncs[1..].iter().all(|r| *r == "timer"),
+        "no key, no announce: {log}"
+    );
+    assert!(syncs.len() >= 2, "{log}");
+    // Every sync's end is in the log, with what it brought (leviculum 1072).
+    assert!(
+        log.contains("SYNC done reason=start result=ok new=1 elapsed_ms="),
+        "{log}"
+    );
+}
+
+/// A propagation node that is announced and never answers a link: a bare
+/// `lxmf.propagation` destination on a client of `daemon`, registered with
+/// inbound links declined. A drain against it asks for the link until the
+/// link's establishment timeout, as against a node five hops out whose link
+/// proofs are lost. The hash, and what keeps it alive.
+async fn silent_propagation_node(
+    daemon: &support::Daemon,
+) -> ([u8; 16], leviculum_std::ReticulumNode, tempfile::TempDir) {
+    use leviculum_core::{Destination, DestinationHash, DestinationType, Direction};
+    let storage = tempfile::tempdir().expect("silent pn storage");
+    let mut node = leviculum_std::driver::ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .connect_to_shared_instance(&daemon.instance)
+        .storage_path(storage.path().to_path_buf())
+        .build_sync()
+        .expect("build the silent pn client");
+    node.start().await.expect("attach the silent pn client");
+    let mut destination = Destination::new(
+        Some(leviculum_std::generate_identity()),
+        Direction::In,
+        DestinationType::Single,
+        "lxmf",
+        &["propagation"],
+    )
+    .expect("propagation destination");
+    destination.set_accepts_links(false);
+    let hash: DestinationHash = *destination.hash();
+    node.register_destination(destination);
+    let app_data = leviculum_lxmf::propagation::PropagationNodeAnnounce {
+        legacy_support: false,
+        timebase: 0,
+        enabled: true,
+        transfer_limit_kb: 256,
+        sync_limit_kb: 10_240,
+        stamp_cost: 0,
+        stamp_cost_flexibility: 0,
+        peering_cost: 0,
+        metadata: Vec::new(),
+    }
+    .encode()
+    .expect("encode the announce");
+    node.announce_destination(&hash, Some(&app_data))
+        .await
+        .expect("announce");
+    (*hash.as_bytes(), node, storage)
+}
+
+/// A fetch against a node that never answers is running when a message is
+/// sent: the send's direct leg must start at once, not when the fetch gives
+/// up (leviculum 1072). `until leg direct 3` is the bound: the link to the
+/// silent node takes its establishment timeout, over ten seconds, to fail.
+const STALLED_FETCH_SCRIPT: &str = "\
+until ready 20
+key :
+type fetch
+key enter
+key enter
+key i
+type while the mailbox stalls
+key enter
+until leg direct 3
+frame sending
+until delivery delivered 30
+frame delivered
+key esc
+key q
+";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_does_not_wait_behind_a_fetch_that_stalls() {
+    let daemon = daemon("tui-stall", |b| b).await;
+    let (silent, _silent_node, _silent_storage) = silent_propagation_node(&daemon).await;
+    let silent_hex: String = silent.iter().map(|b| format!("{b:02x}")).collect();
+    let home = tempfile::tempdir().expect("tui home");
+    std::fs::write(
+        home.path().join("identity"),
+        encode_identity(&fixed_identity(0x11)).expect("storable"),
+    )
+    .expect("write the identity");
+    let theirs = fixed_identity(0x22);
+    let their_hex: String = delivery_address(&theirs)
+        .expect("their address")
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+
+    let script = home.path().join("stall.script");
+    let frames = home.path().join("stall.frames");
+    std::fs::write(&script, STALLED_FETCH_SCRIPT).expect("write the script");
+    let args: Vec<String> = vec![
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        daemon.config_dir.path().display().to_string(),
+        "--to".into(),
+        their_hex.clone(),
+        "--pn".into(),
+        silent_hex,
+        "--timeout".into(),
+        "15".into(),
+        "--script".into(),
+        script.display().to_string(),
+        "--frames".into(),
+        frames.display().to_string(),
+        "--size".into(),
+        "80x16".into(),
+    ];
+    let child_home = home.path().to_path_buf();
+    let child = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &child_home)
+            .env("LNMSG_DISPLAY_NAME", "tui")
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .env_remove("RUST_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax");
+        child.wait_with_output().expect("wait for loquax")
+    });
+
+    // The correspondent appears once the send runs, as in the late session.
+    let storage = tempfile::tempdir().expect("their storage");
+    let mut them = None;
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while !child.is_finished() && Instant::now() < deadline {
+        let text = std::fs::read_to_string(&frames).unwrap_or_default();
+        if text.contains(": sending ---") {
+            them = Some(
+                attach(AttachConfig {
+                    instance: daemon.instance.clone(),
+                    config_dir: Some(daemon.config_dir.path().to_path_buf()),
+                    storage_dir: storage.path().to_path_buf(),
+                    identity: theirs,
+                    display_name: b"them".to_vec(),
+                    notices: Terminal::new(storage.path().to_path_buf()),
+                })
+                .await
+                .expect("the correspondent attaches"),
+            );
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let output = child.await.expect("the loquax child thread");
+    if let Some(them) = them {
+        them.stop().await;
+    }
+    let got = std::fs::read_to_string(&frames).unwrap_or_default();
+    let log = std::fs::read_to_string(home.path().join("tui.log")).unwrap_or_default();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the send waited behind the fetch: stderr: {}\nframes:\n{got}\ntui.log:\n{log}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The fetch was still running when the send went: it began before the
+    // send and had not ended when the send's direct leg started.
+    let fetch_at = log.find("SYNC reason=key").expect("the fetch began");
+    let send_at = log.find("SEND leg=direct").expect("the send began");
+    assert!(fetch_at < send_at, "{log}");
+    assert!(
+        log.find("SYNC done").is_none_or(|done| done > send_at),
+        "the fetch had ended before the send began: {log}"
+    );
+}
+
+/// A fetch that fails says so in `tui.log`, with the reason it began for,
+/// the failure's first line and how long it took (leviculum 1072): before,
+/// only the start was logged, and a sync that ran its whole budget into a
+/// failure left no trace. A node never heard has no path, and the drain asks
+/// for one until its budget, four seconds at `--timeout 2`, runs out.
+const FAILED_FETCH_SCRIPT: &str = "\
+until ready 20
+key :
+type fetch
+key enter
+sleep 7000
+key q
+";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_fetch_leaves_its_end_in_the_log() {
+    let daemon = daemon("tui-fail", |b| b).await;
+    let home = tempfile::tempdir().expect("tui home");
+    std::fs::write(
+        home.path().join("identity"),
+        encode_identity(&fixed_identity(0x11)).expect("storable"),
+    )
+    .expect("write the identity");
+    let script = home.path().join("fail.script");
+    let frames = home.path().join("fail.frames");
+    std::fs::write(&script, FAILED_FETCH_SCRIPT).expect("write the script");
+    let args: Vec<String> = vec![
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        daemon.config_dir.path().display().to_string(),
+        "--pn".into(),
+        "5e".repeat(16),
+        "--timeout".into(),
+        "2".into(),
+        "--script".into(),
+        script.display().to_string(),
+        "--frames".into(),
+        frames.display().to_string(),
+        "--size".into(),
+        "80x16".into(),
+    ];
+    let child_home = home.path().to_path_buf();
+    let output = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &child_home)
+            .env("LNMSG_DISPLAY_NAME", "tui")
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .env_remove("RUST_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax");
+        child.wait_with_output().expect("wait for loquax")
+    })
+    .await
+    .expect("the loquax child thread");
+    let log = std::fs::read_to_string(home.path().join("tui.log")).unwrap_or_default();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}\ntui.log:\n{log}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let done = log
+        .lines()
+        .find_map(|line| line.split("SYNC done ").nth(1))
+        .unwrap_or_else(|| panic!("no SYNC done line: {log}"));
+    assert!(
+        done.starts_with("reason=key result=failed detail=\"the mailbox sync failed: no path"),
+        "{done}"
+    );
+    let elapsed: u64 = done
+        .rsplit("elapsed_ms=")
+        .next()
+        .and_then(|ms| ms.trim().parse().ok())
+        .unwrap_or_else(|| panic!("no elapsed_ms: {done}"));
+    assert!((2_000..7_000).contains(&elapsed), "{done}");
+}
+
+/// A sender loquax has never heard (leviculum 1079): it attaches and
+/// announces before loquax starts, so its announce never reaches loquax, and
+/// `--pn` keeps the start from replaying the daemon's path table. Its message
+/// arrives with no key to check it against, and turns verified once loquax
+/// has asked for the key.
+const UNHEARD_SCRIPT: &str = "\
+until ready 20
+frame attached
+key enter
+until received 1 30
+until verified 1 15
+frame verified
+key esc
+key q
+";
+
+/// A message from a sender loquax has not heard turns verified, under the
+/// sender's announced name, once loquax has asked for the sender's key.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_from_an_unheard_sender_is_verified_once_its_key_arrives() {
+    let daemon = daemon("tui-unheard", |b| b).await;
+    let home = tempfile::tempdir().expect("tui home");
+    let ours = fixed_identity(0x11);
+    std::fs::write(
+        home.path().join("identity"),
+        encode_identity(&ours).expect("storable"),
+    )
+    .expect("write the identity");
+    let our_address = delivery_address(&ours).expect("our address");
+    let theirs = fixed_identity(0x22);
+    let their_address = delivery_address(&theirs).expect("their address");
+
+    // The sender first: its one announce reaches the daemon before loquax
+    // is there to hear it.
+    let storage = tempfile::tempdir().expect("their storage");
+    let mut them = attach(AttachConfig {
+        instance: daemon.instance.clone(),
+        config_dir: Some(daemon.config_dir.path().to_path_buf()),
+        storage_dir: storage.path().to_path_buf(),
+        identity: theirs,
+        display_name: b"them".to_vec(),
+        notices: Terminal::new(storage.path().to_path_buf()),
+    })
+    .await
+    .expect("the sender attaches");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !daemon
+        .node
+        .has_path(&leviculum_core::DestinationHash::new(their_address))
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the daemon never heard the sender"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let script = home.path().join("unheard.script");
+    let frames = home.path().join("unheard.frames");
+    std::fs::write(&script, UNHEARD_SCRIPT).expect("write the script");
+    let args: Vec<String> = vec![
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        daemon.config_dir.path().display().to_string(),
+        "--pn".into(),
+        "5e".repeat(16),
+        "--script".into(),
+        script.display().to_string(),
+        "--frames".into(),
+        frames.display().to_string(),
+        "--size".into(),
+        "120x24".into(),
+    ];
+    let child_home = home.path().to_path_buf();
+    let child = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &child_home)
+            .env("LNMSG_DISPLAY_NAME", "tui")
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .env_remove("RUST_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax");
+        child.wait_with_output().expect("wait for loquax")
+    });
+
+    wait_for_frame(&frames, "attached", Duration::from_secs(20)).await;
+    let options = SendOptions::new(daemon.instance.clone(), Duration::from_secs(20));
+    let mut fanout = Fanout::default();
+    let mut tap = fanout.tap();
+    let clock = Tokio::new();
+    let send = run_send(
+        &mut tap,
+        SendRequest {
+            destination: our_address,
+            title: Vec::new(),
+            body: b"you have not heard of me".to_vec(),
+            fields: Vec::new(),
+            via: Via::Direct,
+        },
+        &options,
+        &clock,
+    );
+    tokio::pin!(send);
+    let sent = loop {
+        tokio::select! {
+            sent = &mut send => break sent,
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {
+                let _ = fanout.pump(&mut them.outbox);
+            }
+        }
+    };
+    assert!(sent.is_ok(), "the message did not go out: {sent:?}");
+
+    let output = child.await.expect("the loquax child thread");
+    them.stop().await;
+    let got = std::fs::read_to_string(&frames).expect("read the frames");
+    let log = std::fs::read_to_string(home.path().join("tui.log")).unwrap_or_default();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}\nframes:\n{got}\ntui.log:\n{log}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // It arrived unverified: the engine asked for the sender's path, and
+    // checked the signature once the answer brought the key.
+    let source = their_address[..4]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    assert!(
+        log.contains(&format!(
+            "VERIFY path_request src={source} held=1 requests=1"
+        )),
+        "{log}"
+    );
+    assert!(
+        log.lines().any(
+            |line| line.contains(&format!("VERIFY result src={source} id="))
+                && line.ends_with("verdict=valid")
+        ),
+        "{log}"
+    );
+    let verified = frame(&got, "verified");
+    assert!(
+        !verified.contains("unverified") && verified.contains("them"),
+        "the block did not turn verified under the sender's name:\n{verified}\ntui.log:\n{log}"
+    );
+}

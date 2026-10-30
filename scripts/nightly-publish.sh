@@ -19,6 +19,7 @@
 #   scripts/deb-stamp.sh                 build id and versions, from HEAD
 #   scripts/build-deb.sh amd64 | arm64   the .debs and the heapacct variants
 #   scripts/lnflash-bundle.sh            the firmware bundle, firmware built
+#   scripts/build-lnflash-deb.sh         the lnflash .deb, from that bundle
 #   scripts/build-docs-tarball.sh        the book
 #   scripts/collect-nightly-debs.sh      everything staged into dist/
 #   scripts/publish-site.sh              leviculum.network/releases/nightly/
@@ -190,6 +191,7 @@ else
     # As the forge's build-lnflash step: no SKIP_FIRMWARE, so the bundle's
     # image is built from this commit.
     bash scripts/lnflash-bundle.sh
+    bash scripts/build-lnflash-deb.sh
     bash scripts/build-docs-tarball.sh
     bash scripts/collect-nightly-debs.sh
     mkdir -p "$(dirname "$BUILT_STAMP")"

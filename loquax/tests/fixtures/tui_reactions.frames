@@ -1,0 +1,75 @@
+--- two reactions ---
+┌  Loquax (attaching)────┐┌  <4f4f4f4f…>  unknown───────── no propagation node ┐
+│▌<4f4f4f4f…>      12:01 ││                                                    │
+│▌reacted ❤️              ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││ lunch at noon?  12:01                              │
+│                        ││                                                    │
+│                        ││                      yes, the usual place  12:01 ✓ │
+│                        ││                                             👍   ❤️  │
+│                        │├● to <4f4f4f4f…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+--- picker ---
+┌  Loquax (attaching)────┐┌● <4f4f4f4f…>  unknown───────── no propagation node ┐
+│▌<4f4f4f4f…>      12:01 ││                                                    │
+│▌reacted ❤️         ┌ commands ────────────────────────────┐                   │
+│                   │>                                     │                   │
+│                   │react to: lunch at noon?              │                   │
+│                   │1 👍   2 ❤️   3 😂   4 😮   5 😢   6 😡     │                   │
+│                   │a digit, or type one and Enter        │                   │
+│                   └──────────────────────────────────────┘                   │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││▌lunch at noon?  12:01                              │
+│                        ││                                                    │
+│                        ││                      yes, the usual place  12:01 ✓ │
+│                        ││                                             👍   ❤️  │
+│                        │├  to <4f4f4f4f…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter run │ Esc close
+--- ours ---
+┌  Loquax (attaching)────┐┌● <4f4f4f4f…>  unknown───────── no propagation node ┐
+│▌<4f4f4f4f…>      12:01 ││                                                    │
+│▌you reacted 👍          ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││▌lunch at noon?  12:01                              │
+│                        ││ [👍 ]                                               │
+│                        ││                                                    │
+│                        ││                      yes, the usual place  12:01 ✓ │
+│                        ││                                             👍   ❤️  │
+│                        │├  to <4f4f4f4f…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit

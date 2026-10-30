@@ -49,6 +49,7 @@ import argparse
 import difflib
 import hashlib
 import json
+import re
 import subprocess
 import sys
 import tomllib
@@ -79,26 +80,67 @@ class Graph:
         self.blurb = blurb
 
 
+# Every feature a package build turns on: loquax/tui is build-deb.sh's
+# FEATURES, the heap-accounting pair its rebuild of lnsd and lnpnd for the
+# heap-accounting variants.
+HOST_FEATURES = [
+    "loquax/tui",
+    "leviculum-cli/heap-accounting",
+    "lnpnd/heap-accounting",
+]
+BUILD_DEB = ROOT / "scripts" / "build-deb.sh"
+
+
+def deb_features_covered():
+    """Fail when build-deb.sh packages a feature the harvest leaves out.
+
+    The harvest list above is a second statement of what the packages are
+    built with. This keeps it honest against the first: a feature added to
+    build-deb.sh's FEATURES array and not here would ship crates without
+    their notices, the gap qrcodegen fell into (1124).
+    """
+    match = re.search(r"^FEATURES=\((.*)\)$", BUILD_DEB.read_text(), re.M)
+    if match is None:
+        raise SystemExit(f"error: no FEATURES=(...) line in {BUILD_DEB.relative_to(ROOT)}")
+    words = match.group(1).split()
+    shipped = {f for w, f in zip(words, words[1:]) if w == "--features"}
+    for word in shipped:
+        missing = set(word.split(",")) - set(HOST_FEATURES)
+        if missing:
+            raise SystemExit(
+                f"error: {BUILD_DEB.relative_to(ROOT)} builds the packages with "
+                f"{', '.join(sorted(missing))}, which HOST_FEATURES in "
+                f"scripts/gen-notices.py does not harvest"
+            )
+
+
 GRAPHS = [
     Graph(
         key="host",
         title="PART 1 — host binaries",
         manifest="Cargo.toml",
         config="about.toml",
-        # --workspace rather than one run per published package: the four
-        # published crates (leviculum-cli, lnomad, lblogd, lnflash) share
-        # nearly their whole graph, and four runs would have to be merged
-        # by hand afterwards. The extra members this pulls in
-        # (leviculum-proxy, leviculum-lxmf-node, lnmsg, leviculum-ffi) add
+        # --workspace rather than one run per published package: the six
+        # published crates (leviculum-cli, lnomad, lblogd, lnpnd, loquax,
+        # lnflash) share nearly their whole graph, and six runs would have
+        # to be merged by hand afterwards. The extra members this pulls in
+        # (leviculum-proxy, leviculum-lxmf-node, leviculum-ffi) add
         # crates that are not in any published binary today — an
         # over-inclusive notice list, which is harmless, and which stays
         # correct on the day one of them starts shipping.
-        extra_args=["--workspace"],
-        feature_args=[],
+        #
+        # Default features alone are not what ships: the packages are built
+        # with the features below (scripts/build-deb.sh), and a crate only
+        # one of them pulls in (qrcodegen behind loquax `tui`, backtrace
+        # behind `heap-accounting`) is inside a shipped binary all the
+        # same. `deb_features_covered` fails the run when build-deb.sh's
+        # FEATURES array names one this list lacks.
+        extra_args=["--workspace", "--features", " ".join(HOST_FEATURES)],
+        feature_args=["--features", ",".join(HOST_FEATURES)],
         blurb=(
-            "Linked into lnsd, lnstest, lncp, lnstatus, lnomad, lblogd and\n"
-            "lnflash. Built for x86_64-unknown-linux-musl and\n"
-            "aarch64-unknown-linux-musl."
+            "Linked into lnsd, lnstest, lncp, lnstatus, lnprobe, lnpath,\n"
+            "lnomad, lblogd, lnpnd, loquax and lnflash. Built for\n"
+            "x86_64-unknown-linux-musl and aarch64-unknown-linux-musl."
         ),
     ),
     Graph(
@@ -367,6 +409,7 @@ def render(graph, inventory):
 
 
 def build():
+    deb_features_covered()
     parts = [HEADER]
     for graph in GRAPHS:
         parts.append(render(graph, harvest(graph)))

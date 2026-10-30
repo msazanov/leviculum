@@ -326,10 +326,12 @@ rnode-chip-offsets:
 nrf-shellcheck:
     shellcheck -x leviculum-nrf/tools/*.sh scripts/flash-lnodes-from-head.sh \
         scripts/debug-witness.sh scripts/test-debug-witness.sh \
+        scripts/rig-cell.sh scripts/test-rig-cell.sh \
         scripts/device-watchdog.sh scripts/test-device-watchdog.sh \
         scripts/run-tier3-hw.sh scripts/tier3-hw-selftest.sh \
         scripts/run-tier2.sh scripts/run-tier3.sh \
         scripts/lock-contention.sh scripts/test-lock-contention.sh \
+        scripts/tmp-leftovers.sh scripts/test-tmp-leftovers.sh \
         scripts/check-nrf-evt-max-size.sh \
         scripts/check-nrf-store-gap.sh \
         scripts/check-nrf-board-pins.sh \
@@ -353,6 +355,7 @@ nrf-shellcheck:
         packaging/site/lev-receive-nightly packaging/site/lev-unpack-docs scripts/test-site-unpack-docs.sh scripts/build-docs-tarball.sh \
         scripts/collect-nightly-debs.sh scripts/test-collect-nightly-debs.sh \
         scripts/deb-stamp.sh scripts/test-deb-stamp.sh scripts/build-deb.sh scripts/lnflash-bundle.sh \
+        scripts/build-lnflash-deb.sh \
         scripts/t1000e-dfu-package.sh \
         scripts/test-lnflash-bundle.sh \
         scripts/rnode-flash.sh scripts/check-rnode-chip-offsets.sh \
@@ -361,7 +364,7 @@ nrf-shellcheck:
         scripts/run-fuzz.sh scripts/test-run-fuzz.sh \
         scripts/check-tree-clean.sh scripts/test-tree-clean.sh \
         scripts/test-just-sweep.sh \
-        scripts/check-firmware-images.sh
+        scripts/check-firmware-images.sh scripts/check-embassy-pins.sh scripts/test-log-diff-mask.sh scripts/check-firmware-no-hal.sh scripts/check-firmware-no-chip.sh
 
 # The tier-3 debug-port witness (Codeberg #353). Two boards on the rig have
 # reset themselves mid-run for months and every occurrence was closed as
@@ -379,9 +382,15 @@ nrf-shellcheck:
 # own per-scenario board reset — a real USB disconnect we ordered — was counted
 # as a device failure (Codeberg #65). Both are injected there as failures and
 # asserted not to fire.
+#
+# scripts/test-rig-cell.sh joins it for the single-cell bench runner, which
+# brings the same boards' readers back after its cell: a board whose link is
+# late must be waited for and one that never returns must be named, and the
+# runner it replaced skipped both silently.
 [doc('Drive the debug-port witness and device watchdog without a rig')]
 hw-witness:
     bash scripts/test-debug-witness.sh
+    bash scripts/test-rig-cell.sh
     bash scripts/test-device-watchdog.sh
     bash scripts/tier3-hw-selftest.sh
 
@@ -602,6 +611,36 @@ m0-build-gate:
 lxmf-embedded-gate:
     rustup target add thumbv7em-none-eabihf
     cargo build -p leviculum-lxmf --target thumbv7em-none-eabihf --no-default-features
+
+# Codeberg #219: lnomad's browser core (lnomad/src/app/) does not know it has
+# a terminal, so a GUI or the M9 is a second frontend over it, not a rework
+# (docs/src/concepts/loquax-architecture.md, "the core must not know it has a
+# terminal"). The static half reads the core's sources and lnomad's resolved
+# graph without the `tui` feature, after refusing an injected ratatui import
+# and tui-input's default features on a temp copy; ~1 s, no build, in `guards`.
+# The full recipe adds clippy over that configuration, which compiles
+# leviculum-std for the host and so stays out of `guards`.
+[doc('Check the lnomad core names no terminal crate (static half)')]
+lnomad-core-no-tui-static:
+    @bash scripts/check-lnomad-core-no-tui.sh --static
+
+[doc('Check the lnomad core builds and lints without its terminal frontend')]
+lnomad-core-no-tui: lnomad-core-no-tui-static
+    @bash scripts/check-lnomad-core-no-tui.sh --build
+
+# 984, Codeberg #475: leviculum-ui is the terminal-free half of the UI lnomad
+# and loquax share, so a core that takes its types stays terminal-free. The
+# same two checks as above, over the crate alone: the static half reads
+# leviculum-ui/src/ and its resolved graph with every feature, after refusing
+# an injected ratatui import and tui-input's default features on a temp copy;
+# ~1 s, no build, in `guards`. The full recipe adds clippy over the crate.
+[doc('Check leviculum-ui names no terminal crate (static half)')]
+ui-no-terminal-static:
+    @bash scripts/check-lnomad-core-no-tui.sh --ui-static
+
+[doc('Check leviculum-ui builds and lints with no terminal crate')]
+ui-no-terminal: ui-no-terminal-static
+    @bash scripts/check-lnomad-core-no-tui.sh --ui-build
 
 # Codeberg #303: run the leviculum-core lib suite on a 32-bit `usize`.
 #
@@ -1334,7 +1373,10 @@ tree-clean-selftest:
 # free-rides: the worst are `nrf-shellcheck` 5.6 s, `check-supervised-spawns`
 # 3.1 s, `nrf-fw-readback` 2.4 s. `check-fuzz-lock` (#442) came later: 0.11 s,
 # `cargo metadata --locked` over the two fuzz crates, the lock half of
-# `fuzz-regress` (110 s, below).
+# `fuzz-regress` (110 s, below). `loquax-core-no-std` (#232) is in on the
+# same ground as `m0-build-gate`: one crate for the firmware triple, 0.76 s
+# alone after `touch leviculum-core/src/lib.rs`, 0.15 s warm (2026-10-25);
+# `map-core-no-std` (#474) likewise, 1.5 s and 0.08 s (2026-10-27).
 #
 # NOT a tier. Tiers nest (`standard` contains `fast`); `guards` is a strict
 # subset of `fast` and adds nothing to it, so a green `guards` is a cheap
@@ -1384,6 +1426,12 @@ tree-clean-selftest:
 #   anywhere in the workspace: `just event-catalog`. 631 added
 #   ANN_QUEUE_STALE in leviculum-core, ran that crate's tests green, and the
 #   red arrived on the land gate on 38ed5816.
+# not-in-guards: lnomad-core-no-tui -- clippy over lnomad without its `tui`
+#   feature, a host build of leviculum-std (clause b): 8.5 s standing alone
+#   after touching lnomad/src/app/, 8.6 s after leviculum-core (measured
+#   2026-10-25). Its static half, lnomad-core-no-tui-static, is in.
+# not-in-guards: ui-no-terminal -- clippy over leviculum-ui (clause b), a
+#   build; its static half, ui-no-terminal-static, is in.
 # not-in-guards: i686-usize-gate -- 66 s (#316), the core suite on a second triple
 # not-in-guards: no-atomic64-gate -- a cargo check on a third triple, which it
 #   installs itself
@@ -1441,7 +1489,7 @@ tree-clean-selftest:
 #   run all still ahead of it. The `~3.5 min` in the recipe's own doc
 #   string is older than half the dependency list.
 [doc('The coder-pass gate: every guard in `fast` that costs under 10 s')]
-guards: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports check-ignored-source check-just-docs check-guards-subset check-standard-integ check-config-table-citations prepush-guard nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck check-fuzz-lock changelog-links m0-build-gate lxmf-embedded-gate check-source-invariant-census
+guards: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports check-ignored-source check-just-docs check-guards-subset check-standard-integ check-config-table-citations prepush-guard nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach check-fuzz-lock changelog-links loquax-name m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-tui-static ui-no-terminal-static check-source-invariant-census
 
 # Tier 0 (~3.5 min, runs on every git push): submodule pins + commit-message
 # trailers + the single-integ-bin-list guard (#310)
@@ -1473,7 +1521,7 @@ guards: tree-snapshot tree-clean-selftest check-submodules check-third-party che
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports check-ignored-source check-just-docs check-guards-subset check-standard-integ check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf lint-lr11xx nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links core-no-tracing lnsd-minimal event-catalog m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests tmp-leftovers
+fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports check-ignored-source check-just-docs check-guards-subset check-standard-integ check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf lint-lr11xx nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links loquax-name core-no-tracing lnsd-minimal event-catalog m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-tui ui-no-terminal i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests tmp-leftovers
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
@@ -1584,6 +1632,7 @@ ci-gate:
     {{manifest}} ci-gate-workspace-lib -- cargo test --workspace --lib
     {{just_executable()}} build-integ-bins
     bash scripts/ci-gate-integ.sh
+    {{just_executable()}} loquax-tui
 
 # First run after a fresh CARGO_TARGET_DIR: 20-40 min. Nothing triggers this
 # automatically: it is typed once per batch. A post-commit hook detached it
@@ -1596,14 +1645,14 @@ ci-gate:
 # Note on `--tests` targets: Tier 0 runs `--lib` only, so a crate's
 # tests/ directory is covered here or nowhere. Until #408 this recipe named
 # its suites one at a time and 94 of 139 targets were in no line of it;
-# lnmsg's python_interop was red on master for eight commits while two land
+# loquax's python_interop was red on master for eight commits while two land
 # gates passed it (401). The lines below are the suites that need a flag, a
 # `-p` feature set or a manifest of their own; scripts/standard-integ.sh runs
 # every other target in the tree, computed rather than named, and
 # scripts/standard-integ-elsewhere.txt is the list of what it leaves to these
 # lines. check-standard-integ (in `guards`) keeps that list honest.
 [doc('Tier 1 (~15 min): fast plus the integration suites')]
-standard: fast test-ffi verify-packaging
+standard: fast test-ffi verify-packaging loquax-tui
     {{manifest}} core-tests -- cargo test -p leviculum-core --tests
     # ~4 s: node_integ builds an in-process daemon + IPC + blog node, which
     # is too slow for the Tier 0 push gate but trivial here.
@@ -1661,8 +1710,8 @@ standard: fast test-ffi verify-packaging
 # re-hardlinks it from deps/ without relinking, keeping the old mtime.
 [doc('Build the release binaries periculum mounts into its containers')]
 build-integ-bins:
-    find leviculum-cli/src leviculum-proxy/src leviculum-lxmf-node/src lnpnd/src lnmsg/src -name '*.rs' -exec touch {} +
-    cargo build --release --bin lnsd --bin lnstest --bin lncp --bin lnstatus --bin lnprobe --bin lnpath --bin lora-proxy --bin lxmf-node --bin lnpnd --bin lnmsg
+    find leviculum-cli/src leviculum-proxy/src leviculum-lxmf-node/src lnpnd/src loquax/src -name '*.rs' -exec touch {} +
+    cargo build --release --bin lnsd --bin lnstest --bin lncp --bin lnstatus --bin lnprobe --bin lnpath --bin lora-proxy --bin lxmf-node --bin lnpnd --bin loquax
 
 # Tier 2 (~30-90 min, on demand: `systemctl --user start
 # leviculum-ci-tier2.service`): Tier 1 + the docker scenario suites.
@@ -1861,8 +1910,9 @@ build-c-lnsd: build-ffi
 _deb-stamp:
     @bash scripts/deb-stamp.sh
 
-# amd64 musl-static .debs for all three packages: leviculum (the daemon
-# and its clients), lnomad (the browser), lblogd (the blog server).
+# amd64 musl-static .debs for every package but lnflash: leviculum (the
+# daemon and its clients), lnomad (the browser), lblogd (the blog server),
+# lnpnd (the propagation node) and loquax (the messenger, with its tui).
 # Binaries come from the workspace musl target, so they are fully static
 # and run on Debian >= 9 / Ubuntu >= 16.04 regardless of host glibc.
 #
@@ -1886,6 +1936,13 @@ build-deb-amd64: (_require-cargo-deb) _deb-stamp
 build-deb-arm64: (_require-cargo-deb) _deb-stamp
     @bash scripts/build-deb.sh arm64
 
+# armhf (armv7, hard float) musl-static .debs, the same way as arm64: for a
+# Raspberry Pi 2, 3 or Zero 2 under a 32-bit OS (1153). Not yet published by
+# the nightly, which ships amd64 and arm64.
+[doc('Build the armhf (armv7) musl-static .debs via cargo-zigbuild')]
+build-deb-armhf: (_require-cargo-deb) _deb-stamp
+    @bash scripts/build-deb.sh armhf
+
 # The heap-accounting variants of the leviculum package (#437) and of the
 # lnpnd package (550), for one architecture. Both build-deb-* recipes produce them
 # beside the plain packages, because scripts/build-deb.sh always does; this
@@ -1896,11 +1953,21 @@ build-deb-arm64: (_require-cargo-deb) _deb-stamp
 deb-heapacct arch="amd64": (_require-cargo-deb) _deb-stamp
     @bash scripts/build-deb.sh {{arch}}
 
-# Build every .deb in one go. _deb-stamp runs first (a dependency of each
-# child), so all six packages share one build-id and a consistent set of
+# The lnflash .deb (1000): the firmware bundle `just lnflash-bundle` builds,
+# packaged with the binary in /usr/bin and the images under /usr/share/lnflash,
+# where lnflash looks last. amd64 only, like the bundle. The script unpacks the
+# finished package and lets the packaged binary check the packaged bundle.
+[doc('Build the lnflash firmware bundle and package it as a .deb')]
+lnflash-deb: (_require-cargo-deb) _deb-stamp
+    @bash scripts/lnflash-bundle.sh
+    @bash scripts/build-lnflash-deb.sh
+
+# Build every .deb but lnflash's in one go (that one needs the firmware
+# toolchain: `just lnflash-deb`). _deb-stamp runs first (a dependency of each
+# child), so all the packages share one build-id and a consistent set of
 # per-package versions.
-[doc('Build every .deb, both architectures, on one shared build id')]
-build-deb: build-deb-amd64 build-deb-arm64
+[doc('Build the .debs, all three architectures, on one shared build id')]
+build-deb: build-deb-amd64 build-deb-arm64 build-deb-armhf
 
 # The nightly release, built and published from this tree (517). Runs on the
 # tier-2 nightly host after a green-or-attributed night, with
@@ -1922,7 +1989,7 @@ nightly-publish:
 # required — nothing is installed.
 #
 # Deliberately not part of any test tier: it presupposes a build-deb run,
-# which does a `cargo clean` on three crates and cross-builds for two
+# which does a `cargo clean` on three crates and cross-builds for three
 # targets. That is minutes of rebuild plus a zig toolchain, which does
 # not belong in the 15-minute Tier 1 budget. Run it by hand whenever
 # packaging changes, together with a real install test in a systemd
@@ -1936,10 +2003,10 @@ _require-cargo-deb:
     @cargo deb --version >/dev/null 2>&1 || (echo "cargo-deb not found — run: just _deb-prereqs (or cargo install cargo-deb)" && exit 1)
 
 # Best-effort, idempotent install of the cross-build toolchain the
-# build-deb* recipes need: the two musl rustup targets, cargo-deb, and
-# cargo-zigbuild + ziglang for the arm64 cross-link. Safe to re-run.
+# build-deb* recipes need: the three musl rustup targets, cargo-deb, and
+# cargo-zigbuild + ziglang for the arm64 and armhf cross-links. Safe to re-run.
 _deb-prereqs:
-    rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+    rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl armv7-unknown-linux-musleabihf
     cargo install --locked cargo-deb
     cargo install --locked cargo-zigbuild
     @echo "[_deb-prereqs] also ensure ziglang is available for arm64:"
@@ -2252,7 +2319,10 @@ site-unpack-docs-selftest:
 # binaries build unconstrained first: the question is the tests, not rustc.
 #
 # `only` narrows both runs to the target keys containing it (the script's
-# `--only`); `report` still reads the whole survey directory. just 1.40 has no
+# `--only`), a target with required-features included (1067); `report` still
+# reads the whole survey directory. A run's exit 1 (red) and 3 (budget) are
+# left to `report`, but 2 (an `only` that matches nothing, or a usage error)
+# ends the recipe: a narrowed run over nothing read green twice (1059, 1065). just 1.40 has no
 # named recipe arguments and hands `quota=25%` to the recipe as a literal
 # positional value (895 ran the whole survey that way), so the body reads
 # `quota=` and `only=` by name in either slot and takes a bare value by
@@ -2275,9 +2345,10 @@ test-under-quota quota="25%" only="":
     done
     narrow=()
     if [ -n "$o" ]; then narrow=(--only "$o"); fi
+    survey() { python3 scripts/test-under-quota.py run "$@" || { rc=$?; [ "$rc" != 2 ] || exit 2; }; }
     {{just_executable()}} build-integ-bins
-    python3 scripts/test-under-quota.py run --quota none "${narrow[@]}" || true
-    python3 scripts/test-under-quota.py run --quota "$q" "${narrow[@]}" || true
+    survey --quota none "${narrow[@]}"
+    survey --quota "$q" "${narrow[@]}"
     python3 scripts/test-under-quota.py report --quota "$q"
 
 # 730: `cargo test --workspace` leaves nothing behind in the temp directory.
@@ -2291,6 +2362,13 @@ test-under-quota quota="25%" only="":
 [doc('Fail if cargo test --workspace leaves entries in its TMPDIR')]
 tmp-leftovers:
     @bash scripts/tmp-leftovers.sh
+
+# 987: the recipe above must start the sccache server before it points TMPDIR
+# at the scratch directory it deletes, or a server born during the suite fails
+# every later compile on the host (985). Against a stub cargo and sccache. ~1 s.
+[doc('Check tmp-leftovers starts sccache outside its scratch TMPDIR')]
+tmp-leftovers-selftest:
+    @bash scripts/test-tmp-leftovers.sh
 
 # PUB-0034: THIRD-PARTY.md is the one place that names each submodule's and
 # each vendored crate's licence and whether it reaches a binary, and it is
@@ -2311,3 +2389,116 @@ check-third-party:
 [doc('Run the live I2P tests against a private, freshly started i2pd')]
 i2p-live:
     bash scripts/run-i2p-live.sh
+
+# The embassy pin rule (Codeberg #469, docs/src/firmware/embassy-pins.md): one
+# version of each embassy crate across every manifest of the firmware
+# workspace, none from git, no git `[patch]`. Reads manifest text, no cargo
+# call, and refuses an injected second version and git patch on a temp copy
+# first. ~0.2 s.
+[doc('Check the firmware manifests pin one embassy version set, none from git')]
+embassy-pins:
+    @bash scripts/check-embassy-pins.sh
+
+# The log-diff masking (Codeberg #469, docs/src/firmware/host-test-seams.md,
+# "The log-diff masking"): a capture moved only in stamps and counters masks
+# to the same text, one with a reordered line masks to that line. ~0.1 s.
+[doc('Check the debug-capture mask hides stamps and counters, not order')]
+log-diff-mask-selftest:
+    @bash scripts/test-log-diff-mask.sh
+
+# The orchestration stratum's two guards (Codeberg #469,
+# docs/src/concepts/firmware-layers.md, "Gates the new stratum brings").
+# `leviculum-firmware` is the one copy every chip family binds to, so a HAL in
+# its resolved graph (`--target all`, dev edges included) or a BSP `cfg` or
+# chip name in its sources outside doc comments is a board decision in the
+# shared layer. The graph guard reads the firmware workspace `--frozen`, like
+# nrf-evt-max-size. Each refuses an injection on a temp copy before it checks
+# the tree. ~0.8 s and ~0.1 s.
+[doc('Check the orchestration crate links no HAL or chip crate')]
+firmware-no-hal:
+    @bash scripts/check-firmware-no-hal.sh
+
+[doc('Check the orchestration crate sources name no chip and no BSP feature')]
+firmware-no-chip-cfg:
+    @bash scripts/check-firmware-no-chip.sh
+
+# The board firmware's module graph (Codeberg #469, 957,
+# docs/src/concepts/firmware-layers.md, "The extraction, bottom-up"): which
+# module can move into the orchestration crate is read off what it reaches, so
+# the reach of every file in both trees is a checked-in census,
+# scripts/nrf-module-reach.txt, re-derived here and diffed. A move that does
+# not regenerate it goes red with the diff. The selftest first injects a false
+# reach into a copy and must see it refused. The second file (958),
+# scripts/nrf-seam-vocabulary.txt, is the same census one level finer: every
+# item a bind-crate file names below the bind line, code and doc comments
+# apart, so the seam steps are ordered against the calls they have to carry.
+# Same regeneration, same check, its own injected false line. ~0.1 s.
+[doc('Check the nRF module-reach census against the tree')]
+nrf-module-reach:
+    @python3 scripts/nrf-module-reach.py --selftest
+    @python3 scripts/nrf-module-reach.py
+
+# Codeberg #474: the map core is `no_std` plus `alloc`, so the M9 draws a
+# region through the same reader, projection, viewport and tile selection the
+# desktop does (docs/src/concepts/loquax-map.md, section 3). Its `std` feature
+# adds only a file `Storage`; without it the library is checked for the
+# firmware triple, so a `std::` path reaching the core is refused. In
+# `guards`: 1.5 s standing alone after `touch leviculum-map/src/lib.rs`,
+# 0.08 s warm (measured 2026-10-27).
+[doc('Check the map core builds no_std for the firmware triple (#474)')]
+map-core-no-std:
+    rustup target add thumbv7em-none-eabihf
+    cargo check -p leviculum-map --lib --no-default-features --target thumbv7em-none-eabihf
+
+# Codeberg #232: the loquax core is `no_std` plus `alloc`, so the M9 and a GUI
+# run the same messenger core the terminal does (docs/src/concepts/
+# loquax-architecture.md, "the core must not know it has a terminal"). The
+# shell is loquax's `std` feature; without it the library is the core, checked
+# for the firmware triple, so a `std::` path, `eprintln!`, tokio or
+# leviculum-std reaching a core module is refused. Green since 993 and in
+# `guards`; while it was red, `scripts/loquax-no-std-groups.py` grouped its
+# error list into the plan's work list on that page.
+[doc('Check the loquax core builds no_std for the firmware triple (#232)')]
+loquax-core-no-std:
+    rustup target add thumbv7em-none-eabihf
+    cargo check -p loquax --lib --no-default-features --target thumbv7em-none-eabihf
+
+# 994, #232: loquax's `tui` feature is off by default, so `cargo test
+# --workspace` and the workspace clippy never compile `loquax tui` or run its
+# tests. This does: clippy over every loquax target with the feature, the
+# binary's renderer and script tests, and the scripted session against an
+# in-process daemon (`loquax/tests/tui_snapshot.rs`, 8 s, and 8 s again in
+# each of three runs under a 25 % CPU quota, 2026-10-25), and the home node
+# end to end against a stock Python LXMF sender (`loquax/tests/home_node.rs`,
+# 2.6 s, 2.9 s under a 25 % quota, 2026-10-29; `--daemon` and `home` are the
+# tui build's). In `standard`, not `fast`: both spawn loquax against a daemon
+# over sockets. The screen model's own tests are core and run in every lib run.
+# The import and the export (`loquax/tests/import.rs`, 1103) need the
+# `history` feature the tui build carries; files only, 0.05 s.
+[doc('Lint and test loquax with its tui feature (#232)')]
+loquax-tui:
+    cargo clippy -p loquax --features tui --all-targets -- -D warnings
+    {{manifest}} loquax-tui -- cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import
+
+# 1084, #474: loquax's `gui` feature (the iced window) is off by default and
+# in no other feature, so neither the workspace runs nor `loquax-tui` compile
+# it. This does: clippy over every loquax target with the feature, and the
+# binary's tests with it, among them the map view's frame over the fixture
+# region at three zooms through the window's own pipeline, which needs no
+# display. The tests build for the host's own triple, not the workspace's
+# musl-static default: winit opens X11 and Wayland with dlopen, which a
+# musl-static binary cannot link. Not in `standard`: nothing ships it yet.
+[doc('Lint and test loquax with its gui feature (#474)')]
+loquax-gui:
+    cargo clippy -p loquax --features gui --all-targets -- -D warnings
+    {{manifest}} loquax-gui -- cargo test -p loquax --features gui --bins --target "$(rustc -vV | sed -n 's/^host: //p')"
+
+# 1147, #232: the messenger is Loquax in prose (Lew, 2026-10-30); `loquax` is
+# the command, the package, the crate and every path, so in the docs it is code,
+# a path, a hyphenated page name or a man page's bold command. Refuses a bare
+# lower-case `loquax` anywhere else in docs/src. ~0.1 s, no build, self-tests
+# its controls first (a planted "loquax is" fails, `loquax send` in a code
+# span passes).
+[doc('Check the docs call the messenger Loquax in prose (#232)')]
+loquax-name:
+    @python3 scripts/check-loquax-name.py

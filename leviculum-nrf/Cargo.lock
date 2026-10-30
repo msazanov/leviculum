@@ -547,6 +547,7 @@ dependencies = [
  "critical-section",
  "document-features",
  "embassy-time-driver",
+ "embassy-time-queue-utils",
  "embedded-hal 0.2.7",
  "embedded-hal 1.0.0",
  "embedded-hal-async",
@@ -981,6 +982,39 @@ name = "leviculum-feedback"
 version = "0.1.0"
 
 [[package]]
+name = "leviculum-firmware"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "embassy-executor",
+ "embassy-futures",
+ "embassy-sync 0.7.2",
+ "embassy-time",
+ "embedded-alloc",
+ "embedded-graphics",
+ "embedded-storage-async",
+ "heapless 0.9.3",
+ "leviculum-announce-policy",
+ "leviculum-battery-scale",
+ "leviculum-ble-tx",
+ "leviculum-boot-count",
+ "leviculum-boot-trace",
+ "leviculum-core",
+ "leviculum-feedback",
+ "leviculum-gnss-presence",
+ "leviculum-gnss-time",
+ "leviculum-heap-budget",
+ "leviculum-log-line",
+ "leviculum-media-state",
+ "leviculum-pn-store",
+ "leviculum-record-log",
+ "leviculum-screen",
+ "leviculum-time-floor",
+ "leviculum-usb-policy",
+ "rand_core 0.6.4",
+]
+
+[[package]]
 name = "leviculum-gnss-init"
 version = "0.1.0"
 
@@ -1057,6 +1091,7 @@ version = "0.4.0"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
+ "display-interface",
  "embassy-embedded-hal",
  "embassy-executor",
  "embassy-futures",
@@ -1064,7 +1099,6 @@ dependencies = [
  "embassy-sync 0.7.2",
  "embassy-time",
  "embassy-usb",
- "embedded-alloc",
  "embedded-graphics",
  "embedded-hal-async",
  "embedded-storage",
@@ -1079,6 +1113,7 @@ dependencies = [
  "leviculum-core",
  "leviculum-drop-budget",
  "leviculum-feedback",
+ "leviculum-firmware",
  "leviculum-gnss-init",
  "leviculum-gnss-presence",
  "leviculum-gnss-time",
@@ -1159,6 +1194,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "leviculum-rtc-pcf8563"
+version = "0.1.0"
+
+[[package]]
 name = "leviculum-rx-arming"
 version = "0.1.0"
 dependencies = [
@@ -1176,6 +1215,13 @@ dependencies = [
 [[package]]
 name = "leviculum-sd-policy"
 version = "0.1.0"
+
+[[package]]
+name = "leviculum-serial-mux"
+version = "0.1.0"
+dependencies = [
+ "leviculum-core",
+]
 
 [[package]]
 name = "leviculum-settle-budget"
@@ -1308,7 +1354,7 @@ dependencies = [
 [[package]]
 name = "nrf-softdevice"
 version = "0.1.0"
-source = "git+https://github.com/embassy-rs/nrf-softdevice?rev=5949a5b#5949a5b1445cc907745c6449a35577e4544cd255"
+source = "git+https://github.com/reallew/nrf-softdevice?rev=1d813cb#1d813cb2a5cc4e479c6ff75dcfd9bf7e17c8d05c"
 dependencies = [
  "cortex-m",
  "critical-section",
@@ -1327,7 +1373,7 @@ dependencies = [
 [[package]]
 name = "nrf-softdevice-macro"
 version = "0.1.0"
-source = "git+https://github.com/embassy-rs/nrf-softdevice?rev=5949a5b#5949a5b1445cc907745c6449a35577e4544cd255"
+source = "git+https://github.com/reallew/nrf-softdevice?rev=1d813cb#1d813cb2a5cc4e479c6ff75dcfd9bf7e17c8d05c"
 dependencies = [
  "Inflector",
  "darling 0.13.4",
@@ -1340,7 +1386,7 @@ dependencies = [
 [[package]]
 name = "nrf-softdevice-s140"
 version = "0.1.2"
-source = "git+https://github.com/embassy-rs/nrf-softdevice?rev=5949a5b#5949a5b1445cc907745c6449a35577e4544cd255"
+source = "git+https://github.com/reallew/nrf-softdevice?rev=1d813cb#1d813cb2a5cc4e479c6ff75dcfd9bf7e17c8d05c"
 
 [[package]]
 name = "num-traits"

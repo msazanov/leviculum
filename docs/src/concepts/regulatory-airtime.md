@@ -28,7 +28,7 @@ Our LNode firmware enforces the same way: `AirtimeTracker`
 (`leviculum-core/src/rnode.rs:1878`) mirrors the RNode ledger, and
 the nRF TX path holds a queued frame instead of keying the radio
 while the tracker is locked (`is_locked`,
-`leviculum-nrf/src/lora.rs:2124-2220`), continuing to listen so RX is
+`leviculum-nrf/src/lora.rs:2164-2261`), continuing to listen so RX is
 not starved — until the frame has waited so long that keying it would
 be pointless, which is
 [the age rule below](#a-hold-ages-traffic-it-does-not-thin-it).
@@ -158,7 +158,7 @@ them is not a judgement about anybody's licence.
 Prose alone has drifted twice here — the code once, this page once —
 so both halves are mechanical now. The code is pinned behaviourally
 by `no_radio_configuration_is_refused_for_a_regulatory_reason`
-(`leviculum-std/src/driver/interface_build/mod.rs:1181`), which drives
+(`leviculum-std/src/driver/interface_build/mod.rs:1249`), which drives
 the known regulatory edge cases through the config-building entry
 point and asserts each one builds *and* warns at WARN, with a second
 half pinning the capability refusals so the first cannot be satisfied

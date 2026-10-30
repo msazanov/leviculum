@@ -2403,6 +2403,98 @@ async fn lnstatus_rnstatus_multi_interface_sort_parity() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// `lnstatus --origin` (#471) adds exactly the lnsd-only lines and nothing
+/// else; without it lnstatus renders as rnstatus does.
+///
+/// lnsd serves an `origin` key on every interface row and a top-level
+/// `auto_layer` key on every query. rnstatus ignores both, so the drop-in
+/// render has them only behind the flag. Pinned three ways on one frozen
+/// lnsd: lnstatus without the flag equals rnstatus; lnstatus with the flag,
+/// minus one `Origin` line per rendered interface block and the one
+/// `Auto layer` trailer line, equals lnstatus without it; and on rnsd, which
+/// serves neither key, the flag changes nothing.
+#[tokio::test]
+#[ignore = "spawns lnsd + rnsd + python rnstatus; run via --include-ignored after the tier3"]
+async fn lnstatus_origin_flag_adds_only_the_origin_lines() {
+    init_tracing();
+
+    let lnsd = ParityDaemon::start(Stack::Lnsd).await;
+    let rnsd = ParityDaemon::start(Stack::Rnsd).await;
+    let _ = wait_frozen(&lnsd, "an idle lnsd", Duration::from_secs(30), |_| true).await;
+    let _ = wait_frozen(&rnsd, "an idle rnsd", Duration::from_secs(30), |_| true).await;
+
+    let rn = run_status(StatusClient::Rnstatus, &lnsd, &["-a"]).await;
+    wait_observer_gone(&lnsd).await;
+    let plain = run_status(StatusClient::Lnstatus, &lnsd, &["-a"]).await;
+    let origin = run_status(StatusClient::Lnstatus, &lnsd, &["-a", "--origin"]).await;
+
+    assert_eq!(
+        normalize_idle_text(&strip_observer_footprint(&rn, 1, "rnstatus")),
+        normalize_idle_text(&strip_observer_footprint(&plain, 0, "lnstatus")),
+        "lnstatus without --origin renders as rnstatus on lnsd\nrnstatus:\n{rn}\nlnstatus:\n{plain}"
+    );
+
+    // Every interface block (a ` Name[...]` header) gains one Origin line,
+    // and the trailer gains one Auto layer line after a blank one.
+    let blocks = plain
+        .lines()
+        .filter(|l| l.starts_with(' ') && !l.starts_with("  ") && l.ends_with(']'))
+        .count();
+    assert!(
+        blocks > 0,
+        "lnstatus -a rendered no interface block:\n{plain}"
+    );
+    let origin_lines: Vec<&str> = origin
+        .lines()
+        .filter(|l| l.starts_with("    Origin    : "))
+        .collect();
+    assert_eq!(
+        origin_lines.len(),
+        blocks,
+        "one Origin line per interface block:\n{origin}"
+    );
+    assert!(
+        origin_lines
+            .iter()
+            .all(|l| *l == "    Origin    : configured"),
+        "every parity interface comes from the config file:\n{origin}"
+    );
+    let auto_lines: Vec<&str> = origin
+        .lines()
+        .filter(|l| l.starts_with(" Auto layer   : "))
+        .collect();
+    assert_eq!(auto_lines.len(), 1, "one Auto layer line:\n{origin}");
+    let auto_line = format!("\n{}\n", auto_lines[0]);
+    let stripped = origin
+        .lines()
+        .filter(|l| !l.starts_with("    Origin    : "))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let stripped = stripped.replacen(&auto_line, "", 1);
+    assert_eq!(
+        normalize_idle_text(&stripped),
+        normalize_idle_text(&plain),
+        "--origin adds the Origin and Auto layer lines and nothing else\n\
+         with:\n{origin}\nwithout:\n{plain}"
+    );
+
+    // rnsd serves neither key, so the flag has nothing to print there.
+    let rnsd_plain = run_status(StatusClient::Lnstatus, &rnsd, &["-a"]).await;
+    let rnsd_origin = run_status(StatusClient::Lnstatus, &rnsd, &["-a", "--origin"]).await;
+    assert_eq!(
+        normalize_idle_text(&rnsd_origin),
+        normalize_idle_text(&rnsd_plain),
+        "--origin on rnsd changes nothing"
+    );
+
+    for daemon in [lnsd, rnsd] {
+        let dir = daemon.config_dir.clone();
+        drop(daemon);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 /// Field-by-field daemon stats parity (#67) on the frozen state, rnstatus
 /// being the shared measuring instrument. Cross-daemon identity fields
 /// (name/short_name/hash/type) encode per-daemon naming and are asserted
@@ -2414,8 +2506,10 @@ fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
     // traffic, pps, inbound-queue pressure, txq) exist in current upstream
     // but not in the 1.3.5 vendor rnsd sampled here; we emit them for
     // current-rnstatus drop-in compatibility (its --pps/--queues paths
-    // index them unguarded). Pinned exactly so a vendor bump or an
-    // accidental key drop fails loudly.
+    // index them unguarded). `auto_layer` is ours alone (#471): lnsd's
+    // start decision for the automatic layer, which `lnstatus --origin`
+    // prints. Pinned exactly so a vendor bump or an accidental key drop
+    // fails loudly.
     let keys = |v: &Value| -> BTreeSet<String> {
         v.as_object()
             .map(|o| o.keys().cloned().collect())
@@ -2452,6 +2546,7 @@ fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
         "pqpressure",
         "ilqpressure",
         "txq",
+        "auto_layer",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -2585,6 +2680,7 @@ fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
         "tx_queue_dedup",
         "tx_stale_drops",
         "tx_unaccounted",
+        "origin",
     ];
     let ours_only_queued: BTreeSet<String> = additive_ours
         .iter()
