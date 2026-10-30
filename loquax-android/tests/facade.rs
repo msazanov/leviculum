@@ -41,14 +41,17 @@ fn a_first_start_says_what_it_needs() {
     let answer = started(&loquax_android::start(&start_bytes(&base)));
     assert!(!answer.ok);
     assert_eq!(answer.need.as_deref(), Some("code"));
-    assert!(answer.error.unwrap().contains("not joined"));
+    assert!(answer.error.unwrap().contains("reads no mailbox"));
 
     let answer = started(&loquax_android::start(&start_bytes(&Start {
         code: Some("lqxh1nonsense".to_string()),
         ..base.clone()
     })));
     assert_eq!(answer.need.as_deref(), Some("code"));
-    assert!(answer.error.unwrap().starts_with("That is not a home code"));
+    assert!(answer
+        .error
+        .unwrap()
+        .starts_with("That is not a mailbox code"));
 
     let code = code_for(&leviculum_core::Identity::generate(&mut rand_core::OsRng));
     let answer = started(&loquax_android::start(&start_bytes(&Start {
@@ -164,7 +167,7 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         code: Some(code.clone()),
         name: Some("Pixel".to_string()),
         offset: 3600,
-        here: false,
+        ..Start::default()
     };
     let peer = loquax::address::to_hex(&[0x5a; 16]);
     let (address, peer) = tokio::task::spawn_blocking(move || {
@@ -578,7 +581,7 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         })
         .err()
         .expect("another home's code");
-        assert!(refused.text.contains("another home node"), "{refused:?}");
+        assert!(refused.text.contains("another mailbox"), "{refused:?}");
     })
     .await
     .expect("the second session");
@@ -610,7 +613,7 @@ async fn a_new_message_shows_on_the_phone_without_a_pull() {
         code: Some(code),
         name: Some("Pixel".to_string()),
         offset: 0,
-        here: false,
+        ..Start::default()
     };
     let session = tokio::task::spawn_blocking(move || {
         let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
@@ -1131,9 +1134,60 @@ async fn a_python_sender_reaches_the_mailbox_on_the_phone_and_its_screens() {
     .await
     .expect("the screens");
     let address_before = session.address();
+
+    // The last screen's address, and the backup the settings make: its
+    // line opens to the identity the mailbox runs on.
+    let (session, line) = tokio::task::spawn_blocking(move || {
+        let me: schema::Me =
+            rmp_serde::from_slice(&session.query(schema::Query::Me).expect("me")).expect("decode");
+        assert!(me.here);
+        assert_eq!(me.address, loquax::address::to_hex(&session.address()));
+        assert_eq!(me.qr.0.len(), (me.qr_size * me.qr_size) as usize);
+        let backup: schema::Backup = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Backup {
+                    passphrase: "Kastanienallee 7".to_string(),
+                })
+                .expect("backup"),
+        )
+        .expect("decode");
+        assert_eq!(
+            backup.qr.0.len(),
+            (backup.qr_size * backup.qr_size) as usize
+        );
+        (session, backup.line)
+    })
+    .await
+    .expect("the backup");
+    let private = loquax::home::backup::open(&line, "Kastanienallee 7").expect("it opens");
+    let restored = leviculum_core::Identity::from_private_key_bytes(&private).expect("a key");
+    assert_eq!(
+        loquax::engine::delivery_address(&restored).expect("address"),
+        address_before
+    );
     tokio::task::spawn_blocking(move || session.stop())
         .await
         .expect("stopped");
+
+    // A new phone that restores with the wrong passphrase is asked again
+    // and holds no address.
+    let new_phone = tempfile::tempdir().expect("new phone");
+    let dir = new_phone.path().display().to_string();
+    let wrong = tokio::task::spawn_blocking(move || {
+        Session::start(&Start {
+            dir,
+            here: true,
+            restore: Some(line),
+            passphrase: Some("Kastanienallee 8".to_string()),
+            ..Start::default()
+        })
+        .err()
+    })
+    .await
+    .expect("the wrong restore")
+    .expect("refused");
+    assert_eq!(wrong.need, Some("passphrase"), "{wrong:?}");
+    assert!(!loquax_android::mailbox::is_here(new_phone.path()));
 
     // Again, as the sticky service starts it: no choice said, none needed.
     let again = Start {

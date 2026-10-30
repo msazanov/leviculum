@@ -6,8 +6,6 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.DialogInterface;
 import android.content.Intent;
-import android.graphics.Bitmap;
-import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
@@ -522,31 +520,7 @@ public class ContactActivity extends Activity implements Events.Listener {
 
     /** The address's QR code as a picture `side` pixels wide, black on white with its quiet zone. */
     private ImageView qr(int side) {
-        Object bytes = detail.get("qr");
-        int size = (int) Core.num(detail, "qr_size");
-        if (!(bytes instanceof byte[]) || size == 0 || ((byte[]) bytes).length != size * size) {
-            return null;
-        }
-        byte[] modules = (byte[]) bytes;
-        int quiet = 4;
-        int width = size + 2 * quiet;
-        int[] pixels = new int[width * width];
-        for (int i = 0; i < pixels.length; i++) {
-            pixels[i] = Color.WHITE;
-        }
-        for (int y = 0; y < size; y++) {
-            for (int x = 0; x < size; x++) {
-                if (modules[y * size + x] != 0) {
-                    pixels[(y + quiet) * width + x + quiet] = Color.BLACK;
-                }
-            }
-        }
-        Bitmap small = Bitmap.createBitmap(pixels, width, width, Bitmap.Config.ARGB_8888);
-        int scale = Math.max(1, side / width);
-        ImageView view = new ImageView(this);
-        view.setImageBitmap(Bitmap.createScaledBitmap(small, width * scale, width * scale, false));
-        view.setContentDescription(Core.str(detail, "fingerprint"));
-        return view;
+        return QrCode.view(this, detail, side, Core.str(detail, "fingerprint"));
     }
 
     private View action(String icon, String label, final Runnable run) {

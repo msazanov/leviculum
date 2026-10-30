@@ -22,11 +22,17 @@ import java.util.Map;
  * shared from another app (a QR reader's share button), it fills both and
  * joins at once.
  *
+ * A phone that neither holds a mailbox nor reads one goes to the first
+ * start ({@link WelcomeActivity}) instead, unless it brings a code or asks
+ * for the form.
+ *
  * The IM row of protocol LXMF on a contact's card (1139) taps into
  * {@code imto://lxmf/<address>}: the session starts as ever, and the
  * address's conversation opens over the list.
  */
 public class MainActivity extends Activity {
+    /** The extra that asks for the join form: the first start's "Paste a code". */
+    static final String JOIN = "join";
     private TextView status;
     private TextView error;
     private View form;
@@ -39,6 +45,13 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        Intent intent = getIntent();
+        if (!WelcomeActivity.settled(this) && !intent.getBooleanExtra(JOIN, false)
+                && !Intent.ACTION_SEND.equals(intent.getAction())) {
+            startActivity(new Intent(this, WelcomeActivity.class));
+            finish();
+            return;
+        }
         setContentView(R.layout.activity_main);
         status = (TextView) findViewById(R.id.status);
         error = (TextView) findViewById(R.id.error);

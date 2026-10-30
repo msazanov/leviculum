@@ -47,6 +47,8 @@ public class LoquaxService extends Service implements Events.Listener {
     private String server = "";
     /** Whether the TCP interface to the home node is up, as the library last said. */
     private boolean linkUp;
+    /** Whether the mailbox runs here, in this process (1152). */
+    private boolean here;
     private String line;
     private int screens;
     private boolean running;
@@ -125,6 +127,7 @@ public class LoquaxService extends Service implements Events.Listener {
             running = true;
             server = Core.str(answer, "server");
             linkUp = Core.bool(answer, "link");
+            here = Core.bool(answer, "here");
             Events.start();
             look(false);
             Book.observe(this);
@@ -248,7 +251,12 @@ public class LoquaxService extends Service implements Events.Listener {
         if (!running) {
             return;
         }
-        if (!linkUp) {
+        if (here) {
+            // The screens' link is a loopback one: the mailbox itself is
+            // what the line names.
+            line = total == 0 ? getString(R.string.here_running)
+                    : getString(R.string.here_running_unread, total);
+        } else if (!linkUp) {
             line = getString(R.string.connecting, server);
         } else if (total == 0) {
             line = getString(R.string.connected, server);

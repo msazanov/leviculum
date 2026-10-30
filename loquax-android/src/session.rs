@@ -176,7 +176,7 @@ impl Session {
                 let (code, server) = loquax::home::code::HomeCode::parse_with_server(code)
                     .map_err(|error| StartError {
                         need: Some("code"),
-                        text: format!("That is not a home code: {error}"),
+                        text: format!("That is not a mailbox code: {error}"),
                     })?;
                 carried = server;
                 Some(code)
@@ -185,8 +185,8 @@ impl Session {
             (None, _) => {
                 return Err(StartError {
                     need: Some("code"),
-                    text: "This phone is not joined to a home node yet. Paste the code \
-                           `loquax home admit` printed on the home node."
+                    text: "This phone reads no mailbox yet. Paste the code \
+                           `loquax home admit` printed on the computer."
                         .to_string(),
                 })
             }
@@ -195,7 +195,7 @@ impl Session {
             if *key != code.public_key {
                 return Err(StartError {
                     need: None,
-                    text: "This phone is already joined to another home node.".to_string(),
+                    text: "This phone already reads another mailbox.".to_string(),
                 });
             }
         }
@@ -203,7 +203,7 @@ impl Session {
             Some(server) if !server.is_empty() => server.to_string(),
             _ => carried.or_else(|| load_server(&home)).ok_or(StartError {
                 need: Some("server"),
-                text: "Type the home node's address, host:port of its lnsd TCP server.".to_string(),
+                text: "Type your mailbox's address, host:port of its lnsd TCP server.".to_string(),
             })?,
         };
         loquax::engine::parse_server(&server).map_err(|text| StartError {
@@ -326,6 +326,14 @@ impl Session {
         home: &Path,
         runtime: &tokio::runtime::Handle,
     ) -> Result<(schema::Start, mailbox::Here), StartError> {
+        if let Some(line) = start.restore.as_deref() {
+            mailbox::restore(home, line, start.passphrase.as_deref().unwrap_or_default()).map_err(
+                |text| StartError {
+                    need: Some("passphrase"),
+                    text,
+                },
+            )?;
+        }
         let joined = loquax::home::client::load_client(home).map_err(StartError::other)?;
         if joined.is_some() && !mailbox::is_here(home) {
             return Err(StartError::other(
@@ -359,6 +367,43 @@ impl Session {
             ..start.clone()
         };
         Ok((start, here))
+    }
+
+    /// This phone's own address as [`schema::Query::Me`] answers it.
+    fn me(&self) -> Result<schema::Me, String> {
+        let home = self.lock().home.clone();
+        let here = self.is_here();
+        let (qr_size, modules) = loquax::home::qr::address_modules(&self.address)?;
+        Ok(schema::Me {
+            v: VERSION,
+            address: loquax::address::to_hex(&self.address),
+            fingerprint: fingerprint(&self.address),
+            qr_size,
+            qr: schema::Blob(modules.into_iter().map(u8::from).collect()),
+            name: if here {
+                mailbox::name(&home)
+            } else {
+                String::new()
+            },
+            here,
+        })
+    }
+
+    /// The address's backup ([`schema::Query::Backup`]), when the mailbox is
+    /// on this phone: a reader of a mailbox elsewhere holds no address.
+    fn backup(&self, passphrase: &str) -> Result<schema::Backup, String> {
+        if !self.is_here() {
+            return Err("the address lives in the mailbox, not on this phone".to_string());
+        }
+        let home = self.lock().home.clone();
+        let line = mailbox::backup(&home, passphrase)?;
+        let (qr_size, modules) = loquax::home::qr::modules(&line)?;
+        Ok(schema::Backup {
+            v: VERSION,
+            line,
+            qr_size,
+            qr: schema::Blob(modules.into_iter().map(u8::from).collect()),
+        })
     }
 
     /// Whether the mailbox is on this phone.
@@ -575,6 +620,15 @@ impl Session {
 
     /// What the screen wants to show, encoded.
     pub fn query(&self, query: schema::Query) -> Result<Vec<u8>, String> {
+        match query {
+            schema::Query::Me => return self.me().map(|me| schema::encode(&me)),
+            schema::Query::Backup { passphrase } => {
+                return self
+                    .backup(&passphrase)
+                    .map(|backup| schema::encode(&backup))
+            }
+            _ => {}
+        }
         let inner = self.lock();
         Ok(match query {
             schema::Query::Conversations => schema::encode(&inner.conversations()),
@@ -615,6 +669,9 @@ impl Session {
                 schema::encode(&inner.listed(order))
             }
             schema::Query::Blocked => schema::encode(&inner.blocked()),
+            schema::Query::Me | schema::Query::Backup { .. } => {
+                return Err("answered above".to_string())
+            }
             schema::Query::Links => schema::encode(&schema::Links {
                 v: VERSION,
                 links: inner
@@ -1447,11 +1504,11 @@ fn join_words(error: &loquax::home::client::HomeError, server: &str) -> String {
     use loquax::home::client::HomeError;
     match error {
         HomeError::NoPath => format!(
-            "The home node did not answer through {server}. Check the address, \
+            "Your mailbox did not answer through {server}. Check the address, \
              that its lnsd runs a TCP server there, and that this phone can reach it."
         ),
-        HomeError::Refused(status) => format!("The home node refused the code: {status}."),
-        HomeError::Timeout => "The home node did not answer in time. Try again.".to_string(),
+        HomeError::Refused(status) => format!("Your mailbox refused the code: {status}."),
+        HomeError::Timeout => "Your mailbox did not answer in time. Try again.".to_string(),
         other => format!("Joining failed: {other}."),
     }
 }

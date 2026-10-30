@@ -80,6 +80,13 @@ pub struct Start {
     /// saying it again.
     #[serde(default)]
     pub here: bool,
+    /// A backup line (`lqxb1...`) to restore the address from before the
+    /// mailbox on this phone first starts ("I already have a Loquax
+    /// address"), with its passphrase; only with [`Start::here`].
+    #[serde(default)]
+    pub restore: Option<String>,
+    #[serde(default)]
+    pub passphrase: Option<String>,
 }
 
 /// What became of [`Start`].
@@ -282,6 +289,37 @@ pub enum Query {
     Archived,
     /// The blocked peers, as the list's rows, conversation or not.
     Blocked,
+    /// This phone's own address, for the first start's last screen (1152).
+    Me,
+    /// The address's backup, sealed with `passphrase` (1152).
+    Backup { passphrase: String },
+}
+
+/// What [`Query::Backup`] answers: the line the file holds, and the same
+/// line as the paper code's modules.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Backup {
+    pub v: u32,
+    pub line: String,
+    pub qr_size: u32,
+    pub qr: Blob,
+}
+
+/// What [`Query::Me`] answers: the address to give people, as text and as
+/// a QR code, and the mailbox's facts the screen shows beside it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Me {
+    pub v: u32,
+    pub address: String,
+    /// The address in groups of four, as the contact screen shows one.
+    pub fingerprint: String,
+    pub qr_size: u32,
+    /// `qr_size` squared modules, one byte each, row by row.
+    pub qr: Blob,
+    /// The name recipients see; empty when none was given.
+    pub name: String,
+    /// Whether the mailbox is on this phone.
+    pub here: bool,
 }
 
 /// One contact's name fields, for [`Query::Suggest`].

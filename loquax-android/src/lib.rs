@@ -206,10 +206,15 @@ pub fn stop() {
 /// the last archive entry pulled.
 pub fn describe(home: &Path) -> String {
     let state = match loquax::home::client::load_client(home) {
-        Ok(None) => "Not a client of a home node.".to_string(),
+        Ok(None) => "This phone holds no mailbox and reads none.".to_string(),
         Ok(Some(key)) => match loquax::home::lxmf_address(&key) {
+            Ok(address) if mailbox::is_here(home) => format!(
+                "The mailbox {} is on this phone, last entry pulled {}.",
+                loquax::address::to_hex(&address),
+                loquax::home::client::load_cursor(home)
+            ),
             Ok(address) => format!(
-                "Client of the home node {}, last entry pulled {}.",
+                "Reads the mailbox {}, last entry pulled {}.",
                 loquax::address::to_hex(&address),
                 loquax::home::client::load_cursor(home)
             ),
@@ -356,7 +361,10 @@ mod tests {
         let home = tempfile::tempdir().expect("tempdir");
         let text = describe(home.path());
         assert!(text.starts_with(&format!("Loquax {}\n", loquax::VERSION)));
-        assert!(text.ends_with("Not a client of a home node."), "{text}");
+        assert!(
+            text.ends_with("This phone holds no mailbox and reads none."),
+            "{text}"
+        );
     }
 
     #[test]
@@ -370,7 +378,7 @@ mod tests {
         let text = describe(home.path());
         assert!(
             text.ends_with(&format!(
-                "Client of the home node {}, last entry pulled 42.",
+                "Reads the mailbox {}, last entry pulled 42.",
                 loquax::address::to_hex(&address)
             )),
             "{text}"

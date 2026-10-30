@@ -52,6 +52,14 @@ final class Asks {
         battery(screen);
     }
 
+    /** The first start asked both itself (WelcomeActivity): the list asks neither again. */
+    static void asked(Activity screen) {
+        screen.getSharedPreferences(FILE, Activity.MODE_PRIVATE).edit()
+                .putBoolean(NOTIFICATIONS, true)
+                .putBoolean(BATTERY, true)
+                .apply();
+    }
+
     private static void battery(final Activity screen) {
         new AlertDialog.Builder(screen)
                 .setTitle(R.string.battery_title)

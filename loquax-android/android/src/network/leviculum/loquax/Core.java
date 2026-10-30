@@ -83,6 +83,35 @@ final class Core {
         return answer(Native.start(MsgPack.pack(request)));
     }
 
+    /**
+     * Start with the mailbox on this phone (1152): the library makes it, and
+     * joins the screens to it itself; with a backup line and its passphrase
+     * it restores the address first. Blocks: not on the UI thread.
+     */
+    static Map<String, Object> startHere(String dir, String restore, String passphrase) {
+        Map<String, Object> request = map("dir", dir, "offset", (long) offset(), "here", true);
+        if (restore != null) {
+            request.put("restore", restore);
+            request.put("passphrase", passphrase);
+        }
+        return answer(Native.start(MsgPack.pack(request)));
+    }
+
+    /** The address's backup line and its paper code, sealed with `passphrase`; `error` when not. */
+    static Map<String, Object> backup(String passphrase) {
+        return answer(Native.query(MsgPack.pack(map("t", "backup", "passphrase", passphrase))));
+    }
+
+    /** This phone's address, its QR code, its name and whether the mailbox is here. */
+    static Map<String, Object> me() {
+        return answer(Native.query(MsgPack.pack(map("t", "me"))));
+    }
+
+    /** The name recipients see, for the mailbox on this phone. Blocks a moment: not on the UI thread. */
+    static String name(String name) {
+        return command(map("t", "name", "name", name));
+    }
+
     /** One request; the error in words, or null. */
     static String command(Map<String, Object> request) {
         Map<String, Object> done = answer(Native.command(MsgPack.pack(request)));

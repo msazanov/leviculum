@@ -19,6 +19,10 @@ import java.util.Map;
  * each with its avatar, name and short hash and an "Unblock" that brings
  * its conversation back on every device of the home; and the service's
  * end, which the list's menu offered before.
+ *
+ * Above them the mailbox (1152): for a mailbox on this phone, "Back up
+ * your mailbox". Below them the advanced settings, the only place the app
+ * names a Propagation Node.
  */
 public class SettingsActivity extends Activity implements Events.Listener {
     private LinearLayout body;
@@ -97,6 +101,7 @@ public class SettingsActivity extends Activity implements Events.Listener {
 
     private void refresh() {
         body.removeAllViews();
+        mailbox();
         TextView header = text(getString(R.string.blocked_contacts), 14, R.color.accent);
         header.setPadding(dp(16), dp(16), dp(16), dp(4));
         body.addView(header);
@@ -123,6 +128,38 @@ public class SettingsActivity extends Activity implements Events.Listener {
             }
         });
         body.addView(stop, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        TextView advanced = text(getString(R.string.advanced), 14, R.color.accent);
+        advanced.setPadding(dp(16), dp(16), dp(16), dp(4));
+        body.addView(advanced);
+        TextView node = text(getString(R.string.propagation_node), 16, R.color.text);
+        node.setPadding(dp(16), dp(8), dp(16), 0);
+        body.addView(node);
+        body.addView(padded(text(getString(R.string.propagation_node_text), 14,
+                R.color.text_secondary)));
+    }
+
+    /** Where the mailbox is, and its backup when it is on this phone. */
+    private void mailbox() {
+        TextView header = text(getString(R.string.mailbox), 14, R.color.accent);
+        header.setPadding(dp(16), dp(16), dp(16), dp(4));
+        body.addView(header);
+        boolean phone = Core.bool(Core.me(), "here");
+        body.addView(padded(text(getString(phone ? R.string.mailbox_here : R.string.mailbox_away),
+                15, R.color.text_secondary)));
+        if (!phone) {
+            return;
+        }
+        TextView backup = text(getString(R.string.backup_title), 16, R.color.text);
+        backup.setPadding(dp(16), dp(12), dp(16), dp(12));
+        backup.setBackgroundResource(android.R.drawable.list_selector_background);
+        backup.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                startActivity(new Intent(SettingsActivity.this, BackupActivity.class));
+            }
+        });
+        body.addView(backup, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 

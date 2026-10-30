@@ -113,6 +113,39 @@ pub fn admission(app: &Path) -> Result<HomeCode, String> {
     })
 }
 
+/// The address's backup line, sealed with `passphrase`
+/// ([`loquax::home::backup`]): the file's content and the paper code's.
+pub fn backup(app: &Path, passphrase: &str) -> Result<String, String> {
+    let private = identity(app)?
+        .private_key_bytes()
+        .map_err(|error| format!("the identity cannot be read: {error:?}"))?;
+    loquax::home::backup::seal(&private, passphrase, &mut rand_core::OsRng)
+        .map_err(|error| error.to_string())
+}
+
+/// Restore the address from a backup line before the first start of the
+/// mailbox on this phone. A phone that holds another address already, or
+/// reads a mailbox elsewhere, keeps it: a restore never overwrites one.
+pub fn restore(app: &Path, line: &str, passphrase: &str) -> Result<(), String> {
+    let private =
+        loquax::home::backup::open(line, passphrase).map_err(|error| error.to_string())?;
+    let restored =
+        Identity::from_private_key_bytes(&private).map_err(|_| "the backup holds no key")?;
+    if loquax::home::client::load_client(app)?.is_some() && !is_here(app) {
+        return Err("This phone already reads a mailbox on a computer.".to_string());
+    }
+    let path = app.join(DIR).join("identity");
+    if path.exists() {
+        let held = identity(app)?;
+        return if held.public_key_bytes() == restored.public_key_bytes() {
+            Ok(())
+        } else {
+            Err("This phone already holds another address.".to_string())
+        };
+    }
+    loquax::identity::store(&path, &restored).map_err(|error| error.to_string())
+}
+
 /// The running mailbox on this phone.
 pub struct Here {
     app: PathBuf,
@@ -239,6 +272,30 @@ mod tests {
             servers(app.path()),
             ["rns.example.org:4242", "10.0.0.2:4965"]
         );
+    }
+
+    #[test]
+    fn a_backup_restores_the_same_address_and_a_wrong_passphrase_restores_none() {
+        let old = tempfile::tempdir().expect("old phone");
+        let key = choose_here(old.path()).expect("chosen");
+        let line = backup(old.path(), "Kastanienallee 7").expect("backup");
+
+        let new = tempfile::tempdir().expect("new phone");
+        let refused = restore(new.path(), &line, "Kastanienallee 8");
+        assert!(refused.unwrap_err().contains("passphrase"));
+        assert!(!new.path().join(DIR).join("identity").exists());
+        restore(new.path(), &line, "Kastanienallee 7").expect("restored");
+        assert_eq!(choose_here(new.path()).expect("chosen"), key);
+
+        // Again with the same line is no change; another address is no
+        // overwrite.
+        restore(new.path(), &line, "Kastanienallee 7").expect("the same again");
+        let other = tempfile::tempdir().expect("other phone");
+        choose_here(other.path()).expect("chosen");
+        let other_line = backup(other.path(), "Lindenstraße 3").expect("backup");
+        let error = restore(new.path(), &other_line, "Lindenstraße 3").unwrap_err();
+        assert!(error.contains("another address"), "{error}");
+        assert_eq!(identity(new.path()).expect("kept").public_key_bytes(), key);
     }
 
     #[test]

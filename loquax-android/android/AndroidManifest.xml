@@ -6,7 +6,8 @@
 
   <uses-sdk a:minSdkVersion='{{MIN_SDK}}' a:targetSdkVersion='{{TARGET_SDK}}'/>
 
-  <!-- The one TCP connection to the home node. -->
+  <!-- The one TCP connection to the home node, or, with the mailbox on
+       the phone, to the entry servers and the screens' loopback one. -->
   <uses-permission a:name='android.permission.INTERNET'/>
   <!-- The service that holds the session in the background (LoquaxService). -->
   <uses-permission a:name='android.permission.FOREGROUND_SERVICE'/>
@@ -49,6 +50,16 @@
         <data a:scheme='imto' a:host='lxmf'/>
       </intent-filter>
     </activity>
+
+    <!-- The first start (1152): where the mailbox lives, the background
+         permission, the address. -->
+    <activity a:name='network.leviculum.loquax.WelcomeActivity'
+              a:theme='@style/Loquax.List'
+              a:exported='false'/>
+
+    <activity a:name='network.leviculum.loquax.BackupActivity'
+              a:theme='@style/Loquax.List'
+              a:exported='false'/>
 
     <activity a:name='network.leviculum.loquax.ConversationsActivity'
               a:theme='@style/Loquax.List'
