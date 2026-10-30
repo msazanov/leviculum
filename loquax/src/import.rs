@@ -408,6 +408,9 @@ pub struct Report {
     /// On a Loquax Mailbox: the archive entries appended (or, in a dry run,
     /// the imported messages that would be offered to the archive).
     pub archived: Option<usize>,
+    /// On a Loquax Mailbox: the petname entries appended for the imported
+    /// contacts' names (or, in a dry run, those that would be).
+    pub names_archived: Option<usize>,
     /// What the source says about itself: the identities a database holds
     /// and which one is imported, and how its times were read.
     pub notes: Vec<String>,
@@ -463,6 +466,13 @@ impl Report {
                      their next sync"
                 ),
             });
+        }
+        if let Some(names) = self.names_archived {
+            out.push(format!(
+                "mailbox archive: {names} contact names {}, its clients take them on their \
+                 next sync",
+                would("appended", "to append")
+            ));
         }
         if self.attachments_skipped > 0 {
             out.push(format!(
@@ -585,6 +595,7 @@ fn merge_contacts(
     report: &mut Report,
 ) -> Result<(), ImportError> {
     let have = load_contacts(home).map_err(|e| ImportError::new(home, e))?;
+    let mut names = Vec::new();
     for theirs in contacts {
         let ours = have.of(&theirs.peer);
         // The reader's own word wins: a petname loquax has stays.
@@ -593,6 +604,9 @@ fn merge_contacts(
             petname: ours.petname.clone().or(theirs.petname),
             blocked: ours.blocked || theirs.blocked,
         };
+        if let Some(name) = &merged.petname {
+            names.push((merged.peer, name.clone()));
+        }
         if merged == ours {
             report.contacts_held += 1;
             continue;
@@ -603,6 +617,57 @@ fn merge_contacts(
             save_contact(home, &merged).map_err(|e| ImportError::new(home, e))?;
         }
     }
+    archive_names(home, &names, dry_run, report)
+}
+
+/// On a Loquax Mailbox: each imported contact's name as a petname entry,
+/// as a client's `/petname` is kept, so every device of the home takes it
+/// on its next pull (1159). A peer the archive holds a petname entry for
+/// keeps it. In a dry run, the names that would be appended are counted.
+fn archive_names(
+    home: &Path,
+    names: &[([u8; 16], String)],
+    dry_run: bool,
+    report: &mut Report,
+) -> Result<(), ImportError> {
+    let Some(address) = current_address(home) else {
+        return Ok(());
+    };
+    let path = home.join(STORE_FILE);
+    let store_error = |e: crate::store::StoreError| ImportError::new(&path, e);
+    if dry_run {
+        let Some(store) = Store::open_read_only(&path, address).map_err(store_error)? else {
+            return Ok(());
+        };
+        if !store.serves_as_home_node().map_err(store_error)? {
+            return Ok(());
+        }
+        let mut would = 0;
+        for (peer, _) in names {
+            if !store.archive_holds_petname(peer).map_err(store_error)? {
+                would += 1;
+            }
+        }
+        report.names_archived = Some(would);
+        return Ok(());
+    }
+    if std::fs::symlink_metadata(&path).is_err() {
+        return Ok(());
+    }
+    let mut store = Store::open_in(home, address).map_err(store_error)?;
+    if !store.serves_as_home_node().map_err(store_error)? {
+        return Ok(());
+    }
+    let config = crate::config::load(home).map_err(|e| ImportError::new(home, e))?;
+    let cap = config
+        .archive_cap_mb
+        .unwrap_or(crate::home::DEFAULT_ARCHIVE_CAP_MB)
+        .saturating_mul(1 << 20);
+    let now = leviculum_std::local_time::unix_now_secs();
+    let names = names.iter().map(|(peer, name)| (peer, name.as_str()));
+    let appended =
+        crate::home::server::archive_petnames(&mut store, names, now, cap).map_err(store_error)?;
+    report.names_archived = Some(appended);
     Ok(())
 }
 

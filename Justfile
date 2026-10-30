@@ -2485,13 +2485,17 @@ loquax-tui:
 # it. This does: clippy over every loquax target with the feature, and the
 # binary's tests with it, among them the map view's frame over the fixture
 # region at three zooms through the window's own pipeline, which needs no
-# display. The tests build for the host's own triple, not the workspace's
-# musl-static default: winit opens X11 and Wayland with dlopen, which a
-# musl-static binary cannot link. Not in `standard`: nothing ships it yet.
+# display. With them the library's tests under the feature, whose
+# `screenmap` the tui feature leaves out: the map's frames and names
+# (`mapframe`, `mapnames`), among them 1154's frames of the fast paths
+# against the old ones. The tests build for the host's own triple, not the
+# workspace's musl-static default: winit opens X11 and Wayland with dlopen,
+# which a musl-static binary cannot link. Not in `standard`: nothing ships
+# it yet.
 [doc('Lint and test loquax with its gui feature (#474)')]
 loquax-gui:
     cargo clippy -p loquax --features gui --all-targets -- -D warnings
-    {{manifest}} loquax-gui -- cargo test -p loquax --features gui --bins --target "$(rustc -vV | sed -n 's/^host: //p')"
+    {{manifest}} loquax-gui -- cargo test -p loquax --features gui --lib --bins --target "$(rustc -vV | sed -n 's/^host: //p')"
 
 # 1147, #232: the messenger is Loquax in prose (Lew, 2026-10-30); `loquax` is
 # the command, the package, the crate and every path, so in the docs it is code,

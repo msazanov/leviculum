@@ -32,6 +32,7 @@ use loquax::ui::{chat, update, UiEffect, UiEvent, UiModel};
 use loquax::when::WallTime;
 
 use crate::links::{self, Book};
+use crate::mailbox;
 use crate::pull_line::{PullLine, Say};
 use crate::schema::{self, Event, VERSION};
 
@@ -46,6 +47,8 @@ const PUMP: Duration = Duration::from_millis(100);
 const SETTLE: Duration = Duration::from_secs(5);
 /// How many pumps between two looks at the TCP interface: a second.
 const LINK_EVERY: u32 = 10;
+/// How many of a peer's newest positions the contact screen lists.
+const POSITIONS_SHOWN: usize = 10;
 
 /// Why the session did not start, and what the join screen has to ask for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,10 +93,7 @@ impl InputBuffer for Line {
 /// A runner's end, folded by the pump.
 enum Finished {
     Send(UiEvent),
-    Pull {
-        result: Result<usize, String>,
-        cursor: Option<u64>,
-    },
+    Pull(runner::PullEnd),
 }
 
 /// Everything the lock guards.
@@ -141,6 +141,8 @@ pub struct Session {
     inner: Arc<Mutex<Inner>>,
     events: Mutex<Receiver<Event>>,
     runtime: Mutex<Option<tokio::runtime::Runtime>>,
+    /// The mailbox, when it is on this phone.
+    here: Mutex<Option<mailbox::Here>>,
     address: [u8; 16],
     server: String,
 }
@@ -152,6 +154,18 @@ impl Session {
     /// server along; a server given beside it wins.
     pub fn start(start: &schema::Start) -> Result<Self, StartError> {
         let home = PathBuf::from(&start.dir);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .map_err(|error| StartError::other(format!("no runtime: {error}")))?;
+        let (start, here) = if start.here || mailbox::is_here(&home) {
+            let (start, here) = Self::start_here(start, &home, runtime.handle())?;
+            (start, Some(here))
+        } else {
+            (start.clone(), None)
+        };
+        let start = &start;
         let client = loquax::home::client::load_client(&home).map_err(StartError::other)?;
         let mut carried = None;
         let code = match (&client, start.code.as_deref().map(str::trim)) {
@@ -159,7 +173,7 @@ impl Session {
                 let (code, server) = loquax::home::code::HomeCode::parse_with_server(code)
                     .map_err(|error| StartError {
                         need: Some("code"),
-                        text: format!("That is not a home code: {error}"),
+                        text: format!("That is not a mailbox code: {error}"),
                     })?;
                 carried = server;
                 Some(code)
@@ -168,8 +182,8 @@ impl Session {
             (None, _) => {
                 return Err(StartError {
                     need: Some("code"),
-                    text: "This phone is not joined to a home node yet. Paste the code \
-                           `loquax home admit` printed on the home node."
+                    text: "This phone reads no mailbox yet. Paste the code \
+                           `loquax home admit` printed on the computer."
                         .to_string(),
                 })
             }
@@ -178,7 +192,7 @@ impl Session {
             if *key != code.public_key {
                 return Err(StartError {
                     need: None,
-                    text: "This phone is already joined to another home node.".to_string(),
+                    text: "This phone already reads another mailbox.".to_string(),
                 });
             }
         }
@@ -186,7 +200,7 @@ impl Session {
             Some(server) if !server.is_empty() => server.to_string(),
             _ => carried.or_else(|| load_server(&home)).ok_or(StartError {
                 need: Some("server"),
-                text: "Type the home node's address, host:port of its lnsd TCP server.".to_string(),
+                text: "Type your mailbox's address, host:port of its lnsd TCP server.".to_string(),
             })?,
         };
         loquax::engine::parse_server(&server).map_err(|text| StartError {
@@ -207,11 +221,6 @@ impl Session {
         std::fs::create_dir_all(&storage)
             .map_err(|error| StartError::other(format!("{}: {error}", storage.display())))?;
 
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .map_err(|error| StartError::other(format!("no runtime: {error}")))?;
         let attached = runtime.block_on(attach_leaf(
             LeafConfig {
                 server: server.clone(),
@@ -254,7 +263,10 @@ impl Session {
             loquax::home::client::save_client(&home, &code.public_key)
                 .map_err(StartError::other)?;
         }
-        save_server(&home, &server).map_err(StartError::other)?;
+        // The phone's own mailbox listens on another port at every start.
+        if here.is_none() {
+            save_server(&home, &server).map_err(StartError::other)?;
+        }
 
         let (events_tx, events_rx) = channel();
         let (watch_tx, watch_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -294,12 +306,133 @@ impl Session {
             inner,
             events: Mutex::new(events_rx),
             runtime: Mutex::new(Some(runtime)),
+            here: Mutex::new(here),
             address,
             server,
         };
         // What the home node holds since the last run, on open.
         session.lock().apply(UiEvent::Run(PaletteCommand::Fetch));
         Ok(session)
+    }
+
+    /// The mailbox on this phone: chosen and started on `runtime`, and the
+    /// start as the screens' client makes it, to the mailbox's loopback
+    /// server, with a code of its own while the screens are not joined.
+    fn start_here(
+        start: &schema::Start,
+        home: &Path,
+        runtime: &tokio::runtime::Handle,
+    ) -> Result<(schema::Start, mailbox::Here), StartError> {
+        if let Some(line) = start.restore.as_deref() {
+            mailbox::restore(home, line, start.passphrase.as_deref().unwrap_or_default()).map_err(
+                |text| StartError {
+                    need: Some("passphrase"),
+                    text,
+                },
+            )?;
+        }
+        let joined = loquax::home::client::load_client(home).map_err(StartError::other)?;
+        if joined.is_some() && !mailbox::is_here(home) {
+            return Err(StartError::other(
+                "This phone already reads a mailbox on a computer.",
+            ));
+        }
+        let public_key = mailbox::choose_here(home).map_err(StartError::other)?;
+        if joined.is_some_and(|key| key != public_key) {
+            return Err(StartError::other(
+                "This phone already reads another mailbox.",
+            ));
+        }
+        let code = match joined {
+            Some(_) => None,
+            None => Some(
+                mailbox::admission(home)
+                    .map_err(StartError::other)?
+                    .encode(),
+            ),
+        };
+        let here = mailbox::Here::start(home, runtime).map_err(StartError::other)?;
+        let start = schema::Start {
+            server: Some(here.server()),
+            code,
+            name: Some(
+                start
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| "this phone".to_string()),
+            ),
+            ..start.clone()
+        };
+        Ok((start, here))
+    }
+
+    /// This phone's own address as [`schema::Query::Me`] answers it.
+    fn me(&self) -> Result<schema::Me, String> {
+        let home = self.lock().home.clone();
+        let here = self.is_here();
+        let (qr_size, modules) = loquax::home::qr::address_modules(&self.address)?;
+        Ok(schema::Me {
+            v: VERSION,
+            address: loquax::address::to_hex(&self.address),
+            fingerprint: fingerprint(&self.address),
+            qr_size,
+            qr: schema::Blob(modules.into_iter().map(u8::from).collect()),
+            name: if here {
+                mailbox::name(&home)
+            } else {
+                String::new()
+            },
+            here,
+        })
+    }
+
+    /// The address's backup ([`schema::Query::Backup`]), when the mailbox is
+    /// on this phone: a reader of a mailbox elsewhere holds no address.
+    fn backup(&self, passphrase: &str) -> Result<schema::Backup, String> {
+        if !self.is_here() {
+            return Err("the address lives in the mailbox, not on this phone".to_string());
+        }
+        let home = self.lock().home.clone();
+        let line = mailbox::backup(&home, passphrase)?;
+        let (qr_size, modules) = loquax::home::qr::modules(&line)?;
+        Ok(schema::Backup {
+            v: VERSION,
+            line,
+            qr_size,
+            qr: schema::Blob(modules.into_iter().map(u8::from).collect()),
+        })
+    }
+
+    /// Whether the mailbox is on this phone.
+    pub fn is_here(&self) -> bool {
+        self.here().is_some()
+    }
+
+    /// The name recipients see, when the mailbox is on this phone: kept,
+    /// and the mailbox started again so its next announce carries it.
+    pub fn rename(&self, name: &str) -> Result<(), String> {
+        let home = self.lock().home.clone();
+        mailbox::set_name(&home, name)?;
+        let handle = self.handle().ok_or("the session has ended")?;
+        let mut here = self.here();
+        match here.as_mut() {
+            Some(here) => handle.block_on(here.restart(&handle)),
+            None => Err("the mailbox is not on this phone".to_string()),
+        }
+    }
+
+    fn here(&self) -> MutexGuard<'_, Option<mailbox::Here>> {
+        self.here
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn handle(&self) -> Option<tokio::runtime::Handle> {
+        self.runtime
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(|runtime| runtime.handle().clone())
     }
 
     /// The home node's LXMF address, this phone's own.
@@ -320,7 +453,11 @@ impl Session {
     /// Whether the session ended by itself: the engine is gone, and only a
     /// fresh start helps.
     pub fn is_over(&self) -> bool {
-        self.lock().gone
+        let mailbox_gone = self
+            .here
+            .try_lock()
+            .is_ok_and(|here| here.as_ref().is_some_and(mailbox::Here::is_over));
+        self.lock().gone || mailbox_gone
     }
 
     /// Cut the session off its engine, as the engine's death does; the
@@ -396,6 +533,7 @@ impl Session {
                 self.lock().front = front;
                 return Ok(());
             }
+            schema::Request::Name { name } => return self.rename(&name),
             schema::Request::Link { peer, contact } => {
                 let peer = parse_peer(&peer)?;
                 return self.lock().link(peer, &contact);
@@ -415,6 +553,36 @@ impl Session {
                 peer: parse_peer(&peer)?,
                 name,
             },
+            schema::Request::Pin { peer, on } => {
+                return self.change_state(&peer, |state, _| state.pinned = on);
+            }
+            schema::Request::Archive { peer, on } => {
+                return self.change_state(&peer, |state, _| state.archived = on);
+            }
+            schema::Request::Block { peer, on } => {
+                return self.change_state(&peer, |state, _| state.blocked = on);
+            }
+            schema::Request::Mute { peer, secs } => {
+                return self.change_state(&peer, |state, now| {
+                    state.muted_until = match secs {
+                        0 => None,
+                        secs if secs < 0 => Some(loquax::ui::state::MUTED_ALWAYS),
+                        secs => Some(now.saturating_add(secs)),
+                    };
+                });
+            }
+            schema::Request::Verify { peer, on } => UiEvent::Verify {
+                peer: parse_peer(&peer)?,
+                verified: on,
+            },
+            schema::Request::Unread { peer, on } => UiEvent::MarkUnread {
+                peer: parse_peer(&peer)?,
+                unread: on,
+            },
+            schema::Request::Forget { peer, everywhere } => UiEvent::DeleteConversation {
+                peer: parse_peer(&peer)?,
+                everywhere,
+            },
             schema::Request::Relink { rows } => {
                 let mut inner = self.lock();
                 let linked = inner.relink(&rows)?;
@@ -431,8 +599,33 @@ impl Session {
         Ok(())
     }
 
+    /// Change one field of the reader's word on `peer`, the others as the
+    /// model holds them; `change` gets the time now in unix seconds.
+    fn change_state(
+        &self,
+        peer: &str,
+        change: impl FnOnce(&mut loquax::home::wire::PeerState, i64),
+    ) -> Result<(), String> {
+        let peer = parse_peer(peer)?;
+        let mut inner = self.lock();
+        let mut state = inner.model.peer_state(&peer);
+        change(&mut state, wall_now(inner.offset).unix_secs);
+        inner.apply(UiEvent::PeerState { peer, state });
+        inner.dirty = true;
+        Ok(())
+    }
+
     /// What the screen wants to show, encoded.
     pub fn query(&self, query: schema::Query) -> Result<Vec<u8>, String> {
+        match query {
+            schema::Query::Me => return self.me().map(|me| schema::encode(&me)),
+            schema::Query::Backup { passphrase } => {
+                return self
+                    .backup(&passphrase)
+                    .map(|backup| schema::encode(&backup))
+            }
+            _ => {}
+        }
         let inner = self.lock();
         Ok(match query {
             schema::Query::Conversations => schema::encode(&inner.conversations()),
@@ -467,6 +660,15 @@ impl Session {
                     })
                     .collect(),
             }),
+            schema::Query::Detail { peer } => schema::encode(&inner.detail(parse_peer(&peer)?)?),
+            schema::Query::Archived => {
+                let order = inner.model.archived_order();
+                schema::encode(&inner.listed(order))
+            }
+            schema::Query::Blocked => schema::encode(&inner.blocked()),
+            schema::Query::Me | schema::Query::Backup { .. } => {
+                return Err("answered above".to_string())
+            }
             schema::Query::Links => schema::encode(&schema::Links {
                 v: VERSION,
                 links: inner
@@ -522,6 +724,12 @@ impl Session {
                 v: VERSION,
                 detail: String::new(),
             });
+        }
+        // The mailbox closes its node before the runtime goes, so its lock
+        // and its store are let go of in order.
+        let here = self.here().take();
+        if let Some(mut here) = here {
+            runtime.block_on(here.stop());
         }
         runtime.shutdown_timeout(Duration::from_secs(2));
     }
@@ -655,7 +863,7 @@ impl Inner {
                     self.sending = false;
                     self.apply(event);
                 }
-                Finished::Pull { result, cursor } => self.pulled(result, cursor),
+                Finished::Pull(end) => self.pulled(end),
             }
         }
         self.look_at_link();
@@ -843,6 +1051,14 @@ impl Inner {
             self.runtime
                 .spawn(runner::hand_petnames(self.client.clone(), petnames, BUDGET));
         }
+        let states = self.model.take_peer_states();
+        if !states.is_empty() {
+            self.runtime.spawn(runner::hand_peer_states(
+                self.client.clone(),
+                states,
+                BUDGET,
+            ));
+        }
         let marks = self.model.take_marks();
         if marks.is_empty() {
             return;
@@ -948,43 +1164,48 @@ impl Inner {
             let home = self.home.clone();
             let done = self.finished_tx.clone();
             self.runtime.spawn(async move {
-                let (result, cursor) = runner::pull(&mut tap, &client, &home, BUDGET).await;
-                let _ = done.send(Finished::Pull { result, cursor });
+                let end = runner::pull(&mut tap, &client, &home, BUDGET).await;
+                let _ = done.send(Finished::Pull(end));
             });
         }
     }
 
     /// A pull ended: what it brought is in the store by now (the pump
     /// folded it before the runner saw its fence), so the cursor may pass it.
-    /// `result` counts the new messages it brought, never entries.
-    fn pulled(&mut self, result: Result<usize, String>, cursor: Option<u64>) {
+    /// `result` counts the new messages it brought, never entries. History
+    /// it imported (1159) the runner wrote to the store itself; the model
+    /// takes it from there, as the session lives on in the service and is
+    /// never restarted by closing the app.
+    fn pulled(&mut self, end: runner::PullEnd) {
         self.pulling = false;
-        runner::settle_pull(&self.home, cursor);
-        if let Some(say) = self.pull_line.ended(&result) {
+        runner::settle_pull(&self.home, end.cursor);
+        if end.imported > 0 {
+            self.persist();
+            match runner::show_imported(&mut self.model, &self.store) {
+                Ok(()) => tracing::info!("HOME imported rows={} shown", end.imported),
+                Err(error) => {
+                    tracing::warn!("HOME imported rows={} not shown: {error}", end.imported)
+                }
+            }
+            self.dirty = true;
+        }
+        if let Some(say) = self.pull_line.ended(&end.result) {
             self.say(say);
         }
-        self.apply(UiEvent::FetchDone(result));
+        self.apply(UiEvent::FetchDone(end.result));
     }
 
     fn conversations(&self) -> schema::Conversations {
-        let rows = chat::list_rows(&self.model)
+        let mut listed = self.listed(self.model.order());
+        listed.archived = u32::try_from(self.model.archived_order().len()).unwrap_or(u32::MAX);
+        listed
+    }
+
+    /// The list's rows for the conversations `order` names, in its order.
+    fn listed(&self, order: Vec<usize>) -> schema::Conversations {
+        let rows = chat::rows(&self.model, order)
             .into_iter()
-            .map(|row| schema::ConversationRow {
-                peer: loquax::address::to_hex(&row.peer),
-                name: row.name,
-                last: row.last,
-                ours: row.ours,
-                at: row.at.map_or(0, |at| at.unix_secs),
-                unread: u32::try_from(row.unread).unwrap_or(u32::MAX),
-                initials: row.initials,
-                icon_fg: row.icon.as_ref().map(|(fg, _)| fg.clone()),
-                icon_bg: row.icon.map(|(_, bg)| bg),
-                kind: row.kind.to_string(),
-                reaction: row.reaction,
-                state: row.mark.map_or("", chat::Mark::word).to_string(),
-                photo: self.photo(&row.peer),
-                linked: self.book.links.contains_key(&row.peer),
-            })
+            .map(|row| self.schema_row(row))
             .collect();
         let (address, initials) = self.model.address.map_or_else(Default::default, |own| {
             (loquax::address::to_hex(&own), self.initials(&own))
@@ -994,7 +1215,108 @@ impl Inner {
             conversations: rows,
             address,
             initials,
+            archived: 0,
+            home_client: self.model.home_client,
         }
+    }
+
+    /// Every blocked peer, with a conversation or without, as list rows
+    /// (1146): the settings screen's "Blocked contacts".
+    fn blocked(&self) -> schema::Conversations {
+        let mut listed = self.listed(Vec::new());
+        listed.conversations = self
+            .model
+            .names
+            .contacts
+            .blocked
+            .iter()
+            .map(|peer| self.list_row(peer))
+            .collect();
+        listed
+    }
+
+    /// One row of the list for `peer`, empty when it has no conversation.
+    fn list_row(&self, peer: &[u8; 16]) -> schema::ConversationRow {
+        self.schema_row(chat::list_row(&self.model, peer))
+    }
+
+    fn schema_row(&self, row: chat::ListRow) -> schema::ConversationRow {
+        schema::ConversationRow {
+            peer: loquax::address::to_hex(&row.peer),
+            name: row.name,
+            last: row.last,
+            ours: row.ours,
+            at: row.at.map_or(0, |at| at.unix_secs),
+            unread: u32::try_from(row.unread).unwrap_or(u32::MAX),
+            initials: row.initials,
+            icon_fg: row.icon.as_ref().map(|(fg, _)| fg.clone()),
+            icon_bg: row.icon.map(|(_, bg)| bg),
+            kind: row.kind.to_string(),
+            reaction: row.reaction,
+            state: row.mark.map_or("", chat::Mark::word).to_string(),
+            photo: self.photo(&row.peer),
+            linked: self.book.links.contains_key(&row.peer),
+            pinned: row.pinned,
+            muted: row.muted,
+        }
+    }
+
+    /// The contact screen of `peer` (1146).
+    fn detail(&self, peer: [u8; 16]) -> Result<schema::Detail, String> {
+        let row = self.list_row(&peer);
+        let facts = self.model.contact_facts(&peer);
+        let (qr_size, modules) = loquax::home::qr::address_modules(&peer)?;
+        let link = self.book.links.get(&peer);
+        let names = &self.model.names;
+        let positions = self
+            .store
+            .track(peer, POSITIONS_SHOWN)
+            .map_err(|error| error.to_string())?
+            .iter()
+            .map(|fix| schema::PositionRow {
+                at: fix.fix_time(),
+                lat_e6: fix.location.latitude_e6,
+                lon_e6: fix.location.longitude_e6,
+            })
+            .collect();
+        Ok(schema::Detail {
+            v: VERSION,
+            peer: row.peer,
+            name: row.name,
+            initials: row.initials,
+            icon_fg: row.icon_fg,
+            icon_bg: row.icon_bg,
+            photo: row.photo,
+            linked: link.is_some(),
+            lookup: link.map(|link| link.lookup.clone()),
+            contact_id: link.map(|link| link.contact_id),
+            petname: names.petname(&peer).map(str::to_string),
+            announced: names.announced(&peer).map(str::to_string),
+            fingerprint: fingerprint(&peer),
+            qr_size,
+            qr: schema::Blob(modules.into_iter().map(u8::from).collect()),
+            verified: facts.verified,
+            blocked: facts.state.blocked,
+            pinned: facts.state.pinned,
+            archived: facts.state.archived,
+            muted: self.model.muted(&peer),
+            muted_until: match facts.state.muted_until {
+                None => 0,
+                Some(loquax::ui::state::MUTED_ALWAYS) => -1,
+                Some(until) => until,
+            },
+            last_received: facts.last_received.map_or(0, |at| at.unix_secs),
+            last_sent: facts
+                .last_sent
+                .and_then(|(at, _)| at)
+                .map_or(0, |at| at.unix_secs),
+            last_sent_how: facts
+                .last_sent
+                .map(|(_, how)| how.to_string())
+                .unwrap_or_default(),
+            home_client: self.model.home_client,
+            positions,
+        })
     }
 
     fn messages(&self, peer: [u8; 16]) -> schema::Messages {
@@ -1031,6 +1353,7 @@ impl Inner {
                 .iter()
                 .map(|other| names.label(other))
                 .collect(),
+            verified: self.model.verified(&peer),
         }
     }
 
@@ -1191,11 +1514,11 @@ fn join_words(error: &loquax::home::client::HomeError, server: &str) -> String {
     use loquax::home::client::HomeError;
     match error {
         HomeError::NoPath => format!(
-            "The home node did not answer through {server}. Check the address, \
+            "Your mailbox did not answer through {server}. Check the address, \
              that its lnsd runs a TCP server there, and that this phone can reach it."
         ),
-        HomeError::Refused(status) => format!("The home node refused the code: {status}."),
-        HomeError::Timeout => "The home node did not answer in time. Try again.".to_string(),
+        HomeError::Refused(status) => format!("Your mailbox refused the code: {status}."),
+        HomeError::Timeout => "Your mailbox did not answer in time. Try again.".to_string(),
         other => format!("Joining failed: {other}."),
     }
 }
@@ -1207,6 +1530,16 @@ fn link_up(node: &leviculum_std::driver::ReticulumNode) -> bool {
     node.interface_stats()
         .iter()
         .any(|interface| !interface.is_local_client && interface.online)
+}
+
+/// An address in groups of four hex digits, to read out and compare.
+pub fn fingerprint(peer: &[u8; 16]) -> String {
+    let hex = loquax::address::to_hex(peer);
+    hex.as_bytes()
+        .chunks(4)
+        .map(|group| String::from_utf8_lossy(group).into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn wall_now(offset: i32) -> WallTime {

@@ -97,7 +97,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use crate::home::outgoing::Change;
 use crate::send::Leg;
 use crate::telemetry::{pack_fields, unpack_fields, Fix};
-use crate::ui::history::{Restored, StoreWrite, StoredHit, LOAD_WINDOW};
+use crate::ui::history::{Flags, Restored, StoreWrite, StoredHit, LOAD_WINDOW};
 use crate::ui::{LedgerEntry, Message, Signature};
 use crate::when::WallTime;
 use leviculum_lxmf::telemetry::Location;
@@ -106,7 +106,7 @@ use leviculum_lxmf::telemetry::Location;
 pub const STORE_FILE: &str = "history.sqlite3";
 
 /// The schema this program writes, in SQLite's `user_version`.
-pub const SCHEMA_VERSION: i32 = 6;
+pub const SCHEMA_VERSION: i32 = 7;
 
 /// How long a write waits for another loquax holding the file.
 const BUSY_MS: u64 = 5_000;
@@ -246,6 +246,15 @@ CREATE UNIQUE INDEX home_outbox_by_id ON home_outbox(identity, id);
 const SCHEMA_V6: &str = "
 ALTER TABLE messages ADD COLUMN origin TEXT;
 ALTER TABLE messages ADD COLUMN origin_verdict INTEGER;
+";
+
+/// What schema 7 adds to schema 6: a conversation's mute (unix seconds it
+/// ends, NULL for none), whether it is archived, and whether the reader
+/// verified the peer's identity in person (1146).
+const SCHEMA_V7: &str = "
+ALTER TABLE conversations ADD COLUMN muted_until INTEGER;
+ALTER TABLE conversations ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE conversations ADD COLUMN verified INTEGER NOT NULL DEFAULT 0;
 ";
 
 /// The model's key of the row at seq 0. The model counts keys unsigned
@@ -411,7 +420,7 @@ impl Store {
     fn create(&self) -> Result<(), StoreError> {
         let batch = format!(
             "BEGIN IMMEDIATE; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
-             {SCHEMA_V6} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
+             {SCHEMA_V6} {SCHEMA_V7} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
         );
         self.conn
             .execute_batch(&batch)
@@ -511,7 +520,10 @@ impl Store {
                 if version < 5 {
                     batch.push_str(SCHEMA_V5);
                 }
-                batch.push_str(SCHEMA_V6);
+                if version < 6 {
+                    batch.push_str(SCHEMA_V6);
+                }
+                batch.push_str(SCHEMA_V7);
                 batch.push_str(&format!("PRAGMA user_version = {SCHEMA_VERSION};"));
                 if let Err(error) = self.conn.execute_batch(&batch) {
                     let _ = self.conn.execute_batch("ROLLBACK");
@@ -549,7 +561,7 @@ impl Store {
         let mut statement = self
             .conn
             .prepare(
-                "SELECT c.peer, c.pinned, c.unread, \
+                "SELECT c.peer, c.pinned, c.unread, c.muted_until, c.archived, c.verified, \
                  (SELECT MAX(seq) FROM messages m \
                   WHERE m.identity = c.identity AND m.conversation = c.peer) AS last \
                  FROM conversations c WHERE c.identity = ?1 \
@@ -562,17 +574,23 @@ impl Store {
                     row.get::<_, Vec<u8>>(0)?,
                     row.get::<_, bool>(1)?,
                     row.get::<_, i64>(2)?,
+                    Flags {
+                        muted_until: row.get::<_, Option<i64>>(3)?,
+                        archived: row.get::<_, bool>(4)?,
+                        verified: row.get::<_, bool>(5)?,
+                    },
                 ))
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
             .map_err(|e| self.failed(e))?;
         let mut out = Vec::new();
-        for (peer, pinned, unread) in rows {
+        for (peer, pinned, unread, flags) in rows {
             let peer = self.address(&peer)?;
             let (messages, earlier) = self.page(peer, u64::MAX, None)?;
             out.push(Restored {
                 peer,
                 pinned,
+                flags,
                 unread: unread.max(0) as usize,
                 messages,
                 earlier,
@@ -776,16 +794,40 @@ impl Store {
     /// Every peer's latest position, by [`Fix::newer_than`], the clamp for
     /// a fix ahead of our clock applied as at receive time.
     pub fn positions(&self) -> Result<Vec<Fix>, StoreError> {
+        let mut latest: BTreeMap<[u8; 16], Fix> = BTreeMap::new();
+        for fix in self.fixes(None)? {
+            let newer = latest
+                .get(&fix.peer)
+                .is_none_or(|held| fix.newer_than(held));
+            if newer {
+                latest.insert(fix.peer, fix);
+            }
+        }
+        Ok(latest.into_values().collect())
+    }
+
+    /// `peer`'s newest `limit` positions by fix time, newest first: the
+    /// contact screen's list (1146).
+    pub fn track(&self, peer: [u8; 16], limit: usize) -> Result<Vec<Fix>, StoreError> {
+        let mut fixes = self.fixes(Some(peer))?;
+        fixes.sort_by_key(|fix| core::cmp::Reverse(fix.fix_time()));
+        fixes.truncate(limit);
+        Ok(fixes)
+    }
+
+    /// Every position the store holds, or `peer`'s only.
+    fn fixes(&self, peer: Option<[u8; 16]>) -> Result<Vec<Fix>, StoreError> {
         let mut statement = self
             .conn
             .prepare(
                 "SELECT peer, via, message, fix_time, received_at, lat_e6, lon_e6, alt_e2, \
                  speed_e2, bearing_e2, accuracy_e2, telemetry FROM positions \
-                 WHERE identity = ?1",
+                 WHERE identity = ?1 AND (?2 IS NULL OR peer = ?2)",
             )
             .map_err(|e| self.failed(e))?;
+        let peer = peer.map(|peer| peer.to_vec());
         let rows = statement
-            .query_map(params![&self.identity[..]], |row| {
+            .query_map(params![&self.identity[..], peer], |row| {
                 Ok((
                     row.get::<_, Vec<u8>>(0)?,
                     row.get::<_, Vec<u8>>(1)?,
@@ -805,24 +847,18 @@ impl Store {
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
             .map_err(|e| self.failed(e))?;
-        let mut latest: BTreeMap<[u8; 16], Fix> = BTreeMap::new();
-        for (peer, via, message, location, received_at, telemetry) in rows {
-            let fix = Fix {
-                peer: self.address(&peer)?,
-                via: self.address(&via)?,
-                message: message.map(key_of),
-                received_at,
-                location,
-                telemetry,
-            };
-            let newer = latest
-                .get(&fix.peer)
-                .is_none_or(|held| fix.newer_than(held));
-            if newer {
-                latest.insert(fix.peer, fix);
-            }
-        }
-        Ok(latest.into_values().collect())
+        rows.into_iter()
+            .map(|(peer, via, message, location, received_at, telemetry)| {
+                Ok(Fix {
+                    peer: self.address(&peer)?,
+                    via: self.address(&via)?,
+                    message: message.map(key_of),
+                    received_at,
+                    location,
+                    telemetry,
+                })
+            })
+            .collect()
     }
 
     /// How many positions the store holds for `peer`: the track.
@@ -1142,9 +1178,59 @@ impl Store {
         at: i64,
         cap_bytes: u64,
     ) -> Result<Option<u64>, StoreError> {
+        self.archive_newest_of(crate::home::KIND_PETNAME, peer, packed, at, cap_bytes)
+    }
+
+    /// Whether the archive holds a petname entry for `peer`, a cleared one
+    /// too: the reader said their word on that peer's name (1159).
+    pub fn archive_holds_petname(&self, peer: &[u8; 16]) -> Result<bool, StoreError> {
+        let prefix = crate::home::wire::name_entry_prefix(peer);
+        let prefix_len = i64::try_from(prefix.len()).unwrap_or(i64::MAX);
+        let found: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM archive WHERE identity = ?1 AND kind = ?2 \
+                 AND substr(packed, 1, ?3) = ?4 LIMIT 1",
+                params![
+                    &self.identity[..],
+                    i64::from(crate::home::KIND_PETNAME),
+                    prefix_len,
+                    &prefix[..]
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| self.failed(e))?;
+        Ok(found.is_some())
+    }
+
+    /// Append a peer state entry ([`crate::home::KIND_PEERSTATE`]) a client
+    /// handed in for `peer`, as [`Store::archive_petname`] appends a
+    /// petname: only the newest of a peer is kept (1146).
+    pub fn archive_peer_state(
+        &mut self,
+        peer: [u8; 16],
+        packed: &[u8],
+        at: i64,
+        cap_bytes: u64,
+    ) -> Result<Option<u64>, StoreError> {
+        self.archive_newest_of(crate::home::KIND_PEERSTATE, peer, packed, at, cap_bytes)
+    }
+
+    /// Append an entry of `kind` for `peer` whose bytes begin with
+    /// [`crate::home::wire::name_entry_prefix`], keeping only the newest of
+    /// that kind and peer; the same bytes as the newest append nothing.
+    fn archive_newest_of(
+        &mut self,
+        archive_kind: u8,
+        peer: [u8; 16],
+        packed: &[u8],
+        at: i64,
+        cap_bytes: u64,
+    ) -> Result<Option<u64>, StoreError> {
         let identity = self.identity;
         let path = self.path.clone();
-        let kind = i64::from(crate::home::KIND_PETNAME);
+        let kind = i64::from(archive_kind);
         let prefix = crate::home::wire::name_entry_prefix(&peer);
         let prefix_len = i64::try_from(prefix.len()).unwrap_or(i64::MAX);
         let tx = self
@@ -1167,16 +1253,8 @@ impl Store {
         let mut keyed = packed.to_vec();
         keyed.extend_from_slice(&at.to_be_bytes());
         let id = leviculum_core::crypto::sha256(&keyed);
-        let seq = append_in(
-            &tx,
-            &identity,
-            crate::home::KIND_PETNAME,
-            &id,
-            packed,
-            at,
-            cap_bytes,
-        )
-        .map_err(|e| failed(&path, e))?;
+        let seq = append_in(&tx, &identity, archive_kind, &id, packed, at, cap_bytes)
+            .map_err(|e| failed(&path, e))?;
         if let Some(seq) = seq {
             tx.execute(
                 "DELETE FROM archive WHERE identity = ?1 AND kind = ?2 AND seq <> ?3 \
@@ -1264,17 +1342,18 @@ impl Store {
     }
 
     /// The newest sequence a client is woken for: every entry's but a
-    /// name's (1136) and a petname's (1139), which ride along with the next
-    /// pull.
+    /// name's (1136), a petname's (1139) and a peer state's (1146), which
+    /// ride along with the next pull.
     pub fn archive_newest_waking(&self) -> Result<u64, StoreError> {
         let newest: Option<i64> = self
             .conn
             .query_row(
-                "SELECT MAX(seq) FROM archive WHERE identity = ?1 AND kind NOT IN (?2, ?3)",
+                "SELECT MAX(seq) FROM archive WHERE identity = ?1 AND kind NOT IN (?2, ?3, ?4)",
                 params![
                     &self.identity[..],
                     i64::from(crate::home::KIND_NAME),
-                    i64::from(crate::home::KIND_PETNAME)
+                    i64::from(crate::home::KIND_PETNAME),
+                    i64::from(crate::home::KIND_PEERSTATE)
                 ],
                 |row| row.get(0),
             )
@@ -2176,12 +2255,24 @@ fn apply(
             peer,
             pinned,
             unread,
+            flags,
         } => {
             tx.execute(
-                "INSERT INTO conversations(identity, peer, pinned, unread) \
-                 VALUES (?1, ?2, ?3, ?4) ON CONFLICT(identity, peer) DO UPDATE SET \
-                 pinned = excluded.pinned, unread = excluded.unread",
-                params![&identity[..], &peer[..], pinned, *unread as i64],
+                "INSERT INTO conversations(identity, peer, pinned, unread, muted_until, \
+                 archived, verified) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                 ON CONFLICT(identity, peer) DO UPDATE SET \
+                 pinned = excluded.pinned, unread = excluded.unread, \
+                 muted_until = excluded.muted_until, archived = excluded.archived, \
+                 verified = excluded.verified",
+                params![
+                    &identity[..],
+                    &peer[..],
+                    pinned,
+                    *unread as i64,
+                    flags.muted_until,
+                    flags.archived,
+                    flags.verified
+                ],
             )?;
         }
         StoreWrite::ForgetMessage { key } => {
@@ -2434,6 +2525,11 @@ mod tests {
                 peer: ALICE,
                 pinned: true,
                 unread: 1,
+                flags: Flags {
+                    muted_until: Some(i64::MAX),
+                    archived: true,
+                    verified: true,
+                },
             }])
             .expect("pin");
         drop(store);
@@ -2446,6 +2542,9 @@ mod tests {
         assert!(alice.pinned);
         assert_eq!(alice.unread, 1);
         assert_eq!(alice.earlier, 0);
+        // 1146: the mute, the archive and the verified mark survive.
+        assert_eq!(alice.flags.muted_until, Some(i64::MAX));
+        assert!(alice.flags.archived && alice.flags.verified);
         assert_eq!(
             alice.messages,
             vec![sent, message(2, false, "yes, from ten")]
@@ -2880,9 +2979,17 @@ mod tests {
         let store = Store::open_in(home.path(), US).expect("reopen");
         assert_eq!(
             store.positions().expect("positions"),
-            vec![direct],
+            vec![direct.clone()],
             "integers as they were"
         );
+        // 1146: the track, newest first, as many as asked.
+        let track = store.track(BOB, 5).expect("track");
+        assert_eq!(
+            track.iter().map(Fix::fix_time).collect::<Vec<_>>(),
+            [5_000, 4_000]
+        );
+        assert_eq!(store.track(BOB, 1).expect("track"), vec![direct]);
+        assert!(store.track(ALICE, 5).expect("track").is_empty());
         // Scoped to our address like every table.
         let other = Store::open_in(home.path(), [0x02; 16]).expect("as another");
         assert!(other.positions().expect("positions").is_empty());

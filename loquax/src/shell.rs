@@ -163,6 +163,9 @@ struct FetchEnd {
     /// On a client of a home node: the cursor to save, once the events the
     /// pull caused are in the store ([`loquax::home::client::Pull::cursor`]).
     cursor: Option<u64>,
+    /// On a client of a home node: the imported history rows the pull wrote
+    /// to the store ([`runner::PullEnd::imported`]).
+    imported: usize,
 }
 
 /// A runner's tap that notes the first node a selection named.
@@ -367,6 +370,7 @@ impl Shell {
     fn persist(&mut self) {
         self.hand_marks();
         self.hand_petnames();
+        self.hand_peer_states();
         let writes = self.model.take_writes();
         if let Err(error) = self.store.write(&writes) {
             loquax::events::store_failed(&error.to_string());
@@ -395,6 +399,23 @@ impl Shell {
         let budget = self.context.timeout;
         self.mark_tasks.push(tokio::spawn(runner::hand_petnames(
             client, petnames, budget,
+        )));
+    }
+
+    /// The peer states the reader set (1146), handed to the home node as
+    /// petnames are.
+    fn hand_peer_states(&mut self) {
+        let states = self.model.take_peer_states();
+        let Some(client) = self.context.client.clone() else {
+            return;
+        };
+        if states.is_empty() {
+            return;
+        }
+        self.mark_tasks.retain(|task| !task.is_finished());
+        let budget = self.context.timeout;
+        self.mark_tasks.push(tokio::spawn(runner::hand_peer_states(
+            client, states, budget,
         )));
     }
 
@@ -678,6 +699,9 @@ impl Shell {
         // poll that handed the runner its fence; only now may the cursor
         // pass it.
         runner::settle_pull(&self.context.home, end.cursor);
+        if end.imported > 0 {
+            self.show_imported(end.imported);
+        }
         match &end.result {
             Ok(new) => tracing::info!(
                 "SYNC done reason={reason} result=ok new={new} elapsed_ms={}",
@@ -694,6 +718,16 @@ impl Shell {
         }
         self.judge(&end);
         self.apply(UiEvent::FetchDone(end.result.map_err(|e| e.to_string())));
+    }
+
+    /// The history a pull imported into the store, shown now (1159): the
+    /// model's pending writes go first, so what it reads back is whole.
+    fn show_imported(&mut self, imported: usize) {
+        self.persist();
+        match runner::show_imported(&mut self.model, &self.store) {
+            Ok(()) => tracing::info!("SYNC imported rows={imported} shown"),
+            Err(error) => tracing::warn!("SYNC imported rows={imported} not shown: {error}"),
+        }
     }
 
     /// Count the fetch toward its node's streak. A node that did not answer
@@ -883,19 +917,23 @@ async fn send(
 async fn fetch(tap: Tap, context: RunContext) -> FetchEnd {
     let started = tokio::time::Instant::now();
     let mut watched = Watched { tap, node: None };
-    let (result, cursor) = match &context.client {
+    let (result, cursor, imported) = match &context.client {
         Some(client) => {
-            let (result, cursor) =
-                runner::pull(&mut watched, client, &context.home, context.timeout).await;
-            (result.map_err(FetchError::SyncFailed), cursor)
+            let end = runner::pull(&mut watched, client, &context.home, context.timeout).await;
+            (
+                end.result.map_err(FetchError::SyncFailed),
+                end.cursor,
+                end.imported,
+            )
         }
-        None => (drain(&mut watched, context).await, None),
+        None => (drain(&mut watched, context).await, None, 0),
     };
     FetchEnd {
         result,
         node: watched.node,
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         cursor,
+        imported,
     }
 }
 

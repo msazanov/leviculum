@@ -6,7 +6,8 @@
 
   <uses-sdk a:minSdkVersion='{{MIN_SDK}}' a:targetSdkVersion='{{TARGET_SDK}}'/>
 
-  <!-- The one TCP connection to the home node. -->
+  <!-- The one TCP connection to the home node, or, with the mailbox on
+       the phone, to the entry servers and the screens' loopback one. -->
   <uses-permission a:name='android.permission.INTERNET'/>
   <!-- The service that holds the session in the background (LoquaxService). -->
   <uses-permission a:name='android.permission.FOREGROUND_SERVICE'/>
@@ -19,6 +20,11 @@
        suggestions; without it a picked contact is read once by the
        picker's own grant (Book). Nothing of it leaves the phone. -->
   <uses-permission a:name='android.permission.READ_CONTACTS'/>
+  <!-- The scanner (1152): asked when the user taps "Scan the code"; the
+       frames go to the library's decoder and nowhere else. A phone
+       without a camera pastes the code instead. -->
+  <uses-permission a:name='android.permission.CAMERA'/>
+  <uses-feature a:name='android.hardware.camera.any' a:required='false'/>
 
   <application a:label='@string/app_name'
                a:icon='@android:drawable/sym_def_app_icon'
@@ -50,6 +56,19 @@
       </intent-filter>
     </activity>
 
+    <!-- The first start (1152): where the mailbox lives, the background
+         permission, the address. -->
+    <activity a:name='network.leviculum.loquax.WelcomeActivity'
+              a:theme='@style/Loquax.List'
+              a:exported='false'/>
+
+    <activity a:name='network.leviculum.loquax.BackupActivity'
+              a:theme='@style/Loquax.List'
+              a:exported='false'/>
+
+    <activity a:name='network.leviculum.loquax.ScanActivity'
+              a:exported='false'/>
+
     <activity a:name='network.leviculum.loquax.ConversationsActivity'
               a:theme='@style/Loquax.List'
               a:exported='false'/>
@@ -65,6 +84,14 @@
               a:windowSoftInputMode='adjustResize'/>
 
     <activity a:name='network.leviculum.loquax.MapActivity' a:exported='false'/>
+
+    <activity a:name='network.leviculum.loquax.ContactActivity'
+              a:theme='@style/Loquax.List'
+              a:exported='false'/>
+
+    <activity a:name='network.leviculum.loquax.SettingsActivity'
+              a:theme='@style/Loquax.List'
+              a:exported='false'/>
 
     <service a:name='network.leviculum.loquax.LoquaxService'
              a:exported='false'

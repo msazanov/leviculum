@@ -42,6 +42,7 @@
 use std::collections::HashMap;
 use std::string::{String, ToString};
 use std::sync::Arc;
+use std::time::Instant;
 use std::vec::Vec;
 
 use leviculum_map::draw::Ink;
@@ -131,6 +132,10 @@ pub struct Stats {
     pub evicted: u64,
     /// Times the whole cache was dropped: a new epoch or style.
     pub cleared: u64,
+    /// Microseconds the workers spent drawing tiles, each worker's own
+    /// time summed: on one worker the CPU a cold frame's tiles cost; on
+    /// more it is that or above, as the workers share cores.
+    pub render_us: u64,
 }
 
 /// One frame asked of the cache.
@@ -184,6 +189,13 @@ pub struct TileCache {
     painters: Vec<Painter>,
     workers: usize,
     pub stats: Stats,
+    /// A frame's buffer handed back ([`recycle`](Self::recycle)), composed
+    /// into next.
+    spare: Vec<u8>,
+    /// Compose as before 1154, no buffer reused and no fast path: the
+    /// reference a test holds the fast path to.
+    #[cfg(test)]
+    pub(crate) reference: bool,
 }
 
 impl TileCache {
@@ -205,7 +217,16 @@ impl TileCache {
             painters: Vec::new(),
             workers,
             stats: Stats::default(),
+            spare: Vec::new(),
+            #[cfg(test)]
+            reference: false,
         }
+    }
+
+    /// Take `rgba` back, a frame's buffer once shown: the next frame of
+    /// the same size is composed into it.
+    pub fn recycle(&mut self, rgba: Vec<u8>) {
+        self.spare = rgba;
     }
 
     /// Draw on `n` threads at most (at least one).
@@ -261,12 +282,45 @@ impl TileCache {
 
     /// `frame` composed from the tiles of its zoom step.
     pub fn compose(&mut self, frame: &Frame) -> Composed {
+        let (w, h) = frame.view.size();
+        let len = w as usize * h as usize * 4;
+        #[cfg(test)]
+        if self.reference {
+            self.spare = Vec::new();
+        }
+        let reused = self.spare.len() == len;
+        let mut rgba = match reused {
+            true => std::mem::take(&mut self.spare),
+            false => vec![0u8; len],
+        };
+        // Sized here to the view, so it is composed.
+        let (attribution, missing) = self
+            .compose_into(frame, &mut rgba, !reused)
+            .unwrap_or_else(|| (outline::ATTRIBUTION.to_string(), 0));
+        Composed {
+            rgba,
+            attribution,
+            missing,
+        }
+    }
+
+    /// [`compose`](Self::compose) into `rgba`, the view's size, which a
+    /// frontend owns (the phone's Bitmap, 1155); `blank` when it is all
+    /// zero, otherwise it may hold anything. The credit and the tiles
+    /// owed; none for a buffer of another size, which is left as it is.
+    pub fn compose_into(
+        &mut self,
+        frame: &Frame,
+        rgba: &mut [u8],
+        blank: bool,
+    ) -> Option<(String, usize)> {
         let percent = frame.percent();
         self.check(frame.style, percent);
         self.shown_from = self.tick + 1;
         let (w, h) = frame.view.size();
-        // Alpha zero is a pixel nothing covers yet: a tile's are opaque.
-        let mut rgba = vec![0u8; w as usize * h as usize * 4];
+        if rgba.len() != w as usize * h as usize * 4 {
+            return None;
+        }
         let grid = Grid::of(&frame.view, frame.zoom);
         let keys = grid.keys(frame.style, percent);
         let mut got: Vec<Option<Held>> = Vec::with_capacity(keys.len());
@@ -293,10 +347,19 @@ impl TileCache {
             self.put(key, tile.0.clone(), tile.1.clone());
             got[i] = Some(tile);
         }
-        grid.sample(&frame.view, &got, &mut rgba, self.workers);
+        // Every tile there: the grid writes every pixel, so the buffer
+        // need not start blank and nothing is left to cover after.
+        let whole = got.iter().all(Option::is_some);
+        #[cfg(test)]
+        let whole = whole && !self.reference;
+        if !blank && !whole {
+            // Alpha zero is a pixel nothing covers yet: a tile's are opaque.
+            rgba.fill(0);
+        }
+        grid.sample(&frame.view, &got, rgba, self.workers, whole);
         if !left.is_empty() {
             for z in stand_ins(frame) {
-                if covered(&rgba) {
+                if covered(rgba) {
                     break;
                 }
                 let under = Grid::of(&frame.view, z);
@@ -306,17 +369,17 @@ impl TileCache {
                 }
                 let tiles: Vec<Option<Held>> =
                     keys.iter().map(|k| k.and_then(|k| self.get(&k))).collect();
-                under.sample(&frame.view, &tiles, &mut rgba, self.workers);
+                under.sample(&frame.view, &tiles, rgba, self.workers, false);
             }
         }
-        if !covered(&rgba) {
+        if !whole && !covered(rgba) {
             match left.is_empty() {
                 // Only the margin off the projection is left.
                 true => {
                     let [r, g, b] = rgb888(outline::water(frame.style.theme));
-                    fill_uncovered(&mut rgba, |_| [r, g, b, 0xff]);
+                    fill_uncovered(rgba, |_| [r, g, b, 0xff]);
                 }
-                false => outline_under(&frame.view, frame.style.theme, &mut rgba, self.workers),
+                false => outline_under(&frame.view, frame.style.theme, rgba, self.workers),
             }
         }
         let attribution = got
@@ -325,11 +388,7 @@ impl TileCache {
             .map(|(_, a)| a)
             .find(|a| a.as_ref() != outline::ATTRIBUTION)
             .map_or_else(|| outline::ATTRIBUTION.to_string(), |a| a.to_string());
-        Composed {
-            rgba,
-            attribution,
-            missing: left.len(),
-        }
+        Some((attribution, left.len()))
     }
 
     fn get(&mut self, key: &TileKey) -> Option<Held> {
@@ -462,29 +521,35 @@ impl TileCache {
         while self.painters.len() < n {
             self.painters.push(Painter::new(self.maps.clone()));
         }
-        if n == 1 {
-            let painter = &mut self.painters[0];
-            return keys.iter().map(|k| draw_tile(painter, k)).collect();
-        }
-        let per = keys.len().div_ceil(n);
-        std::thread::scope(|s| {
-            let jobs: Vec<_> = self
-                .painters
-                .iter_mut()
-                .zip(keys.chunks(per))
-                .map(|(painter, chunk)| {
-                    s.spawn(move || {
-                        chunk
-                            .iter()
-                            .map(|k| draw_tile(painter, k))
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .collect();
-            jobs.into_iter()
-                .flat_map(|j| j.join().unwrap_or_default())
-                .collect()
-        })
+        // Each worker's own time drawing: its share of the CPU.
+        let timed = |painter: &mut Painter, chunk: &[TileKey]| {
+            let started = Instant::now();
+            let drawn: Vec<_> = chunk.iter().map(|k| draw_tile(painter, k)).collect();
+            let us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+            (drawn, us)
+        };
+        let (drawn, us) = if n == 1 {
+            timed(&mut self.painters[0], keys)
+        } else {
+            let per = keys.len().div_ceil(n);
+            std::thread::scope(|s| {
+                let jobs: Vec<_> = self
+                    .painters
+                    .iter_mut()
+                    .zip(keys.chunks(per))
+                    .map(|(painter, chunk)| s.spawn(move || timed(painter, chunk)))
+                    .collect();
+                jobs.into_iter().map(|j| j.join().unwrap_or_default()).fold(
+                    (Vec::new(), 0u64),
+                    |(mut all, us), (drawn, t)| {
+                        all.extend(drawn);
+                        (all, us.saturating_add(t))
+                    },
+                )
+            })
+        };
+        self.stats.render_us = self.stats.render_us.saturating_add(us);
+        drawn
     }
 }
 
@@ -593,11 +658,26 @@ fn draw_tile(painter: &mut Painter, key: &TileKey) -> (TileKey, Vec<u8>, String)
         TILE,
     );
     let drawn = painter.draw(&view, Ink::Colour, key.style, key.percent);
-    let mut rgba = Vec::with_capacity(drawn.fb.len() * 4);
-    for &px in &drawn.fb {
-        rgba.extend_from_slice(&opaque(px));
+    (*key, to_rgba(&drawn.fb), drawn.attribution)
+}
+
+/// A drawn tile's big endian Rgb565 pixels as opaque RGBA, the bytes
+/// [`opaque`] gives each, in one pass over a buffer of the final size: a
+/// pixel pushed at a time through the colour types cost about a fifth of
+/// a cold frame's tile time (the render study of 2026-10-30).
+fn to_rgba(fb: &[u16]) -> Vec<u8> {
+    let mut rgba = vec![0u8; fb.len() * 4];
+    for (out, &px) in rgba.chunks_exact_mut(4).zip(fb) {
+        let v = u16::from_be(px);
+        let (r, g, b) = ((v >> 11) & 31, (v >> 5) & 63, v & 31);
+        out.copy_from_slice(&[
+            ((r << 3) | (r >> 2)) as u8,
+            ((g << 2) | (g >> 4)) as u8,
+            ((b << 3) | (b >> 2)) as u8,
+            0xff,
+        ]);
     }
-    (*key, rgba, drawn.attribution)
+    rgba
 }
 
 /// The pan's velocity, a moving average in screen pixels a second that
@@ -859,7 +939,21 @@ impl Grid {
     /// covered (opaque) or whose tile is absent is left as it is; a
     /// neighbour whose tile is absent gives way to the nearest sample.
     /// Rows split over `workers`.
-    fn sample(&self, view: &ExactView, tiles: &[Option<Held>], rgba: &mut [u8], workers: usize) {
+    ///
+    /// With `whole` every tile is there and every pixel is written, what
+    /// `rgba` held before not read (1154): at a scale of one a row is
+    /// copied in runs, one a tile it crosses; between steps the bilinear
+    /// sums run two channels at once in the 32-bit halves of a `u64`. The
+    /// same bytes as the pixel by pixel path, which a frame with a tile
+    /// missing takes.
+    fn sample(
+        &self,
+        view: &ExactView,
+        tiles: &[Option<Held>],
+        rgba: &mut [u8],
+        workers: usize,
+        whole: bool,
+    ) {
         let (w, h) = view.size();
         let t = i64::from(TILE);
         let nearest = self.scale == 1.0;
@@ -891,9 +985,42 @@ impl Grid {
             (at(p), at(p + 1), f)
         };
         let stride = w as usize * 4;
+        // At a scale of one, the runs of columns that read consecutive
+        // pixels of one tile column: `(x, n, c, ox)`, `n` columns from `x`
+        // reading tile column `c` from its pixel `ox`.
+        let mut runs: Vec<(usize, usize, usize, usize)> = Vec::new();
+        if whole && nearest {
+            for (x, &((c, ox), _, _)) in cols.iter().enumerate() {
+                match runs.last_mut() {
+                    Some(run) if run.2 == c && run.3 + run.1 == ox => run.1 += 1,
+                    _ => runs.push((x, 1, c, ox)),
+                }
+            }
+        }
+        let tile = |r: usize, c: usize| tiles.get(r * self.cols + c).and_then(|t| t.as_ref());
+        // Pixel row `o` of every tile of tile row `r`, when all are there.
+        let tile_rows = |r: usize, o: usize| -> Option<Vec<&[u8]>> {
+            let line = TILE as usize * 4;
+            (0..self.cols)
+                .map(|c| tile(r, c).and_then(|(rgba, _)| rgba.get(o * line..(o + 1) * line)))
+                .collect()
+        };
         let one_row = |y: u32, out: &mut [u8]| {
             let ((r0, o0), (r1, o1), fy) = row(y);
-            let tile = |r: usize, c: usize| tiles.get(r * self.cols + c).and_then(|t| t.as_ref());
+            if whole && nearest {
+                if let Some(top) = tile_rows(r0, o0) {
+                    for &(x, n, c, ox) in &runs {
+                        out[x * 4..(x + n) * 4].copy_from_slice(&top[c][ox * 4..(ox + n) * 4]);
+                    }
+                    return;
+                }
+            }
+            if whole && !nearest {
+                if let (Some(top), Some(bottom)) = (tile_rows(r0, o0), tile_rows(r1, o1)) {
+                    bilinear_row(&cols, &top, &bottom, fy, out);
+                    return;
+                }
+            }
             let px = |r: usize, oy: usize, c: usize, ox: usize| {
                 tile(r, c).map(|(rgba, _)| {
                     let i = (oy * TILE as usize + ox) * 4;
@@ -940,6 +1067,42 @@ impl Grid {
                 });
             }
         });
+    }
+}
+
+/// One row of a frame between steps with every tile there (1154): each
+/// pixel `out` holds the bilinear mix of the four tile pixels its column's
+/// [`Step`] and the row's weight `fy` name, `top` and `bottom` the pixel
+/// rows of the two tile rows, a slice a tile column. The sums of
+/// [`Grid::sample`]'s pixel by pixel path, red and blue in the two 32-bit
+/// halves of one `u64` and green and alpha in another: a channel's sum is
+/// below 2^24, so the halves never carry into each other.
+fn bilinear_row(cols: &[Step], top: &[&[u8]], bottom: &[&[u8]], fy: u32, out: &mut [u8]) {
+    const LOW: u64 = 0x0000_00ff_0000_00ff;
+    const HALF: u64 = 0x0000_8000_0000_8000;
+    // Red and blue, and green and alpha, of the pixel at `x` of `p`.
+    let lanes = |p: &[u8], x: usize| {
+        let q = &p[x * 4..x * 4 + 4];
+        (
+            u64::from(q[0]) | (u64::from(q[2]) << 32),
+            u64::from(q[1]) | (u64::from(q[3]) << 32),
+        )
+    };
+    let (wy1, wy0) = (u64::from(fy), u64::from(256 - fy));
+    for (px, &((c0, x0), (c1, x1), fx)) in out.chunks_exact_mut(4).zip(cols) {
+        let (wx1, wx0) = (u64::from(fx), u64::from(256 - fx));
+        let mix = |a: u64, b: u64, c: u64, d: u64| {
+            let upper = a * wx0 + b * wx1;
+            let lower = c * wx0 + d * wx1;
+            ((upper * wy0 + lower * wy1 + HALF) >> 16) & LOW
+        };
+        let (a0, a1) = lanes(top[c0], x0);
+        let (b0, b1) = lanes(top[c1], x1);
+        let (c0_, c1_) = lanes(bottom[c0], x0);
+        let (d0, d1) = lanes(bottom[c1], x1);
+        let even = mix(a0, b0, c0_, d0);
+        let odd = mix(a1, b1, c1_, d1);
+        px.copy_from_slice(&[even as u8, odd as u8, (even >> 32) as u8, (odd >> 32) as u8]);
     }
 }
 
@@ -1425,5 +1588,36 @@ mod tests {
         assert_eq!(cache.stats.prefetched as usize, first + 2);
         assert_eq!(cache.stats.evicted, 0);
         assert!(cache.bytes() <= room * TILE_BYTES);
+    }
+
+    /// The one pass to RGBA is [`opaque`]'s bytes for every colour.
+    #[test]
+    fn the_direct_rgba_loop_gives_every_colour_as_opaque_does() {
+        let all: Vec<u16> = (0..=u16::MAX).collect();
+        let want: Vec<u8> = all.iter().flat_map(|&p| opaque(p)).collect();
+        assert!(to_rgba(&all) == want, "a colour differs");
+    }
+
+    /// A painter that kept its filler's storage from tile to tile, after a
+    /// taller view too, draws the bytes a fresh painter draws for each
+    /// (1155): what an earlier fill left is never read.
+    #[test]
+    fn a_painter_that_kept_its_scratch_draws_as_a_fresh_one() {
+        let (_dir, maps) = maps();
+        let mut kept = Painter::new(maps.clone());
+        let tall = Viewport::new(duomo(), 15, 300, 700);
+        let _ = kept.draw(&tall, Ink::Colour, Style::PC, 100);
+        let mut keys = Vec::new();
+        for z in [13u8, 15, 16] {
+            let view = ExactView::new(duomo(), u32::from(z) * MILLI, 700, 700);
+            let grid = Grid::of(&view, z);
+            keys.extend(grid.keys(Style::PC, 100).into_iter().flatten());
+        }
+        assert!(keys.len() > 20, "{} tiles", keys.len());
+        for key in &keys {
+            let again = draw_tile(&mut kept, key);
+            let fresh = draw_tile(&mut Painter::new(maps.clone()), key);
+            assert!(again == fresh, "tile {key:?} differs");
+        }
     }
 }

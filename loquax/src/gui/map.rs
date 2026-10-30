@@ -84,6 +84,7 @@ pub(super) mod tests {
             zooms: (0, 20),
             draw_pins: false,
             measure: Some(measure),
+            scaled_while_moving: false,
         })
     }
 
@@ -215,6 +216,7 @@ pub(super) mod tests {
             zooms: (0, 20),
             draw_pins: false,
             measure: Some(measure),
+            scaled_while_moving: false,
         });
         assert!(plain_frames.names().is_empty());
         let mut frames = florence();

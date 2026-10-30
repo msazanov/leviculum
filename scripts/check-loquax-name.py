@@ -11,7 +11,8 @@ of the product and starts with a capital.
 
 Nothing held that apart before: the crate was named lnmsg, renamed loquax, and
 the docs followed the crate name in prose. This gate reads every
-`docs/src/**/*.md` and refuses a bare lower-case `loquax` outside those forms,
+`docs/src/**/*.md`, and the READMEs outside it that a person reads first
+(`EXTRA`), and refuses a bare lower-case `loquax` outside those forms,
 so the next page written in a hurry is told at the guard step, not by Lew.
 
 What counts as not prose, after fenced code blocks, code spans, link targets
@@ -43,6 +44,8 @@ LINK_TARGET = re.compile(r"\]\([^)]*\)")
 URL = re.compile(r"https?://\S+")
 BOLD = re.compile(r"\*\*[^*]+?\*\*")
 MAN_NAME = re.compile(r"^loquax -- ")
+# Pages outside docs/src that describe the product, relative to the root.
+EXTRA = ["loquax-android/README.md"]
 
 
 def is_prose(line: str, start: int) -> bool:
@@ -147,9 +150,10 @@ def main() -> int:
         return 1
 
     docs = args.root / "docs" / "src"
+    pages = [(path, "man" in path.relative_to(docs).parts[:1]) for path in sorted(docs.rglob("*.md"))]
+    pages += [(args.root / name, False) for name in EXTRA]
     bad = 0
-    for path in sorted(docs.rglob("*.md")):
-        man = "man" in path.relative_to(docs).parts[:1]
+    for path, man in pages:
         for number, text in findings(path.read_text(encoding="utf-8"), man):
             print(f"{path.relative_to(args.root)}:{number}: {text}")
             bad += 1

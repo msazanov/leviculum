@@ -391,7 +391,24 @@ message twice is one entry, so a second import appends nothing.
 - **On pull** the client keeps these entries apart from the engine's
   (`Pull::imported`) and writes them into its store as imported history,
   one conversation at a time, before the cursor may pass them
-  (`runner::keep_imported`). The screen shows them from its next start.
+  (`runner::keep_imported`). 1159: the pull says how many rows were new
+  (`PullEnd::imported`), and every frontend that ran it, the terminal, the
+  window and the Android session, has its running model take them from the
+  store (`runner::show_imported`, `UiModel::grown`): a conversation new to
+  the screen is listed, one loaded down to its oldest message gets the
+  rows above it, one with more still in the store loads them as the reader
+  scrolls. On Android the session lives on in the service, so closing the
+  app restarts nothing; the history has to show in the running session.
+- **The contacts' names** travel as petnames (1159). An import on the home
+  node merges the source's contacts into its contacts file and archives
+  each name as a petname entry, the way a client's `/petname` is kept
+  (`server::archive_petnames`), for NomadNet and Ratspeak alike. A peer the
+  archive already holds a petname entry for, a cleared one too, keeps it:
+  the reader's word on that peer was said. A home node that imported
+  before 1159 holds the names in its contacts file alone; its start
+  archives each one that has no petname entry and says how many in one
+  line, `HOME petnames backfilled=N contacts=M`. A second start archives
+  nothing.
 - A client from before 1150 finds no message id in such an entry and
   passes it by, as it passes every kind it does not know. `loquax fetch`
   keeps no history and passes them by too.
@@ -485,6 +502,15 @@ run: they take the lock shared, so any number of them run side by side, none
 runs while the daemon does (each refuses, naming its pid), and the daemon
 does not start under one. Beside the messenger they run unlocked, as before
 the lock existed.
+
+On a phone the home node runs inside the app (1152): the same
+`home::daemon::run`, with `DaemonUpstream::Mesh` instead of a shared
+instance, because a phone has no lnsd. Its node dials the entry servers
+and serves the app's own screens on a loopback port; the screens join it
+with a token it issues itself and stay its client, so the local and the
+external case are one code path. A `stop` channel ends it in place of
+SIGTERM, which belongs to the app's process, and its propagation node is
+selected from its own node's path table (`loquax-android/src/mailbox.rs`).
 
 A client is a laptop that ran `loquax mailbox join`. Its messenger pulls at
 start and on the propagation node's schedule (`F5` and `Ctrl-r` too) and shows the

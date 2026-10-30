@@ -55,7 +55,7 @@ impl Book {
 
     /// The table as its file says it.
     pub fn text(&self) -> String {
-        let mut out = String::from("# loquax's links to the phone's address book\n");
+        let mut out = String::from("# Loquax's links to the phone's address book\n");
         for (peer, link) in &self.links {
             out.push_str(&format!(
                 "link {} {} {} {}\n",

@@ -41,6 +41,32 @@ pub fn encode(text: &str) -> Result<QrCode, String> {
         .map_err(|error| alloc::format!("the code does not fit a QR code: {error}"))
 }
 
+/// A peer's address as a QR code, its hex in upper case so it goes in the
+/// alphanumeric mode: the side in modules and the modules row by row, true
+/// for dark, without the quiet zone (1146).
+pub fn address_modules(address: &[u8; 16]) -> Result<(u32, Vec<bool>), String> {
+    let text = crate::address::to_hex(address).to_ascii_uppercase();
+    let qr = QrCode::encode_segments(&[QrSegment::make_alphanumeric(&text)], QrCodeEcc::Medium)
+        .map_err(|error| alloc::format!("the address does not fit a QR code: {error}"))?;
+    Ok(grid(&qr))
+}
+
+/// A code or a backup line ([`encode`]) as modules, as [`address_modules`]
+/// gives an address's: the paper backup of 1152.
+pub fn modules(text: &str) -> Result<(u32, Vec<bool>), String> {
+    Ok(grid(&encode(text)?))
+}
+
+/// The side in modules and the modules row by row, true for dark.
+fn grid(qr: &QrCode) -> (u32, Vec<bool>) {
+    let size = qr.size();
+    let modules = (0..size)
+        .flat_map(|y| (0..size).map(move |x| (x, y)))
+        .map(|(x, y)| qr.get_module(x, y))
+        .collect();
+    (u32::try_from(size).unwrap_or(0), modules)
+}
+
 /// The QR code of `text` as lines of half blocks.
 pub fn lines(text: &str) -> Result<Vec<String>, String> {
     Ok(draw(&encode(text)?))
@@ -112,6 +138,18 @@ mod tests {
             }
         }
         qr
+    }
+
+    /// 1146: an address is 32 alphanumeric characters, version 2 at
+    /// level M, and its modules are the symbol's.
+    #[test]
+    fn an_address_is_a_small_symbol() {
+        let (size, modules) = address_modules(&[0x9c; 16]).expect("fits");
+        assert_eq!(size, 25);
+        assert_eq!(modules.len(), 25 * 25);
+        // The finder pattern: its corner dark, its inner ring light (x 1,
+        // y 2), its centre dark (x 3, y 3).
+        assert!(modules[0] && !modules[2 * 25 + 1] && modules[3 * 25 + 3]);
     }
 
     #[test]

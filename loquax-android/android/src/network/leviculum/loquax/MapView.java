@@ -10,7 +10,6 @@ import android.view.GestureDetector;
 import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
 import android.view.View;
-import java.nio.ByteBuffer;
 import java.util.Map;
 
 /**
@@ -23,8 +22,10 @@ import java.util.Map;
  * asked for as soon as the frame thread is free, so frames come at the
  * rate the renderer goes while the finger moves (1131): each is drawn a
  * quarter screen past every edge, so a pan first reveals drawn map, at the
- * pinch's exact zoom (1134), composed from the library's tile cache, with
- * the names its last frame at rest placed. A frame that lands is placed by
+ * zoom at rest (1134), while a pinch moves at its tile step one to one,
+ * which this view scales to the fingers' zoom (1155), composed from the
+ * library's tile cache straight into the spare bitmap, with the names its
+ * last frame at rest placed. A frame that lands is placed by
  * where the view it shows lies in the view the finger made, so the map
  * stays under the finger; the zoom the fingers leave is the zoom the map
  * keeps, nothing snaps. The request is built when the thread is free, from
@@ -337,12 +338,16 @@ final class MapView extends View {
                 prefetch(w, h);
                 continue;
             }
+            int mx;
+            int my;
             synchronized (this) {
                 owed = false;
                 idle = false;
                 moving = touching;
                 w = getWidth();
                 h = getHeight();
+                mx = Math.round(w * OVERSCAN);
+                my = Math.round(h * OVERSCAN);
                 // The frame's pixel under the screen's centre becomes the
                 // new frame's centre, at the scale's exact zoom.
                 float cx = w / 2f;
@@ -352,8 +357,8 @@ final class MapView extends View {
                 long byMilli = Math.round(1000 * Math.log(scale) / Math.log(2));
                 request = Core.map("dir", dir,
                         "w", (long) w, "h", (long) h,
-                        "margin_x", (long) Math.round(w * OVERSCAN),
-                        "margin_y", (long) Math.round(h * OVERSCAN),
+                        "margin_x", (long) mx,
+                        "margin_y", (long) my,
                         "moving", moving,
                         "density_milli", (long) Math.round(getResources().getDisplayMetrics().density * 1000),
                         "dark", dark(),
@@ -385,43 +390,49 @@ final class MapView extends View {
                 atLat = null;
                 atLon = null;
             }
-            final Core.MapFrame frame = Core.renderMap(request);
-            if (frame.pixels != null) {
-                int fw = (int) Core.num(frame.shown, "w");
-                int fh = (int) Core.num(frame.shown, "h");
-                Bitmap next = canvasFor(fw, fh);
-                next.copyPixelsFromBuffer(ByteBuffer.wrap(frame.pixels, frame.offset, frame.length));
+            // The frame is the view and the margins on both sides (the
+            // margins are at most a quarter screen, within the library's
+            // clamp of a screen): the library draws it straight into the
+            // bitmap, which nothing shows while it does (1155).
+            Bitmap next = canvasFor(w + 2 * mx, h + 2 * my);
+            final Map<String, Object> shown = Core.renderMap(request, next);
+            if (Core.bool(shown, "ok")) {
                 synchronized (this) {
-                    place(frame.shown, w, h, moving);
+                    place(shown, w, h, moving);
                     spare = retired;
                     retired = bitmap;
                     bitmap = next;
                     bare = moving;
-                    marginX = (int) Core.num(frame.shown, "margin_x");
-                    marginY = (int) Core.num(frame.shown, "margin_y");
-                    x = Core.num(frame.shown, "x");
-                    y = Core.num(frame.shown, "y");
-                    zoomMilli = Core.num(frame.shown, "zoom_milli");
-                    Object chosen = frame.shown.get("selected");
+                    marginX = (int) Core.num(shown, "margin_x");
+                    marginY = (int) Core.num(shown, "margin_y");
+                    x = Core.num(shown, "x");
+                    y = Core.num(shown, "y");
+                    zoomMilli = Core.num(shown, "zoom_milli");
+                    Object chosen = shown.get("selected");
                     selected = chosen == null ? null : String.valueOf(chosen);
+                }
+            } else {
+                synchronized (this) {
+                    // Not shown: the next frame draws into it.
+                    spare = next;
                 }
             }
             post(new Runnable() {
                 @Override
                 public void run() {
                     invalidate();
-                    listener.onShown(frame.shown);
+                    listener.onShown(shown);
                 }
             });
             synchronized (this) {
-                idle = !moving && Core.bool(frame.shown, "prefetching")
-                        && !Core.bool(frame.shown, "loading");
+                idle = !moving && Core.bool(shown, "prefetching")
+                        && !Core.bool(shown, "loading");
             }
-            if (Core.bool(frame.shown, "pending")) {
+            if (Core.bool(shown, "pending")) {
                 // Tiles the frame showed from another step: draw them now.
                 ask();
             }
-            if (Core.bool(frame.shown, "loading")) {
+            if (Core.bool(shown, "loading")) {
                 postDelayed(new Runnable() {
                     @Override
                     public void run() {
@@ -446,9 +457,9 @@ final class MapView extends View {
         Map<String, Object> request = Core.map("dir", dir, "prefetch", true,
                 "w", (long) w, "h", (long) h,
                 "density_milli", (long) Math.round(getResources().getDisplayMetrics().density * 1000));
-        Core.MapFrame answer = Core.renderMap(request);
+        Map<String, Object> answer = Core.renderMap(request, null);
         synchronized (this) {
-            idle = idle && Core.bool(answer.shown, "ok") && Core.bool(answer.shown, "prefetching");
+            idle = idle && Core.bool(answer, "ok") && Core.bool(answer, "prefetching");
         }
     }
 

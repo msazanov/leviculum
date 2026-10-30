@@ -53,7 +53,7 @@ use leviculum_map::mercator::{project, LatLon, World};
 use leviculum_map::viewport::{ExactView, MILLI};
 use leviculum_mapfill::style::{MapTheme, Style};
 use leviculum_ui::theme::{Theme, ThemeFlag};
-use loquax::mapframe::{hold, Ask, Frames};
+use loquax::mapframe::{frame_size, hold, Ask, Framed, Frames};
 use loquax::mapload::{Loader, Source, Step, CACHE_DEFAULT_MB};
 use loquax::picture::{map_theme, Maps};
 use loquax::screenmap;
@@ -69,6 +69,17 @@ pub use loquax::mapframe::MOVING_TILES_PER_WORKER;
 /// What the map screen says on "load this area" over a view the regions
 /// hold already: the terminal's words.
 pub const LOADED_ALREADY: &str = "map: this area is loaded already";
+
+/// Pixels a frontend hands the renderer to compose a frame into (1155):
+/// the app's Bitmap, locked while the frame is drawn (`bitmap.rs`, in the
+/// Android build only), so the frame is never copied on its way to the
+/// screen.
+pub trait Canvas {
+    /// `w` x `h` RGBA rows, tightly packed, to compose into: what they
+    /// hold before does not matter. A line for the user when there are
+    /// none of that size.
+    fn pixels(&mut self, w: u32, h: u32) -> Result<&mut [u8], String>;
+}
 
 /// The renderer of one app directory, kept from frame to frame: the
 /// frames with their tile cache and names, the loader, the fit.
@@ -189,8 +200,43 @@ impl Renderer {
         }
     }
 
-    /// One frame for `request` over `pins`.
+    /// One frame for `request` over `pins`, in a buffer of its own.
     pub fn frame(&mut self, request: &MapRequest, pins: &[MapPin]) -> (MapShown, Vec<u8>) {
+        let mut rgba = Vec::new();
+        let shown = self.draw(request, pins, |frames, ask| {
+            let (pixels, framed) = frames.frame(ask).split();
+            rgba = pixels;
+            Ok(framed)
+        });
+        (shown, rgba)
+    }
+
+    /// One frame for `request` over `pins`, composed straight into the
+    /// pixels `canvas` gives for its size (the app's Bitmap, 1155): no
+    /// buffer of the frame's own, no copy.
+    pub fn frame_into(
+        &mut self,
+        request: &MapRequest,
+        pins: &[MapPin],
+        canvas: &mut dyn Canvas,
+    ) -> MapShown {
+        self.draw(request, pins, |frames, ask| {
+            let (w, h) = frame_size(ask);
+            let pixels = canvas.pixels(w, h)?;
+            frames
+                .frame_into(ask, pixels)
+                .ok_or_else(|| format!("map: the pixels are not {w}x{h}"))
+        })
+    }
+
+    /// One frame for `request` over `pins`, drawn by `draw` from the
+    /// frames and the frame asked; a failed draw's line is the answer.
+    fn draw(
+        &mut self,
+        request: &MapRequest,
+        pins: &[MapPin],
+        draw: impl FnOnce(&mut Frames, &Ask<'_>) -> Result<Framed, String>,
+    ) -> MapShown {
         let started = Instant::now();
         let mut notice = self.notice_owed.take();
         let now = self.now_ms();
@@ -304,7 +350,7 @@ impl Renderer {
         let flag = self.theme.or(Some(ThemeFlag::Auto));
         let table = map_theme(flag, Some(screen));
         let style = Style::PC.in_theme(table);
-        let shot = self.frames.frame(&Ask {
+        let ask = Ask {
             view,
             margin: (mx, my),
             moving: request.moving,
@@ -315,7 +361,12 @@ impl Renderer {
             zooms,
             draw_pins: true,
             measure: None,
-        });
+            scaled_while_moving: true,
+        };
+        let shot = match draw(&mut self.frames, &ask) {
+            Ok(shot) => shot,
+            Err(error) => return failed(error),
+        };
         let (w, h) = shot.view.size();
         let name = |peer: [u8; 16]| pins.iter().find(|p| p.peer == peer).map(|p| p.words());
         let shown = MapShown {
@@ -326,10 +377,12 @@ impl Renderer {
             h,
             margin_x: mx,
             margin_y: my,
-            x: view.centre.x,
-            y: view.centre.y,
+            // The view the frame shows: while a pinch moves, at the tile
+            // step, and the Canvas scales it to the fingers' zoom (1155).
+            x: shot.shows.centre.x,
+            y: shot.shows.centre.y,
             zoom: rest_zoom,
-            zoom_milli: view.zoom_milli(),
+            zoom_milli: shot.shows.zoom_milli(),
             tile_zoom: shot.tile_zoom,
             pending: shot.missing > 0,
             min_zoom: zoom_floor(area, &setup),
@@ -347,7 +400,13 @@ impl Renderer {
             prefetching: self.frames.at_rest(),
             prefetched: 0,
         };
-        (shown, shot.rgba)
+        shown
+    }
+
+    /// Take a frame's pixels back once they are copied out: the next
+    /// frame is composed into them.
+    pub fn recycle(&mut self, rgba: Vec<u8>) {
+        self.frames.recycle(rgba);
     }
 
     /// One batch of the prefetch around the last frame at rest (1135):
@@ -425,8 +484,46 @@ static RENDERERS: Mutex<Vec<Renderer>> = Mutex::new(Vec::new());
 
 /// One map frame for `request`, as [`crate::schema::frame`] lays it out.
 /// The pins are `pins`' when given, the running session's, or the store's
-/// in the request's directory.
+/// in the request's directory. The host's path, the tests' and the
+/// measuring tools': the app composes into its Bitmap ([`render_into`]).
 pub fn render(request: &MapRequest, pins: Option<Vec<MapPin>>, now: WallTime) -> Vec<u8> {
+    with_renderer(request, pins, now, |renderer, pins| {
+        if request.prefetch {
+            return crate::schema::frame(&renderer.prefetch(), &[]);
+        }
+        let (shown, rgba) = renderer.frame(request, pins);
+        let framed = crate::schema::frame(&shown, &rgba);
+        // Copied into the answer: the next frame is composed into it (1154).
+        renderer.recycle(rgba);
+        framed
+    })
+}
+
+/// One map frame for `request` composed straight into `canvas`, the
+/// app's Bitmap (1155), and what it shows; a prefetch draws into none.
+/// The pins as for [`render`].
+pub fn render_into(
+    request: &MapRequest,
+    pins: Option<Vec<MapPin>>,
+    now: WallTime,
+    canvas: &mut dyn Canvas,
+) -> MapShown {
+    with_renderer(request, pins, now, |renderer, pins| {
+        match request.prefetch {
+            true => renderer.prefetch(),
+            false => renderer.frame_into(request, pins, canvas),
+        }
+    })
+}
+
+/// `f` with the renderer of the request's directory, made on its first
+/// frame, and the pins: `pins` when given, the store's otherwise.
+fn with_renderer<T>(
+    request: &MapRequest,
+    pins: Option<Vec<MapPin>>,
+    now: WallTime,
+    f: impl FnOnce(&mut Renderer, &[MapPin]) -> T,
+) -> T {
     let dir = PathBuf::from(&request.dir);
     let pins = match pins {
         Some(pins) => Ok(pins),
@@ -449,12 +546,7 @@ pub fn render(request: &MapRequest, pins: Option<Vec<MapPin>>, now: WallTime) ->
             renderers.len() - 1
         }
     };
-    let renderer = &mut renderers[at];
-    if request.prefetch {
-        return crate::schema::frame(&renderer.prefetch(), &[]);
-    }
-    let (shown, rgba) = renderer.frame(request, &pins);
-    crate::schema::frame(&shown, &rgba)
+    f(&mut renderers[at], &pins)
 }
 
 /// What the tile cache of the renderer over `dir` did, when one runs:
@@ -478,6 +570,23 @@ pub fn tile_memory(dir: &Path) -> Option<(usize, usize)> {
         .iter()
         .find(|r| r.dir == dir)
         .map(Renderer::tile_memory)
+}
+
+/// The bytes the names of the last frame at rest of the renderer over
+/// `dir` hold as sprites, and the milliseconds drawing them again into a
+/// frame of `w` by `h` pixels takes: the measuring tool's sprite row.
+pub fn sprite_cost(dir: &Path, w: u32, h: u32) -> Option<(usize, f64)> {
+    let renderers = RENDERERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let r = renderers.iter().find(|r| r.dir == dir)?;
+    // Written before the clock starts, so its pages are mapped.
+    let mut rgba = vec![255u8; w as usize * h as usize * 4];
+    let started = Instant::now();
+    r.frames.draw_names(&mut rgba, w, h, MapTheme::Light);
+    let ms = started.elapsed().as_secs_f64() * 1e3;
+    std::hint::black_box(&rgba);
+    Some((r.frames.sprite_bytes(), ms))
 }
 
 /// Draw the tiles of the renderer over `dir` on `n` threads at most, and
