@@ -13,6 +13,9 @@ use loquax_android::session::Session;
 #[path = "../../loquax/tests/support/python_peer.rs"]
 mod python_peer;
 
+#[path = "../../loquax/tests/support/nomadnet_tree.rs"]
+mod nomadnet_tree;
+
 /// The exported facade keeps one session per process, and the tests of a
 /// binary share the process: those that go through it take turns. Tokio's
 /// lock, which the async test holds across its awaits.
@@ -907,6 +910,118 @@ async fn imported_history_shows_in_the_live_session_under_its_name() {
         .expect("decode");
         let bodies: Vec<&str> = messages.messages.iter().map(|m| m.body.as_str()).collect();
         assert_eq!(bodies, ["von Ratspeak", "zurueck"]);
+        session.stop();
+    })
+    .await
+    .expect("the imported history");
+    node.kill().await;
+}
+
+/// 1162: the mailbox runs the real import of a NomadNet tree after the
+/// phone joined. Its history goes into the archive as a Ratspeak one does,
+/// its name as a petname and its block as a peer state, so the phone's
+/// next pull lists the conversation under the name in the same live
+/// session, shows both messages, and lists the blocked peer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_nomadnet_import_on_the_mailbox_shows_in_the_live_session_with_its_block() {
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+
+    let phone = tempfile::tempdir().expect("app dir");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        offset: 0,
+        ..Start::default()
+    };
+    let pulled = |session: &Session, what: &str| {
+        session.request(Request::Pull).expect("pull");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            match session.next_event(Duration::from_millis(500)) {
+                Some(Event::Sync { state, .. }) if state == "done" => break,
+                Some(Event::Sync { state, detail, .. }) if state == "failed" => {
+                    panic!("{what} failed: {detail}")
+                }
+                _ => assert!(std::time::Instant::now() < deadline, "{what} never ended"),
+            }
+        }
+    };
+    let session = tokio::task::spawn_blocking(move || {
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        pulled(&session, "the pull on open");
+        session
+    })
+    .await
+    .expect("the session");
+
+    // The import on the mailbox, as `loquax import <tree>` runs it there.
+    let own = loquax::identity::load_or_create(&home.path().join("identity")).expect("identity");
+    let peer = leviculum_std::generate_identity();
+    let peer_hex = hex(&loquax::engine::delivery_address(&peer).expect("address"));
+    let source = tempfile::tempdir().expect("source dir");
+    let root = nomadnet_tree::write(&source.path().join(".nomadnetwork"), &own, &peer);
+    let found = loquax::import::sniff(&root).expect("a NomadNet tree");
+    let choices = loquax::import::Choices {
+        contacts: true,
+        history: true,
+        identity: false,
+    };
+    let report = loquax::import::import(&found, home.path(), choices, false).expect("import");
+    assert_eq!(report.archived, Some(2), "{:?}", report.lines(false));
+    assert_eq!(report.blocks_archived, Some(1));
+
+    tokio::task::spawn_blocking(move || {
+        // The start's pulls (on open, the one asked for, the watch coming
+        // up) are serialised, and one may still run while the import
+        // writes: it takes the entries committed by then, the name and the
+        // block, and the history appended a moment later waits for the next
+        // pull, which the import, outside the daemon, wakes nobody for. So
+        // the test pulls until the conversation is listed, three at most.
+        let listed = |session: &Session| -> schema::Conversations {
+            rmp_serde::from_slice(&session.query(schema::Query::Conversations).expect("list"))
+                .expect("decode")
+        };
+        let mut list = listed(&session);
+        for _ in 0..3 {
+            if list.conversations.iter().any(|row| row.peer == peer_hex) {
+                break;
+            }
+            pulled(&session, "the pull after the import");
+            list = listed(&session);
+        }
+        let row = list
+            .conversations
+            .iter()
+            .find(|row| row.peer == peer_hex)
+            .unwrap_or_else(|| panic!("never listed: {list:?}"));
+        assert!(row.name.starts_with(nomadnet_tree::NAME), "{row:?}");
+        assert_eq!(row.last, nomadnet_tree::RECEIVED);
+        let messages: schema::Messages = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Messages {
+                    peer: peer_hex.clone(),
+                })
+                .expect("a query"),
+        )
+        .expect("decode");
+        let bodies: Vec<&str> = messages.messages.iter().map(|m| m.body.as_str()).collect();
+        assert_eq!(bodies, [nomadnet_tree::SENT, nomadnet_tree::RECEIVED]);
+        let blocked_hex = hex(&nomadnet_tree::BLOCKED);
+        let blocked: schema::Conversations = wait_for(
+            &session,
+            schema::Query::Blocked,
+            20,
+            |c: &schema::Conversations| c.conversations.iter().any(|row| row.peer == blocked_hex),
+        );
+        assert_eq!(blocked.conversations.len(), 1, "{blocked:?}");
         session.stop();
     })
     .await

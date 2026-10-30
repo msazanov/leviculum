@@ -165,7 +165,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     let address = crate::engine::delivery_address(&identity)?;
     let home_destination = crate::home::destination_hash(&identity.public_key_bytes())?;
     let mut store = Store::open_in(&home, address).map_err(|e| e.to_string())?;
-    backfill_petnames(&mut store, &home, archive_cap_bytes)?;
+    backfill_contacts(&mut store, &home, archive_cap_bytes)?;
     let mut relations = relations_at_start(&store, &home)?;
     let signer = identity.clone();
     let mut outgoing = Outgoing::new(policy);
@@ -609,22 +609,31 @@ async fn send_wake(
 
 /// The unix time in seconds, the outbox's clock.
 /// The contacts file's names the archive has no petname entry for, kept
-/// as petname entries (1159): an import before names travelled wrote them
-/// to the file alone, so no device ever received them. A second start finds
-/// each one there and appends nothing.
-fn backfill_petnames(store: &mut Store, home: &Path, cap_bytes: u64) -> Result<usize, String> {
+/// as petname entries (1159), and its blocks the archive has no peer state
+/// for, kept as blocked peer states (1162): an import before names and
+/// blocks travelled wrote them to the file alone, so no device ever
+/// received them. A second start finds each one there and appends nothing.
+/// How many names and blocks were appended.
+fn backfill_contacts(
+    store: &mut Store,
+    home: &Path,
+    cap_bytes: u64,
+) -> Result<(usize, usize), String> {
     let contacts = crate::names::load_contacts(home).map_err(|e| e.to_string())?;
     let names = contacts
         .petnames
         .iter()
         .map(|(peer, name)| (peer, name.as_str()));
-    let appended = super::server::archive_petnames(store, names, unix_now(), cap_bytes)
+    let now = unix_now();
+    let appended =
+        super::server::archive_petnames(store, names, now, cap_bytes).map_err(|e| e.to_string())?;
+    let blocks = super::server::archive_blocks(store, &contacts.blocked, now, cap_bytes)
         .map_err(|e| e.to_string())?;
     tracing::info!(
-        "HOME petnames backfilled={appended} contacts={}",
+        "HOME petnames backfilled={appended} contacts={} blocks={blocks}",
         contacts.petnames.len()
     );
-    Ok(appended)
+    Ok((appended, blocks))
 }
 
 fn unix_now() -> i64 {
@@ -926,16 +935,77 @@ mod tests {
             .archive_petname(STRANGER, &cleared, 1, u64::MAX)
             .expect("a device cleared it");
         assert_eq!(
-            backfill_petnames(&mut store, home.path(), u64::MAX).expect("first start"),
+            backfill_contacts(&mut store, home.path(), u64::MAX)
+                .expect("first start")
+                .0,
             1
         );
         assert_eq!(
-            backfill_petnames(&mut store, home.path(), u64::MAX).expect("second start"),
+            backfill_contacts(&mut store, home.path(), u64::MAX)
+                .expect("second start")
+                .0,
             0
         );
         assert_eq!(
             petnames_archived(&store),
             [(STRANGER, None), (FRIEND, Some("Friend".to_string()))]
+        );
+    }
+
+    fn peer_states_archived(store: &Store) -> Vec<([u8; 16], crate::home::wire::PeerState)> {
+        store
+            .archive_since(0, usize::MAX)
+            .expect("page")
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == crate::home::KIND_PEERSTATE)
+            .map(|entry| {
+                crate::home::wire::read_peer_state_entry(&entry.packed).expect("a peer state")
+            })
+            .collect()
+    }
+
+    /// 1162: a home node that imported before blocks travelled holds them
+    /// in its contacts file alone. Its start archives each block as the
+    /// peer state a device's block sends; a state a device set for that
+    /// peer wins; a second start archives nothing.
+    #[test]
+    fn the_start_archives_the_contacts_blocks_once_and_a_state_said_wins() {
+        let home = tempfile::tempdir().expect("home");
+        let pinned = [0x55; 16];
+        std::fs::write(
+            home.path().join(crate::names::CONTACTS_FILE),
+            format!(
+                "block {}\nblock {}\n",
+                crate::address::to_hex(&STRANGER),
+                crate::address::to_hex(&pinned)
+            ),
+        )
+        .expect("contacts");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let said = crate::home::wire::PeerState {
+            pinned: true,
+            ..crate::home::wire::PeerState::default()
+        };
+        let entry = crate::home::wire::peer_state_entry(&pinned, &said);
+        store
+            .archive_peer_state(pinned, &entry, 1, u64::MAX)
+            .expect("a device pinned it");
+        assert_eq!(
+            backfill_contacts(&mut store, home.path(), u64::MAX).expect("first start"),
+            (0, 1)
+        );
+        assert_eq!(
+            backfill_contacts(&mut store, home.path(), u64::MAX).expect("second start"),
+            (0, 0)
+        );
+        let blocked = crate::home::wire::PeerState {
+            blocked: true,
+            ..crate::home::wire::PeerState::default()
+        };
+        assert_eq!(
+            peer_states_archived(&store),
+            [(pinned, said), (STRANGER, blocked)]
         );
     }
 

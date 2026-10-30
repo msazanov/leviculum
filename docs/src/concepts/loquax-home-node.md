@@ -386,7 +386,13 @@ the home node's store and appends each as an archive entry of kind 9, all
 conversations in one time order. Ratspeak keeps no signed bytes, so the
 entry is the row as the store keeps it, origin and peer first
 (`loquax/src/import/archive.rs`), never a message anyone signed. The same
-message twice is one entry, so a second import appends nothing.
+message twice is one entry, so a second import appends nothing. 1162: a
+NomadNet tree or a Loquax export is archived the same way. Its rows carry
+our verdict, the source's and, while the sender's key is not known, the
+sender and the signed bytes; such a row is an entry of version 2, the
+version 1 row with the three appended, and a row with none of them stays
+version 1. The client stores what the home node stores, the held bytes
+too, and checks them when the key comes.
 
 - **On pull** the client keeps these entries apart from the engine's
   (`Pull::imported`) and writes them into its store as imported history,
@@ -407,11 +413,20 @@ message twice is one entry, so a second import appends nothing.
   the reader's word on that peer was said. A home node that imported
   before 1159 holds the names in its contacts file alone; its start
   archives each one that has no petname entry and says how many in one
-  line, `HOME petnames backfilled=N contacts=M`. A second start archives
-  nothing.
+  line, `HOME petnames backfilled=N contacts=M blocks=B`. A second start
+  archives nothing.
+- **The blocks** travel as peer states (1162). Each peer the source
+  blocked is archived as a peer state entry, blocked and nothing else,
+  the bytes a device's block sends for a peer it holds no other state for
+  (`server::archive_blocks`). A peer the archive already holds a peer
+  state for keeps it: a device's word on it wins. The start's backfill
+  does the same for the contacts file's blocks and counts them as `blocks`
+  in its line.
 - A client from before 1150 finds no message id in such an entry and
-  passes it by, as it passes every kind it does not know. `loquax fetch`
-  keeps no history and passes them by too.
+  passes it by, as it passes every kind it does not know. A client from
+  before 1162 finds a version 2 entry of another shape, says `HOME pull:
+  an imported entry of another shape` in its log and passes it by.
+  `loquax fetch` keeps no history and passes them by too.
 
 ## The archive
 

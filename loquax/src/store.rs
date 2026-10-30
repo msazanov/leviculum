@@ -1184,6 +1184,18 @@ impl Store {
     /// Whether the archive holds a petname entry for `peer`, a cleared one
     /// too: the reader said their word on that peer's name (1159).
     pub fn archive_holds_petname(&self, peer: &[u8; 16]) -> Result<bool, StoreError> {
+        self.archive_holds_of(crate::home::KIND_PETNAME, peer)
+    }
+
+    /// Whether the archive holds a peer state entry for `peer`: a device
+    /// said its word on that peer's block, pin, archive and mute (1162).
+    pub fn archive_holds_peer_state(&self, peer: &[u8; 16]) -> Result<bool, StoreError> {
+        self.archive_holds_of(crate::home::KIND_PEERSTATE, peer)
+    }
+
+    /// Whether the archive holds an entry of `kind` whose bytes begin with
+    /// `peer`'s [`crate::home::wire::name_entry_prefix`].
+    fn archive_holds_of(&self, kind: u8, peer: &[u8; 16]) -> Result<bool, StoreError> {
         let prefix = crate::home::wire::name_entry_prefix(peer);
         let prefix_len = i64::try_from(prefix.len()).unwrap_or(i64::MAX);
         let found: Option<i64> = self
@@ -1191,12 +1203,7 @@ impl Store {
             .query_row(
                 "SELECT 1 FROM archive WHERE identity = ?1 AND kind = ?2 \
                  AND substr(packed, 1, ?3) = ?4 LIMIT 1",
-                params![
-                    &self.identity[..],
-                    i64::from(crate::home::KIND_PETNAME),
-                    prefix_len,
-                    &prefix[..]
-                ],
+                params![&self.identity[..], i64::from(kind), prefix_len, &prefix[..]],
                 |row| row.get(0),
             )
             .optional()
@@ -2376,7 +2383,7 @@ fn row_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
 
 /// `messages.verification`: 1 verified, as the boolean of schemas 1 and 2
 /// wrote it, 0 unverified, 2 invalid.
-fn signature_code(signature: Signature) -> i64 {
+pub(crate) fn signature_code(signature: Signature) -> i64 {
     match signature {
         Signature::Unverified => 0,
         Signature::Verified => 1,
@@ -2384,7 +2391,7 @@ fn signature_code(signature: Signature) -> i64 {
     }
 }
 
-fn signature_of(code: i64) -> Signature {
+pub(crate) fn signature_of(code: i64) -> Signature {
     match code {
         0 => Signature::Unverified,
         1 => Signature::Verified,

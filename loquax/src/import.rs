@@ -411,6 +411,9 @@ pub struct Report {
     /// On a Loquax Mailbox: the petname entries appended for the imported
     /// contacts' names (or, in a dry run, those that would be).
     pub names_archived: Option<usize>,
+    /// On a Loquax Mailbox: the peer state entries appended for the imported
+    /// blocks (or, in a dry run, those that would be).
+    pub blocks_archived: Option<usize>,
     /// What the source says about itself: the identities a database holds
     /// and which one is imported, and how its times were read.
     pub notes: Vec<String>,
@@ -471,6 +474,13 @@ impl Report {
             out.push(format!(
                 "mailbox archive: {names} contact names {}, its clients take them on their \
                  next sync",
+                would("appended", "to append")
+            ));
+        }
+        if let Some(blocks) = self.blocks_archived {
+            out.push(format!(
+                "mailbox archive: {blocks} blocks {}, its clients take them on their next \
+                 sync",
                 would("appended", "to append")
             ));
         }
@@ -596,8 +606,12 @@ fn merge_contacts(
 ) -> Result<(), ImportError> {
     let have = load_contacts(home).map_err(|e| ImportError::new(home, e))?;
     let mut names = Vec::new();
+    let mut blocks = Vec::new();
     for theirs in contacts {
         let ours = have.of(&theirs.peer);
+        if theirs.blocked {
+            blocks.push(theirs.peer);
+        }
         // The reader's own word wins: a petname loquax has stays.
         let merged = Contact {
             peer: theirs.peer,
@@ -617,16 +631,19 @@ fn merge_contacts(
             save_contact(home, &merged).map_err(|e| ImportError::new(home, e))?;
         }
     }
-    archive_names(home, &names, dry_run, report)
+    archive_contacts(home, &names, &blocks, dry_run, report)
 }
 
 /// On a Loquax Mailbox: each imported contact's name as a petname entry,
-/// as a client's `/petname` is kept, so every device of the home takes it
-/// on its next pull (1159). A peer the archive holds a petname entry for
-/// keeps it. In a dry run, the names that would be appended are counted.
-fn archive_names(
+/// as a client's `/petname` is kept (1159), and each imported block as a
+/// peer state entry, as a client's block is kept (1162), so every device of
+/// the home takes them on its next pull. A peer the archive holds an entry
+/// of that kind for keeps it. In a dry run, the entries that would be
+/// appended are counted.
+fn archive_contacts(
     home: &Path,
     names: &[([u8; 16], String)],
+    blocks: &[[u8; 16]],
     dry_run: bool,
     report: &mut Report,
 ) -> Result<(), ImportError> {
@@ -649,6 +666,13 @@ fn archive_names(
             }
         }
         report.names_archived = Some(would);
+        let mut would = 0;
+        for peer in blocks {
+            if !store.archive_holds_peer_state(peer).map_err(store_error)? {
+                would += 1;
+            }
+        }
+        report.blocks_archived = Some(would);
         return Ok(());
     }
     if std::fs::symlink_metadata(&path).is_err() {
@@ -668,6 +692,9 @@ fn archive_names(
     let appended =
         crate::home::server::archive_petnames(&mut store, names, now, cap).map_err(store_error)?;
     report.names_archived = Some(appended);
+    let appended =
+        crate::home::server::archive_blocks(&mut store, blocks, now, cap).map_err(store_error)?;
+    report.blocks_archived = Some(appended);
     Ok(())
 }
 
@@ -718,6 +745,7 @@ fn history(
         true => Store::open_read_only(&home.join(STORE_FILE), address).map_err(store_error)?,
         false => None,
     };
+    let mut read_all = Vec::new();
     for conversation in tree.conversations()? {
         let read = tree.read(&conversation, Some(&own), address);
         report.attachments_skipped += read.attachments;
@@ -736,8 +764,30 @@ fn history(
             unreadable: read.unreadable.len(),
         });
         report.refused.extend(read.unreadable);
+        read_all.push((conversation.peer, read.rows));
+    }
+    // On a Loquax Mailbox the rows go into the archive too, as a Ratspeak
+    // history's do (1162).
+    if on_mailbox(&store, &peek).map_err(store_error)? {
+        let conversations: Vec<_> = read_all
+            .iter()
+            .map(|(peer, rows)| (peer, rows.as_slice()))
+            .collect();
+        archive_history(home, found.origin(), &conversations, store.as_mut(), report)?;
     }
     Ok(())
+}
+
+/// Whether the store an import writes, or in a dry run the one it counts
+/// against, is a Loquax Mailbox's.
+fn on_mailbox(
+    store: &Option<Store>,
+    peek: &Option<Store>,
+) -> Result<bool, crate::store::StoreError> {
+    match (store, peek) {
+        (Some(store), _) | (None, Some(store)) => store.serves_as_home_node(),
+        (None, None) => Ok(false),
+    }
 }
 
 /// One conversation's rows into `store`, or, in a dry run (`store` is
@@ -895,35 +945,33 @@ fn ratspeak_import(
             unreadable: 0,
         });
     }
-    let mailbox = match (&store, &peek) {
-        (Some(store), _) | (None, Some(store)) => {
-            store.serves_as_home_node().map_err(store_error)?
-        }
-        (None, None) => false,
-    };
-    if mailbox {
-        archive_history(home, found.origin(), &read, store.as_mut(), report)?;
+    if on_mailbox(&store, &peek).map_err(store_error)? {
+        let conversations: Vec<_> = read
+            .conversations
+            .iter()
+            .map(|c| (&c.peer, c.rows.as_slice()))
+            .collect();
+        archive_history(home, found.origin(), &conversations, store.as_mut(), report)?;
     }
     Ok(())
 }
 
-/// On a Loquax Mailbox: every imported message of `read` as an archive
-/// entry, all conversations in one time order, so the clients take them on
-/// their next pull. A message the archive holds already is not appended
-/// again. An import that would push the archive past its cap writes no
-/// entry and says so: the cap evicts the oldest entries, which may be ones a
-/// client has not pulled yet.
+/// On a Loquax Mailbox: every imported message of `conversations` as an
+/// archive entry ([`archive::entry`]), all conversations in one time order,
+/// so the clients take them on their next pull. A message the archive holds
+/// already is not appended again. An import that would push the archive
+/// past its cap writes no entry and says so: the cap evicts the oldest
+/// entries, which may be ones a client has not pulled yet.
 fn archive_history(
     home: &Path,
     origin: &str,
-    read: &ratspeak::History,
+    conversations: &[(&[u8; 16], &[crate::store::ImportRow])],
     store: Option<&mut Store>,
     report: &mut Report,
 ) -> Result<(), ImportError> {
-    let mut rows: Vec<(&[u8; 16], &crate::store::ImportRow)> = read
-        .conversations
+    let mut rows: Vec<(&[u8; 16], &crate::store::ImportRow)> = conversations
         .iter()
-        .flat_map(|c| c.rows.iter().map(move |row| (&c.peer, row)))
+        .flat_map(|(peer, rows)| rows.iter().map(move |row| (*peer, row)))
         .collect();
     let when = |row: &crate::store::ImportRow| {
         row.timestamp

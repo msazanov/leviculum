@@ -165,7 +165,14 @@ record. The citations are in `loquax/src/import/ratspeak.rs`.
   takes them on its next `/sync` and writes them into its own store
   (`loquax-home-node.md`, "Imported history"). An import that would push
   the archive past its cap appends nothing and says so, since the cap
-  evicts the oldest entries.
+  evicts the oldest entries. A NomadNet tree or a Loquax export does the
+  same (1162): its rows keep our verdict, NomadNet's and, for a received
+  message whose sender's key is not known yet, the signed bytes, so the
+  entry is of version 2, which carries all three
+  (`loquax/src/import/archive.rs`), and a client stores the row the
+  mailbox stores and checks the held bytes when the key comes. The
+  imported blocks go as peer states, as a device's block does
+  (`loquax-home-node.md`, "Imported history").
 
 ### The export
 
@@ -201,7 +208,5 @@ exact, and the cure is the next item below.
 - Ratspeak `identity.enc` and `.rsi` (Argon2id). Not in 1150: no Argon2
   crate is in the lock, and Ratspeak exports the key as Base32 once
   unlocked, which the existing paste path takes.
-- A NomadNet or Loquax export import on a mailbox writes the store only;
-  its archive step needs the packed bytes carried, not the rebuilt row.
 - The palette's `import` as a screen with the three questions and a
   pasted key, instead of contacts and history only.
