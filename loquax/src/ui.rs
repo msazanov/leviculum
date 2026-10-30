@@ -2558,7 +2558,7 @@ fn step_conversation<B>(model: &mut UiModel<B>, forward: bool, unread_only: bool
 fn leg_words(leg: Leg) -> &'static str {
     match leg {
         Leg::Direct => "direct",
-        Leg::Propagated => "via mailbox",
+        Leg::Propagated => "via the network",
     }
 }
 
@@ -2579,7 +2579,7 @@ fn state_words(state: DeliveryState) -> &'static str {
         DeliveryState::Stamping => "stamping",
         DeliveryState::InFlight => "in flight",
         DeliveryState::Sent => "sent, no proof yet",
-        DeliveryState::InMailbox => "in the mailbox",
+        DeliveryState::InMailbox => "waiting in the network",
         DeliveryState::Delivered => "delivered",
         DeliveryState::Rejected => "rejected",
         DeliveryState::Failed => "not sent",
@@ -3246,7 +3246,7 @@ fn apply_state<B>(model: &mut UiModel<B>, id: [u8; 32], state: MessageState) {
 
 /// A message one of the home's devices sent through the home node: the
 /// bubble this device has for it says sent, and a device without one gets
-/// it. A bubble further along (in the mailbox, delivered) stays: a pull
+/// it. A bubble further along (waiting in the network, delivered) stays: a pull
 /// asked again after a crash brings the sent entry a second time.
 fn home_sent<B>(
     model: &mut UiModel<B>,
@@ -4006,7 +4006,7 @@ pub fn detail_layout(detail: &DetailView, screen: Rect) -> (Rect, Vec<String>) {
     (area, rows)
 }
 
-/// `direct 12 s` or `via mailbox 40 s`: which leg a waiting send is on and
+/// `direct 12 s` or `via the network 40 s`: which leg a waiting send is on and
 /// for how long, while its mark still says it is waiting. Gone the moment it
 /// is handed on, so the label never sits beside a `◇` or a `✓`.
 fn leg_label(message: &Message, state: DeliveryState, tick: u64) -> Option<String> {
@@ -4400,7 +4400,11 @@ mod tests {
         for _ in 0..8 {
             update(&mut model, UiEvent::Tick);
         }
-        assert!(text(&model) == "hi  via mailbox 2 s ○", "{}", text(&model));
+        assert!(
+            text(&model) == "hi  via the network 2 s ○",
+            "{}",
+            text(&model)
+        );
         engine(&mut model, OutboxEvent::Queued { message_id: ID });
         state(&mut model, ID, MessageState::AwaitingCollection);
         assert_eq!(text(&model), "hi  ⌂");

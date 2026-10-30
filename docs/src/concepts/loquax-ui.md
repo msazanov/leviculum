@@ -496,7 +496,7 @@ client that receives and never proves turned a delivered message red and
 uploaded it to a foreign node before this.
 
 While a send waits, its row names the leg and how long it has been on it,
-`me (direct 12 s):` or `me (via mailbox 40 s):`, so a spinner that turns
+`me (direct 12 s):` or `me (via the network 40 s):`, so a spinner that turns
 for a while has its reason on screen. `$LNMSG_HOME/tui.log` holds the same
 story in words, at `info` for Loquax's targets (`RUST_LOG` replaces the
 filter): one `SEND leg= to= state= elapsed_ms=` line per step of each leg
