@@ -24,9 +24,10 @@ Lew, 2026-10-29:
   switches. Several identities at once come later.
 - **Ratspeak**: identity only, never history. Revised by Lew on
   2026-10-30 for his own move to a Loquax Mailbox: a one-time, lossy
-  history importer for the Ratspeak version he runs, schema 45, marked as
-  imported and not maintained against every Ratspeak release (see
-  "Ratspeak history" below).
+  history importer for the Ratspeak versions in hand, schemas 45 and 33
+  (33 is the one his database holds, order 1158), marked as imported and
+  not maintained against every Ratspeak release (see "Ratspeak history"
+  below).
 - **`retain_synced_on_node`** is not offered at import. Loquax only warns
   not to run both apps on one identity at the same time.
 - **Attachments** are reported as skipped until Loquax has an attachment
@@ -57,7 +58,7 @@ From the draft, kept:
 | raw 64-byte identity file (NomadNet, MeshChat, MeshChatX, Sideband, Ratspeak unsealed) | identity |
 | pasted Base32 key, or a file with one | identity |
 | Ratspeak `identity.enc` | listed as protected, not read |
-| a copy of Ratspeak's `ratspeak.db`, schema 45 (order 1150) | contacts as petnames, blocks, the propagation node, the history of one identity, unsigned |
+| a copy of Ratspeak's `ratspeak.db`, schema 33 or 45 (orders 1150, 1158) | contacts as petnames, blocks, the propagation node, the history of one identity, unsigned |
 
 The code is `loquax/src/import/` and `loquax/src/export.rs`, behind the
 `history` feature; the core sees neither files nor formats.
@@ -118,9 +119,12 @@ home node's address.
 Order 1150. `loquax import <copy of ratspeak.db>` reads a database the
 user copied out; Ratspeak's data directory is not scanned for it, and the
 file is opened read-only. The reader is written from Ratspeak's schema at
-commit 7da1fe3 (`crates/ratspeak-db/src/db.rs`, schema 45) and refuses any
-other version with both numbers: "written for Ratspeak schema 45, this db
-is 46". The citations are in `loquax/src/import/ratspeak.rs`.
+commit 7da1fe3 (`crates/ratspeak-db/src/db.rs`, schema 45) and at
+39a6323, the last commit at schema 33 (order 1158), and refuses any other
+version with the numbers it reads and the one found: "written for
+Ratspeak schemas 33 and 45, this db is 46". Schema 33 keeps the same
+columns with the same meanings, lacks voice notes and the deletion
+record. The citations are in `loquax/src/import/ratspeak.rs`.
 
 - **Which identity.** A Ratspeak database holds one history per profile.
   The import takes the profile whose address is Loquax's (adopt it first
@@ -134,10 +138,18 @@ is 46". The citations are in `loquax/src/import/ratspeak.rs`.
   the petname (Loquax's own word wins), blocks, the propagation node when
   Loquax has none, the display name offered. A message the user deleted in
   Ratspeak (`lxmf_user_deleted`) stays deleted and is counted.
+- **Replies and reactions.** A reply whose target is imported too carries
+  `FIELD_REPLY_TO` and Ratspeak's preview as the quote; one whose target
+  is not comes as text and is counted. Each row of Ratspeak's `reactions`
+  table becomes a reaction message (`FIELD_REACTION`) in the target's
+  conversation, at the time Ratspeak stored it, with an id derived from
+  the row so a second run writes nothing; one whose target is not
+  imported is counted and left. On a Loquax Mailbox the archive entry
+  carries these fields, so the clients get the links too.
 - **What is lost.** Ratspeak keeps no packed message, so every row is
   unverified, and its ledger says `imported from Ratspeak` and
-  `imported, no signature: Ratspeak keeps none`. No fields: replies,
-  reactions, games and telemetry are gone. Attachments, images and voice
+  `imported, no signature: Ratspeak keeps none`. No fields: games and
+  telemetry are gone. Attachments, images and voice
   notes are counted as skipped. A received message has only Ratspeak's
   receive time, no sender's clock. Channels (Reticulum Relay Chat) are not
   LXMF and are not read.

@@ -1169,7 +1169,7 @@ fn ratspeak_another_schema_is_refused_with_both_numbers() {
     assert!(
         error
             .detail
-            .contains("written for Ratspeak schema 45, this db is 46"),
+            .contains("written for Ratspeak schemas 33 and 45, this db is 46"),
         "{error}"
     );
 }
@@ -1323,4 +1323,301 @@ fn ratspeak_on_the_command_line_in_another_zone_the_times_are_the_same() {
         .filter_map(|m| m.at.map(|at| at.unix_secs))
         .collect();
     assert_eq!(secs[..2], [BEFORE_DST_END as i64, AFTER_DST_END as i64]);
+}
+
+// Ratspeak schema 33 (1158): the layout of Lew's own database, read by the
+// reviewer as schema only, written here from Ratspeak's 39a6323 schema with
+// made-up rows. No voice notes, no deletion record; replies and reactions.
+
+struct Ratspeak33 {
+    db: PathBuf,
+    own: Identity,
+    peer: Identity,
+    /// Sent, received, the reply to the sent one, the reply to a stranger.
+    ids: Vec<[u8; 32]>,
+}
+
+fn ratspeak33_db(base: &Path) -> Ratspeak33 {
+    let db = base.join("ratspeak-33.db");
+    let conn = rusqlite::Connection::open(&db).expect("db");
+    conn.execute_batch(
+        "CREATE TABLE schema_version (version INTEGER NOT NULL);
+         CREATE TABLE identities (hash TEXT PRIMARY KEY, lxmf_hash TEXT, nickname TEXT DEFAULT '',
+             display_name TEXT DEFAULT '', status TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL,
+             last_used REAL, is_active INTEGER DEFAULT 0, propagation_node TEXT DEFAULT '',
+             propagation_enabled INTEGER DEFAULT 0, propagation_mode TEXT NOT NULL DEFAULT 'auto',
+             propagation_auto_favor_static INTEGER NOT NULL DEFAULT 1);
+         CREATE TABLE contacts (dest_hash TEXT NOT NULL, identity_id TEXT DEFAULT '',
+             display_name TEXT, identity_pubkey TEXT, first_seen REAL, last_seen REAL,
+             trust TEXT DEFAULT 'pending', notes TEXT DEFAULT '', UNIQUE(dest_hash, identity_id));
+         CREATE TABLE messages (id TEXT NOT NULL, source TEXT NOT NULL, destination TEXT NOT NULL,
+             content TEXT DEFAULT '', title TEXT DEFAULT '', timestamp REAL NOT NULL,
+             state TEXT DEFAULT 'unknown', direction TEXT DEFAULT 'outbound', rtt_ms REAL,
+             hops INTEGER, path TEXT, identity_id TEXT NOT NULL DEFAULT '',
+             attachment_name TEXT DEFAULT '', attachment_stored_name TEXT DEFAULT '',
+             image_name TEXT DEFAULT '', image_stored_name TEXT DEFAULT '',
+             reply_to_id TEXT DEFAULT '', reply_to_preview TEXT DEFAULT '',
+             game_id TEXT DEFAULT '', game_action TEXT DEFAULT '', game_move_san TEXT DEFAULT '',
+             delivery_method TEXT, PRIMARY KEY (id, identity_id));
+         CREATE TABLE hidden_conversations (dest_hash TEXT NOT NULL,
+             identity_id TEXT NOT NULL DEFAULT '', hidden_at REAL,
+             PRIMARY KEY (dest_hash, identity_id));
+         CREATE TABLE blocked_contacts (dest_hash TEXT NOT NULL, identity_id TEXT NOT NULL DEFAULT '',
+             display_name TEXT DEFAULT '', blocked_at REAL, PRIMARY KEY (dest_hash, identity_id));
+         CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+         CREATE TABLE reactions (id INTEGER PRIMARY KEY AUTOINCREMENT, message_id TEXT NOT NULL,
+             sender TEXT NOT NULL, emoji TEXT NOT NULL, timestamp REAL NOT NULL,
+             identity_id TEXT DEFAULT '', UNIQUE(message_id, sender, emoji, identity_id));
+         INSERT INTO schema_version VALUES (33);",
+    )
+    .expect("schema");
+    let (own, peer, other) = (identity(), identity(), identity());
+    let (me, them, theirs) = (address(&own), address(&peer), address(&other));
+    let (own_id, other_id) = (hex(own.hash()), hex(other.hash()));
+    for (hash, lxmf, name, active) in [(&own_id, me, "Rat Me", 1), (&other_id, theirs, "Old", 0)] {
+        conn.execute(
+            "INSERT INTO identities (hash, lxmf_hash, display_name, created_at, is_active) \
+             VALUES (?1, ?2, ?3, 0.0, ?4)",
+            rusqlite::params![hash, hex(&lxmf), name, active],
+        )
+        .expect("identity");
+    }
+    conn.execute(
+        "INSERT INTO contacts (dest_hash, identity_id, display_name) VALUES (?1, ?2, 'Bob')",
+        rusqlite::params![hex(&them), own_id],
+    )
+    .expect("contact");
+    let ids = vec![[0x11; 32], [0x22; 32], [0x33; 32], [0x44; 32]];
+    let t = BEFORE_DST_END;
+    // id, from, to, content, time, state, direction, reply to, preview,
+    // delivery method, owner.
+    let insert = |id: [u8; 32],
+                  from: [u8; 16],
+                  to: [u8; 16],
+                  content: &str,
+                  ts: f64,
+                  (state, direction): (&str, &str),
+                  (reply_to, preview): (String, &str),
+                  method: Option<&str>,
+                  owner: &str| {
+        conn.execute(
+            "INSERT INTO messages (id, source, destination, content, timestamp, state, \
+             direction, identity_id, reply_to_id, reply_to_preview, delivery_method) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            rusqlite::params![
+                hex(&id),
+                hex(&from),
+                hex(&to),
+                content,
+                ts,
+                state,
+                direction,
+                owner,
+                reply_to,
+                preview,
+                method
+            ],
+        )
+        .expect("message");
+    };
+    let none = || (String::new(), "");
+    let sent = ("delivered", "outbound");
+    insert(
+        ids[0],
+        me,
+        them,
+        "ping",
+        t,
+        sent,
+        none(),
+        Some("direct"),
+        &own_id,
+    );
+    let read = ("read", "inbound");
+    insert(
+        ids[1],
+        them,
+        me,
+        "pong",
+        t + 10.5,
+        read,
+        none(),
+        None,
+        &own_id,
+    );
+    let received = ("received", "inbound");
+    let to_ping = (hex(&ids[0]), "ping");
+    insert(
+        ids[2],
+        them,
+        me,
+        "re: ping",
+        t + 20.0,
+        received,
+        to_ping,
+        None,
+        &own_id,
+    );
+    let propagated = ("propagated", "outbound");
+    let to_lost = (hex(&[0x99; 32]), "lost");
+    insert(
+        ids[3],
+        me,
+        them,
+        "re: lost",
+        t + 30.0,
+        propagated,
+        to_lost,
+        Some("propagated"),
+        &own_id,
+    );
+    insert(
+        [0x66; 32],
+        [0xdd; 16],
+        theirs,
+        "old",
+        t,
+        received,
+        none(),
+        None,
+        &other_id,
+    );
+    for (target, sender, emoji, ts) in [
+        (hex(&ids[0]), hex(&them), "\u{1f44d}", t + 5.0),
+        (hex(&ids[1]), hex(&me), "\u{2764}\u{fe0f}", t + 11.0),
+        (hex(&[0x99; 32]), hex(&them), "\u{1f602}", t + 12.0),
+    ] {
+        conn.execute(
+            "INSERT INTO reactions (message_id, sender, emoji, timestamp, identity_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![target, sender, emoji, ts, own_id],
+        )
+        .expect("reaction");
+    }
+    Ratspeak33 { db, own, peer, ids }
+}
+
+#[test]
+fn ratspeak_schema_33_is_read_with_its_replies_and_reactions() {
+    let dir = tempfile::tempdir().expect("dir");
+    let rat = ratspeak33_db(dir.path());
+    let home = home_with(dir.path(), &rat.own);
+    let found = import::sniff(&rat.db).expect("a schema 33 db");
+    assert!(matches!(found.source, Source::Ratspeak(_)));
+    assert_eq!((found.messages, found.contacts), (5, 2), "{}", found.line());
+    let dry = import::import(&found, &home, ALL, true).expect("dry run");
+    let lines = dry.lines(true).join("\n");
+    assert!(
+        lines.contains("Ratspeak schema 33, 2 identities"),
+        "{lines}"
+    );
+    assert!(
+        lines.contains("replies: 1 linked to their message, 1 whose message is not imported"),
+        "{lines}"
+    );
+    assert!(
+        lines.contains("reactions: 2 imported, 1 skipped"),
+        "{lines}"
+    );
+    let report = import::import(&found, &home, ALL, false).expect("import");
+    let (me, them) = (address(&rat.own), address(&rat.peer));
+    assert_eq!(report.history_address, Some(me));
+    assert!(!report.conversations.iter().any(|c| c.peer == [0xdd; 16]));
+    let messages = conversation(&home, me, them);
+    let bodies: Vec<&str> = messages
+        .iter()
+        .filter(|m| !m.is_reaction())
+        .map(|m| m.body.as_str())
+        .collect();
+    assert_eq!(bodies, ["ping", "pong", "re: ping", "re: lost"]);
+    let by_id = |id: [u8; 32]| {
+        messages
+            .iter()
+            .find(|m| m.id == Some(id))
+            .expect("imported")
+    };
+    assert_eq!(by_id(rat.ids[0]).delivery, Some(DeliveryState::Delivered));
+    assert_eq!(by_id(rat.ids[3]).delivery, Some(DeliveryState::InMailbox));
+    // Half a second of the received time is Ratspeak's, kept as whole seconds.
+    assert_eq!(
+        by_id(rat.ids[1]).at.map(|at| at.unix_secs),
+        Some(BEFORE_DST_END as i64 + 10)
+    );
+    let reply = by_id(rat.ids[2]).reply().expect("a reply");
+    assert_eq!(reply.to, rat.ids[0]);
+    assert_eq!(reply.quote.as_deref(), Some("ping"));
+    assert!(
+        by_id(rat.ids[3]).reply().is_none(),
+        "its target is not here"
+    );
+    let reactions: Vec<([u8; 32], String, bool)> = messages
+        .iter()
+        .filter_map(|m| m.reaction().map(|(to, content)| (to, content, m.outbound)))
+        .collect();
+    assert_eq!(
+        reactions,
+        [
+            (rat.ids[0], "\u{1f44d}".to_string(), false),
+            (rat.ids[1], "\u{2764}\u{fe0f}".to_string(), true)
+        ]
+    );
+    // Time order: each reaction after what it reacts to.
+    let order: Vec<Option<[u8; 32]>> = messages.iter().map(|m| m.id).collect();
+    let at = |id: [u8; 32]| order.iter().position(|o| *o == Some(id));
+    let thumbs = import::ratspeak::reaction_id(
+        &hex(rat.own.hash()),
+        &hex(&rat.ids[0]),
+        &hex(&them),
+        "\u{1f44d}",
+    );
+    assert!(at(rat.ids[0]) < at(thumbs) && at(thumbs) < at(rat.ids[1]));
+    // A second run writes nothing new.
+    let again = import::import(&found, &home, ALL, false).expect("again");
+    let news: Vec<(usize, usize)> = again
+        .conversations
+        .iter()
+        .map(|c| (c.new, c.held))
+        .collect();
+    assert_eq!(news, [(0, 6)]);
+}
+
+#[test]
+fn ratspeak_schema_33_on_a_mailbox_the_clients_get_the_replies_and_reactions() {
+    let dir = tempfile::tempdir().expect("dir");
+    let rat = ratspeak33_db(dir.path());
+    let home = home_with(dir.path(), &rat.own);
+    let me = address(&rat.own);
+    {
+        let mut store = Store::open_in(&home, me).expect("store");
+        store.issue_token(&[1; 16], "phone", 10).expect("token");
+        store
+            .redeem_token(&[1; 16], &[2; 16], 11, 3_600)
+            .expect("admit");
+    }
+    let found = import::sniff(&rat.db).expect("db");
+    let report = import::import(&found, &home, ALL, false).expect("import");
+    assert_eq!(report.archived, Some(6));
+    let store = Store::open_in(&home, me).expect("store");
+    let entries: Vec<Vec<u8>> = store
+        .archive_since(0, usize::MAX)
+        .expect("archive")
+        .entries
+        .into_iter()
+        .map(|e| e.packed)
+        .collect();
+    drop(store);
+    let client = dir.path().join("client");
+    std::fs::create_dir_all(&client).expect("client");
+    let public = rat.own.public_key_bytes();
+    let new = loquax::home::runner::keep_imported(&client, &public, &entries).expect("keep");
+    assert_eq!(new, 6);
+    let messages = conversation(&client, me, address(&rat.peer));
+    let reply = messages
+        .iter()
+        .find(|m| m.id == Some(rat.ids[2]))
+        .and_then(Message::reply)
+        .expect("the reply came with its link");
+    assert_eq!(reply.to, rat.ids[0]);
+    assert_eq!(messages.iter().filter(|m| m.is_reaction()).count(), 2);
+    assert!(conversation(&client, me, [0xdd; 16]).is_empty());
 }
