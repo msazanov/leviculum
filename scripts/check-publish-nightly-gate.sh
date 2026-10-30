@@ -66,6 +66,12 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # been deleted. Only what the shell, `just` and Woodpecker execute counts.
 # The `- ` of a YAML sequence entry goes first, so a commented-out command in a
 # `commands:` list is not mistaken for one.
+# Every `producer | grep` below writes grep's output to /dev/null instead of
+# using `grep -q`: -q exits at the first match, the producer then dies of
+# SIGPIPE on its next write, and under `pipefail` the pipeline reports that
+# as a failure precisely when the match succeeded. Measured 2026-10-30
+# (1153): the evidence pipeline failed 13 times in 2000, and `just guards`
+# went red on a tree whose five links were all intact.
 uncomment() {  # <file>
     sed -e 's/^[ \t]*-[ \t]\{1,\}//' -e 's/^[ \t]*//' "$1" | grep -v '^#'
 }
@@ -80,7 +86,7 @@ classify() {
     local ref="$root/scripts/nightly-green-ref.sh"
     local publish=0 gate=0 order=0 suite=0 evidence=0
 
-    if [ -f "$yml" ] && uncomment "$yml" | grep -q 'scripts/publish-nightly\.sh'; then
+    if [ -f "$yml" ] && uncomment "$yml" | grep 'scripts/publish-nightly\.sh' >/dev/null; then
         publish=1
     fi
 
@@ -104,12 +110,12 @@ classify() {
     # to the next column-0 line.
     if [ -f "$just" ]; then
         if sed -n '/^complete:/,/^[^ \t#]/p' "$just" \
-             | grep -q 'cargo test --workspace --all-targets'; then
+             | grep 'cargo test --workspace --all-targets' >/dev/null; then
             suite=1
         fi
     fi
 
-    if [ -f "$ref" ] && uncomment "$ref" | grep -q 'rnsd_interop'; then
+    if [ -f "$ref" ] && uncomment "$ref" | grep 'rnsd_interop' >/dev/null; then
         evidence=1
     fi
 
