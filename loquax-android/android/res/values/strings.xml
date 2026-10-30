@@ -202,7 +202,7 @@
     <string name="next">Continue</string>
     <string name="have_address">I already have a Loquax address</string>
     <string name="computer_title">Set up your mailbox on the computer</string>
-    <string name="computer_text">Install Loquax on the computer and run `loquax home admit --server` there. It shows a code. Paste it here.</string>
+    <string name="computer_text">Install Loquax on the computer and run `loquax home admit --server` there. It shows a code. Scan it here, or paste it.</string>
     <string name="paste_code">Paste a code</string>
     <string name="phone_until_then">Use this phone until then</string>
     <string name="background_title">Let Loquax run in the background</string>
@@ -244,4 +244,8 @@
     <string name="propagation_node_text">While your mailbox is offline, mail for you waits at a Propagation Node in the network, which Loquax chooses by itself.</string>
     <string name="here_running">Your mailbox is running on this phone</string>
     <string name="here_running_unread">Your mailbox is running on this phone, %1$d unread</string>
+    <string name="scan_code">Scan the code</string>
+    <string name="scan_backup">Scan the paper backup</string>
+    <string name="scan_hint">Hold the code in front of the camera.</string>
+    <string name="scan_no_camera">The camera cannot be used. Paste the code instead.</string>
 </resources>

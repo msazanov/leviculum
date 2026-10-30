@@ -41,6 +41,10 @@ leviculum-std = { path = "../leviculum-std" }
 leviculum-ui = { path = "../leviculum-ui", default-features = false }
 # The admission token the phone's own mailbox issues its screens (1152).
 rand_core = { workspace = true, features = ["getrandom"] }
+# The scanner's decoder (1152): a pure-Rust port of quirc, without its
+# `image` default, reading the camera's luminance plane. Brings g2p; lru
+# is already in the lock. MIT or Apache-2.0, and ISC for quirc's part.
+rqrr = { version = "0.11", default-features = false }
 # The runtime the leaf node and the session's runners run on.
 tokio.workspace = true
 tracing.workspace = true

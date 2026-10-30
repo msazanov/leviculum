@@ -33,6 +33,12 @@ final class Native {
      */
     static native byte[] renderMap(byte[] request);
 
+    /**
+     * The first QR code in a camera frame's luminance plane, `height` rows
+     * of `stride` bytes; empty for none. Not on the UI thread.
+     */
+    static native String scan(byte[] luma, int width, int height, int stride);
+
     /** Stop the session. */
     static native void stop();
 }

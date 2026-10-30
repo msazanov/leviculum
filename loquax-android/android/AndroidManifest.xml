@@ -20,6 +20,11 @@
        suggestions; without it a picked contact is read once by the
        picker's own grant (Book). Nothing of it leaves the phone. -->
   <uses-permission a:name='android.permission.READ_CONTACTS'/>
+  <!-- The scanner (1152): asked when the user taps "Scan the code"; the
+       frames go to the library's decoder and nowhere else. A phone
+       without a camera pastes the code instead. -->
+  <uses-permission a:name='android.permission.CAMERA'/>
+  <uses-feature a:name='android.hardware.camera.any' a:required='false'/>
 
   <application a:label='@string/app_name'
                a:icon='@android:drawable/sym_def_app_icon'
@@ -59,6 +64,9 @@
 
     <activity a:name='network.leviculum.loquax.BackupActivity'
               a:theme='@style/Loquax.List'
+              a:exported='false'/>
+
+    <activity a:name='network.leviculum.loquax.ScanActivity'
               a:exported='false'/>
 
     <activity a:name='network.leviculum.loquax.ConversationsActivity'

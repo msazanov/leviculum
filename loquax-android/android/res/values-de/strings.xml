@@ -164,7 +164,7 @@
     <string name="next">Weiter</string>
     <string name="have_address">Ich habe schon eine Loquax-Adresse</string>
     <string name="computer_title">Richte dein Postfach auf dem Computer ein</string>
-    <string name="computer_text">Installiere Loquax auf dem Computer und starte dort `loquax home admit --server`. Er zeigt einen Code. Füge ihn hier ein.</string>
+    <string name="computer_text">Installiere Loquax auf dem Computer und starte dort `loquax home admit --server`. Er zeigt einen Code. Scanne ihn hier oder füge ihn ein.</string>
     <string name="paste_code">Code einfügen</string>
     <string name="phone_until_then">Bis dahin dieses Telefon nehmen</string>
     <string name="background_title">Lass Loquax im Hintergrund laufen</string>
@@ -205,4 +205,8 @@
     <string name="propagation_node_text">Solange dein Postfach offline ist, wartet Post für dich bei einem Propagation Node im Netz, den Loquax selbst wählt.</string>
     <string name="here_running">Dein Postfach läuft auf diesem Telefon</string>
     <string name="here_running_unread">Dein Postfach läuft auf diesem Telefon, %1$d ungelesen</string>
+    <string name="scan_code">Code scannen</string>
+    <string name="scan_backup">Papiersicherung scannen</string>
+    <string name="scan_hint">Halte den Code vor die Kamera.</string>
+    <string name="scan_no_camera">Die Kamera lässt sich nicht nutzen. Füge den Code stattdessen ein.</string>
 </resources>

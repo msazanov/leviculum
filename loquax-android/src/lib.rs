@@ -26,6 +26,7 @@ pub mod links;
 pub mod mailbox;
 pub mod map;
 pub mod pull_line;
+pub mod scan;
 pub mod schema;
 pub mod session;
 
@@ -311,6 +312,29 @@ pub extern "system" fn Java_network_leviculum_loquax_Native_renderMap<'caller>(
         .with_env(|env| -> Result<_, jni::errors::Error> {
             let request = bytes_of(env, &request)?;
             env.byte_array_from_slice(&render_map(&request))
+        })
+        .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+/// `static native String scan(byte[] luma, int width, int height, int stride)`
+/// of `Native`: the first QR code in a camera frame's luminance plane
+/// ([`scan::decode`]), empty for none. Called off the UI thread.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_network_leviculum_loquax_Native_scan<'caller>(
+    mut unowned: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    luma: JByteArray<'caller>,
+    width: jint,
+    height: jint,
+    stride: jint,
+) -> JString<'caller> {
+    unowned
+        .with_env(|env| -> Result<_, jni::errors::Error> {
+            let luma = bytes_of(env, &luma)?;
+            let size = |value: jint| usize::try_from(value).unwrap_or(0);
+            let found = scan::decode(size(width), size(height), size(stride), &luma);
+            JString::from_str(env, found.into_iter().next().unwrap_or_default())
         })
         .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }

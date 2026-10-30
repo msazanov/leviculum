@@ -32,15 +32,15 @@ import java.util.Map;
  *
  * 1. welcome and "Where should your mailbox be?" on one screen, "On this
  *    phone" chosen, its three warnings below it while it is;
- * 2. for a computer: what to do there, then the code (paste it, or scan it
- *    once the scanner is there), or "use this phone until then";
+ * 2. for a computer: what to do there, then the code (scan it or paste
+ *    it), or "use this phone until then";
  * 3. the background permission: notifications and the battery exemption,
  *    explained once, then Android's two dialogs;
  * 4. "Your address": the QR code, share, write a message, the optional
  *    name, and for a mailbox on the phone the backup.
  *
  * Beside the choice, "I already have a Loquax address": a backup line,
- * from its file or typed off the paper, and its passphrase, then the
+ * from its file, scanned off the paper or typed, and its passphrase, then the
  * phone's mailbox with that address.
  *
  * Shown while the phone neither holds a mailbox nor reads one; the first
@@ -59,6 +59,8 @@ public class WelcomeActivity extends Activity {
     private static final int ASK_NOTIFICATIONS = 1;
     private static final int ASK_BATTERY = 2;
     private static final int OPEN_BACKUP = 3;
+    private static final int SCAN_CODE = 4;
+    private static final int SCAN_BACKUP = 5;
 
     private ScrollView frame;
     private int page = CHOICE;
@@ -217,6 +219,17 @@ public class WelcomeActivity extends Activity {
             }
         });
         body.addView(open, wrap());
+        if (ScanActivity.available(this)) {
+            Button scan = button(getString(R.string.scan_backup));
+            scan.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    startActivityForResult(new Intent(WelcomeActivity.this, ScanActivity.class)
+                            .putExtra(ScanActivity.PREFIX, "lqxb1"), SCAN_BACKUP);
+                }
+            });
+            body.addView(scan, wrap());
+        }
         backupLine = new EditText(this);
         backupLine.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE
                 | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
@@ -263,6 +276,17 @@ public class WelcomeActivity extends Activity {
         body.addView(text(getString(R.string.computer_title), 22, R.color.text, true), matchWrap());
         body.addView(gap(text(getString(R.string.computer_text), 15, R.color.text, false), 8, 16),
                 matchWrap());
+        if (ScanActivity.available(this)) {
+            Button scan = button(getString(R.string.scan_code));
+            scan.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    startActivityForResult(new Intent(WelcomeActivity.this, ScanActivity.class)
+                            .putExtra(ScanActivity.PREFIX, "lqxh1"), SCAN_CODE);
+                }
+            });
+            body.addView(scan, wrap());
+        }
         Button paste = button(getString(R.string.paste_code));
         paste.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -341,6 +365,14 @@ public class WelcomeActivity extends Activity {
         } else if (request == OPEN_BACKUP && result == RESULT_OK && data != null
                 && data.getData() != null && backupLine != null) {
             backupLine.setText(backupLine(read(data.getData())));
+        } else if (request == SCAN_BACKUP && result == RESULT_OK && data != null
+                && backupLine != null) {
+            backupLine.setText(backupLine(String.valueOf(data.getStringExtra(ScanActivity.TEXT))));
+        } else if (request == SCAN_CODE && result == RESULT_OK && data != null) {
+            // The join itself is the first screen's, as for a pasted code.
+            startActivity(new Intent(this, MainActivity.class)
+                    .putExtra(MainActivity.JOIN, true)
+                    .putExtra(MainActivity.CODE, data.getStringExtra(ScanActivity.TEXT)));
         }
     }
 

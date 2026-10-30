@@ -33,6 +33,8 @@ import java.util.Map;
 public class MainActivity extends Activity {
     /** The extra that asks for the join form: the first start's "Paste a code". */
     static final String JOIN = "join";
+    /** The extra with a code the scanner read: joined at once when it carries the address. */
+    static final String CODE = "code";
     private TextView status;
     private TextView error;
     private View form;
@@ -85,7 +87,7 @@ public class MainActivity extends Activity {
         // already joined or failed once: the fields restore what was typed,
         // and a second join with a code the home node took would fail.
         imto = Book.imtoPeer(getIntent());
-        start(savedInstanceState == null && shared(getIntent()));
+        start(savedInstanceState == null && (shared(getIntent()) || scanned(getIntent())));
     }
 
     @Override
@@ -109,6 +111,17 @@ public class MainActivity extends Activity {
         }
         CharSequence text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
         String found = text == null ? "" : homeCode(text.toString());
+        if (found.isEmpty()) {
+            return false;
+        }
+        code.setText(found);
+        return found.indexOf('@') > 0;
+    }
+
+    /** A code the scanner read: into the form. True when it carries the address. */
+    private boolean scanned(Intent intent) {
+        String text = intent == null ? null : intent.getStringExtra(CODE);
+        String found = text == null ? "" : homeCode(text);
         if (found.isEmpty()) {
             return false;
         }
