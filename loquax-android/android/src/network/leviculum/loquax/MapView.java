@@ -5,6 +5,7 @@ import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Paint;
+import android.os.PowerManager;
 import android.view.GestureDetector;
 import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
@@ -29,6 +30,13 @@ import java.util.Map;
  * keeps, nothing snaps. The request is built when the thread is free, from
  * the gestures up to then, so a newer view supersedes the ones it passed
  * and nothing is lost.
+ *
+ * When a frame at rest owes no tile and nothing else is owed, the frame
+ * thread asks the library to prefetch the tiles around the view (1135), a
+ * tile a worker a call, the ones ahead of the last pan first, until the
+ * plan is done or a gesture or a new view comes: one call at most stands
+ * between a gesture and its frame. Only while the window is shown and the
+ * battery saver is off; the background service never draws.
  */
 final class MapView extends View {
     /** What a frame said, on the UI thread. */
@@ -86,6 +94,10 @@ final class MapView extends View {
     private Long atLon;
     /** A frame is owed: the view changed since the last request. */
     private boolean owed;
+    /** The last frame was at rest and the library has tiles to prefetch. */
+    private boolean idle;
+    /** The window is shown: the app is in front. */
+    private boolean visible;
     private Thread frames;
 
     MapView(Context context, String dir, Listener listener) {
@@ -208,6 +220,7 @@ final class MapView extends View {
         if (action == MotionEvent.ACTION_DOWN) {
             synchronized (this) {
                 touching = true;
+                idle = false;
             }
         } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
             boolean again;
@@ -227,6 +240,21 @@ final class MapView extends View {
     protected void onSizeChanged(int w, int h, int oldw, int oldh) {
         super.onSizeChanged(w, h, oldw, oldh);
         ask();
+    }
+
+    @Override
+    protected void onWindowVisibilityChanged(int visibility) {
+        super.onWindowVisibilityChanged(visibility);
+        synchronized (this) {
+            visible = visibility == View.VISIBLE;
+            notifyAll();
+        }
+    }
+
+    /** The battery saver is on: no work ahead of the user. */
+    private boolean saving() {
+        PowerManager power = (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
+        return power != null && power.isPowerSaveMode();
     }
 
     @Override
@@ -279,22 +307,39 @@ final class MapView extends View {
         return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
     }
 
-    /** The frame thread: wait until a frame is owed, ask the library, show it. */
+    /**
+     * The frame thread: wait until a frame is owed, ask the library, show
+     * it; while none is owed and the view is idle, prefetch.
+     */
     private void drawFrames() {
         while (!Thread.currentThread().isInterrupted()) {
             Map<String, Object> request;
             boolean moving;
             int w;
             int h;
+            boolean ahead;
             synchronized (this) {
                 while (!owed || getWidth() == 0 || getHeight() == 0) {
+                    if (idle && visible && !touching && getWidth() > 0 && getHeight() > 0) {
+                        break;
+                    }
                     try {
                         wait();
                     } catch (InterruptedException e) {
                         return;
                     }
                 }
+                ahead = !owed;
+                w = getWidth();
+                h = getHeight();
+            }
+            if (ahead) {
+                prefetch(w, h);
+                continue;
+            }
+            synchronized (this) {
                 owed = false;
+                idle = false;
                 moving = touching;
                 w = getWidth();
                 h = getHeight();
@@ -368,6 +413,10 @@ final class MapView extends View {
                     listener.onShown(frame.shown);
                 }
             });
+            synchronized (this) {
+                idle = !moving && Core.bool(frame.shown, "prefetching")
+                        && !Core.bool(frame.shown, "loading");
+            }
             if (Core.bool(frame.shown, "pending")) {
                 // Tiles the frame showed from another step: draw them now.
                 ask();
@@ -380,6 +429,26 @@ final class MapView extends View {
                     }
                 }, 1500);
             }
+        }
+    }
+
+    /**
+     * One batch of the prefetch around the last frame at rest: idle ends
+     * when the plan is done or the battery saver is on.
+     */
+    private void prefetch(int w, int h) {
+        if (saving()) {
+            synchronized (this) {
+                idle = false;
+            }
+            return;
+        }
+        Map<String, Object> request = Core.map("dir", dir, "prefetch", true,
+                "w", (long) w, "h", (long) h,
+                "density_milli", (long) Math.round(getResources().getDisplayMetrics().density * 1000));
+        Core.MapFrame answer = Core.renderMap(request);
+        synchronized (this) {
+            idle = idle && Core.bool(answer.shown, "ok") && Core.bool(answer.shown, "prefetching");
         }
     }
 

@@ -10,8 +10,12 @@
 //! drawn and the names placed), a cold frame while the finger is down (at
 //! most two tiles a worker drawn, the rest owed), and a pinch from z14.3
 //! to z15.7 in steps of 0.07 with the finger down, then at rest. Each with
-//! every core the cache takes and with one. The cache's memory after the
-//! run is printed last.
+//! every core the cache takes and with one. Then the prefetch (1135): a
+//! pan north with the finger down, a frame at rest, then for one second
+//! the prefetch calls the app makes while idle (tiles drawn, a call's
+//! time, which is what a gesture waits at most), and the first frame of a
+//! further pan north by a tile row, with and without the prefetch before
+//! it. The cache's memory after the run is printed last.
 //!
 //! ```sh
 //! cargo run --release -p loquax-android --example map_fps -- HOME
@@ -183,11 +187,113 @@ fn main() {
             u32::from(shown.pending),
         );
     }
+    prefetch(&home, &base, draw, timed, median, workers);
     if let Some((tiles, bytes)) = loquax_android::map::tile_memory(&home) {
         println!(
             "\ncache: {tiles} tiles, {:.1} MB of the budget's {} MB",
             bytes as f64 / f64::from(1u32 << 20),
             loquax::tiles::BUDGET_MB
+        );
+    }
+}
+
+/// The prefetch rows (1135): five runs each with and without the
+/// prefetch, from a cold cache, the medians.
+fn prefetch(
+    home: &std::path::Path,
+    base: &MapRequest,
+    draw: impl Fn(&MapRequest) -> MapShown,
+    timed: impl Fn(&MapRequest) -> (f64, MapShown),
+    median: impl Fn(Vec<f64>) -> f64,
+    workers: usize,
+) {
+    loquax_android::map::tune_tiles(home, Some(workers), true);
+    let stats = || loquax_android::map::tile_stats(home).unwrap_or_default();
+    println!("\n| prefetch | runs | value |");
+    println!("|---|---|---|");
+    let (mut tiles_1s, mut calls_1s, mut call_ms, mut done_tiles, mut done_ms) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut first = [Vec::new(), Vec::new()];
+    let mut drawn_first = [Vec::new(), Vec::new()];
+    let mut hits_first = [Vec::new(), Vec::new()];
+    for run in 0..10 {
+        let ahead = run % 2 == 0;
+        loquax_android::map::tune_tiles(home, None, true);
+        // A pan north with the finger down, then the frame at rest.
+        let mut ask = MapRequest {
+            moving: true,
+            pan_y: -40,
+            ..base.clone()
+        };
+        for _ in 0..8 {
+            let shown = draw(&ask);
+            (ask.x, ask.y) = (Some(shown.x), Some(shown.y));
+        }
+        ask.moving = false;
+        ask.pan_y = 0;
+        let rest = draw(&ask);
+        assert!(rest.prefetching || !ahead);
+        if ahead {
+            let call = MapRequest {
+                prefetch: true,
+                ..ask.clone()
+            };
+            let from = stats().prefetched;
+            let started = std::time::Instant::now();
+            let (mut tiles, mut calls, mut more) = (0u32, 0u32, true);
+            while more {
+                let (t, shown) = timed(&call);
+                if started.elapsed().as_secs_f64() <= 1.0 {
+                    tiles += shown.prefetched;
+                    calls += 1;
+                }
+                call_ms.push(t);
+                more = shown.prefetching;
+            }
+            done_ms.push(started.elapsed().as_secs_f64() * 1e3);
+            done_tiles.push((stats().prefetched - from) as f64);
+            tiles_1s.push(f64::from(tiles));
+            calls_1s.push(f64::from(calls));
+        }
+        let before = stats();
+        let further = MapRequest {
+            moving: true,
+            pan_y: -(loquax::tiles::TILE as i32),
+            ..ask.clone()
+        };
+        let (t, _) = timed(&further);
+        let after = stats();
+        let i = usize::from(!ahead);
+        first[i].push(t);
+        drawn_first[i].push((after.rendered - before.rendered) as f64);
+        hits_first[i].push((after.prefetch_hits - before.prefetch_hits) as f64);
+    }
+    let n = tiles_1s.len();
+    println!(
+        "| tiles drawn in the first second | {n} | {:.0} |",
+        median(tiles_1s)
+    );
+    println!(
+        "| calls in the first second | {n} | {:.0} |",
+        median(calls_1s)
+    );
+    let max = call_ms.iter().copied().fold(0.0, f64::max);
+    println!("| a call, median ms | {n} | {:.1} |", median(call_ms));
+    println!("| a call, longest ms | {n} | {max:.1} |");
+    println!("| plan done: tiles | {n} | {:.0} |", median(done_tiles));
+    println!("| plan done: ms | {n} | {:.0} |", median(done_ms));
+    for (i, name) in ["with prefetch", "without"].iter().enumerate() {
+        println!(
+            "| first pan frame {name}: ms | {n} | {:.1} |",
+            median(first[i].clone())
+        );
+        println!(
+            "| first pan frame {name}: tiles drawn | {n} | {:.0} |",
+            median(drawn_first[i].clone())
+        );
+        println!(
+            "| first pan frame {name}: prefetched tiles hit | {n} | {:.0} |",
+            median(hits_first[i].clone())
         );
     }
 }

@@ -30,6 +30,14 @@
 //! draws at most [`MOVING_TILES_PER_WORKER`] missing tiles a worker,
 //! showing the step before where the rest are owed.
 //!
+//! A frame at rest that owes no tile leaves the view to prefetch (1135):
+//! Java then asks with `prefetch` while no finger is down and nothing else
+//! is owed, and each such call draws one batch of [`loquax::tiles::plan`]'s
+//! tiles, one a worker, ordered by the pan's direction ([`Motion`]), up
+//! to the plan's budget. Any frame drops the plan; the next frame at rest
+//! makes a new one. When the ring reaches past the regions that hold the
+//! frame, the autoload is asked for the area the ring covers.
+//!
 //! The autoload (1089) is the terminal's and the window's: the places of
 //! the first pins when they first fit, a report's place when it opens the
 //! map, the view on "load this area", one load at a time into the maps
@@ -49,7 +57,7 @@ use loquax::mapload::{Loader, Source, Step, CACHE_DEFAULT_MB};
 use loquax::mapnames::{self, Sprite, Typesetter};
 use loquax::picture::{map_theme, Maps, Painter};
 use loquax::screenmap::{self, Placed};
-use loquax::tiles::{Frame as TileFrame, Stats, TileCache, BUDGET_MB};
+use loquax::tiles::{self, Frame as TileFrame, Motion, Plan, Stats, TileCache, BUDGET_MB, TILE};
 use loquax::ui::map::{fit, fit_at, want_pins, want_place, want_view, zoom_floor, MapPin, MapWant};
 use loquax::when::WallTime;
 
@@ -91,6 +99,15 @@ pub struct Renderer {
     names: Vec<Sprite>,
     /// The frame they were placed in.
     names_view: Option<ExactView>,
+    /// The pan's velocity and the last pinch's way (1135).
+    motion: Motion,
+    /// The last frame, when it was at rest and owed no tile: what a
+    /// prefetch draws around, with the zooms the regions allow.
+    rest: Option<(TileFrame, (u8, u8))>,
+    /// What the prefetch draws for that frame, made on its first call.
+    plan: Option<Plan>,
+    /// A line a prefetch's region load left for the next frame.
+    notice_owed: Option<String>,
 }
 
 impl Renderer {
@@ -107,6 +124,10 @@ impl Renderer {
             last_zoom: None,
             names: Vec::new(),
             names_view: None,
+            motion: Motion::default(),
+            rest: None,
+            plan: None,
+            notice_owed: None,
             type_: Typesetter::new(),
             loader: Loader::new(maps, source, cache),
             autoload: config.map_autoload.unwrap_or(true),
@@ -202,7 +223,9 @@ impl Renderer {
     /// One frame for `request` over `pins`.
     pub fn frame(&mut self, request: &MapRequest, pins: &[MapPin]) -> (MapShown, Vec<u8>) {
         let started = Instant::now();
-        let mut notice = None;
+        let mut notice = self.notice_owed.take();
+        self.rest = None;
+        self.plan = None;
         let now = self.now_ms();
         let polled = self.loader.poll(now);
         let landed = self.steps(polled, &mut notice);
@@ -270,10 +293,13 @@ impl Renderer {
         };
         view = held(view);
         if request.pan_x != 0 || request.pan_y != 0 {
+            self.motion
+                .pan(f64::from(request.pan_x), f64::from(request.pan_y), now);
             view.pan(request.pan_x, request.pan_y);
             view = held(view);
         }
         let by = i64::from(request.zoom_by) * i64::from(MILLI) + i64::from(request.zoom_by_milli);
+        self.motion.zoom(by);
         if by != 0 {
             let zoom = (i64::from(view.zoom_milli()) + by)
                 .clamp(i64::from(floor), i64::from(ceiling.max(floor)));
@@ -337,7 +363,7 @@ impl Renderer {
             .last_zoom
             .filter(|&z| request.moving && (view.zoom() - f64::from(z)).abs() <= 1.0);
         let tile_zoom = kept.unwrap_or(rest_zoom);
-        let composed = self.tiles.compose(&TileFrame {
+        let asked = TileFrame {
             view: drawn,
             zoom: tile_zoom,
             style,
@@ -346,8 +372,12 @@ impl Renderer {
                 .moving
                 .then(|| self.tiles.workers() * MOVING_TILES_PER_WORKER),
             fallback: self.last_zoom,
-        });
+        };
+        let composed = self.tiles.compose(&asked);
         self.last_zoom = Some(tile_zoom);
+        if !request.moving && composed.missing == 0 {
+            self.rest = Some((asked, (zoom_floor(area, &setup), setup.zooms.1)));
+        }
         let mut rgba = composed.rgba;
         let (w, h) = drawn.size();
         let placed = screenmap::place_exact(pins, &drawn, selected, scale, |text, size| {
@@ -423,8 +453,69 @@ impl Renderer {
             ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
             dark: table == MapTheme::Dark,
             theme_chosen: matches!(self.theme, Some(ThemeFlag::Light | ThemeFlag::Dark)),
+            prefetching: self.rest.is_some(),
+            prefetched: 0,
         };
         (shown, rgba)
+    }
+
+    /// One batch of the prefetch around the last frame at rest (1135):
+    /// on the first call the plan, ordered by the pan's direction now, and
+    /// the region past the frame's asked for; then a tile a worker. The
+    /// answer has no pixels; `prefetching` says whether more is to draw.
+    pub fn prefetch(&mut self) -> MapShown {
+        let started = Instant::now();
+        let Some((frame, zooms)) = self.rest else {
+            return MapShown {
+                v: VERSION,
+                ok: true,
+                ..MapShown::default()
+            };
+        };
+        let now = self.now_ms();
+        if self.plan.is_none() {
+            let heading = self.motion.heading(now);
+            self.plan = Some(tiles::plan(&frame, heading, self.motion.zoomed_out, zooms));
+            self.ask_past(&frame);
+        }
+        let workers = self.tiles.workers();
+        let (drawn, more) = match self.plan.as_mut() {
+            Some(plan) => (self.tiles.prefetch(plan, workers), !plan.done()),
+            None => (0, false),
+        };
+        MapShown {
+            v: VERSION,
+            ok: true,
+            prefetching: more,
+            prefetched: u32::try_from(drawn).unwrap_or(u32::MAX),
+            loading: self.loader.busy(),
+            ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
+            ..MapShown::default()
+        }
+    }
+
+    /// When the regions hold `frame` and not the ring around it, ask the
+    /// autoload for the ring's area: it caps the size and backs off as for
+    /// any view. A frame the regions do not hold loads nothing unasked.
+    fn ask_past(&mut self, frame: &TileFrame) {
+        let setup = screenmap::setup(&self.painter);
+        if want_view(&frame.view.at_zoom(frame.zoom), &setup.regions).is_some() {
+            return;
+        }
+        let mut grown = frame.view;
+        let (w, h) = grown.size();
+        let ring = (2.0 * f64::from(TILE) * frame.view.scale_at(frame.zoom)).ceil() as u32;
+        grown.resize(
+            w.saturating_add(ring.saturating_mul(2)),
+            h.saturating_add(ring.saturating_mul(2)),
+        );
+        if let Some(want) = want_view(&grown.at_zoom(frame.zoom), &setup.regions) {
+            let mut notice = None;
+            self.ask(want, &mut notice);
+            if notice.is_some() {
+                self.notice_owed = notice;
+            }
+        }
     }
 
     /// What the tile cache did, for a test and the measuring tool.
@@ -496,6 +587,9 @@ pub fn render(request: &MapRequest, pins: Option<Vec<MapPin>>, now: WallTime) ->
         }
     };
     let renderer = &mut renderers[at];
+    if request.prefetch {
+        return crate::schema::frame(&renderer.prefetch(), &[]);
+    }
     let (shown, rgba) = renderer.frame(request, &pins);
     crate::schema::frame(&shown, &rgba)
 }

@@ -19,6 +19,7 @@ use loquax::mapnames::Typesetter;
 use loquax::picture::{Maps, Painter};
 use loquax::store::Store;
 use loquax::telemetry::Fix;
+use loquax::tiles;
 use loquax::ui::history::StoreWrite;
 use loquax::ui::map::MapPin;
 use loquax::when::WallTime;
@@ -921,4 +922,139 @@ fn a_pin_costs_no_tile() {
     let after = loquax_android::map::tile_stats(home.path()).expect("a renderer");
     assert_eq!(after.rendered, before.rendered, "no tile drawn for pins");
     assert_eq!(after.hits, before.hits + 3 * before.misses);
+}
+
+/// Pan the view of `ask` by `(dx, dy)` five times with the finger down,
+/// then a frame at rest: the request for the view it left.
+fn pan_and_rest(ask: &MapRequest, dx: i32, dy: i32) -> (MapShown, MapRequest) {
+    let mut ask = ask.clone();
+    for _ in 0..5 {
+        ask.pan_x = dx;
+        ask.pan_y = dy;
+        ask.moving = true;
+        let (shown, _) = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
+        ask.x = Some(shown.x);
+        ask.y = Some(shown.y);
+        ask.zoom = None;
+        ask.zoom_milli = Some(shown.zoom_milli);
+    }
+    ask.pan_x = 0;
+    ask.pan_y = 0;
+    ask.moving = false;
+    let (shown, _) = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
+    (shown, ask)
+}
+
+/// One prefetch call: its answer, no pixels.
+fn prefetch(ask: &MapRequest) -> MapShown {
+    let call = MapRequest {
+        prefetch: true,
+        ..ask.clone()
+    };
+    let bytes = loquax_android::map::render(&call, Some(Vec::new()), now());
+    let (shown, pixels) = schema::unframe(&bytes).expect("an answer");
+    assert!(shown.ok && pixels.is_empty());
+    shown
+}
+
+/// The prefetch at rest draws the tile ahead of the last pan first
+/// (1135): one tile after a pan north is the one a further pan north
+/// uncovers, after a pan south it is not.
+#[test]
+fn the_prefetch_draws_the_tile_ahead_of_the_pan_first() {
+    for (way, hits) in [(-1, 1), (1, 0)] {
+        let home = home();
+        let ask = request(home.path(), false);
+        let _ = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
+        loquax_android::map::tune_tiles(home.path(), Some(1), false);
+        let (rest, ask) = pan_and_rest(&ask, 0, way * 40);
+        assert!(rest.prefetching, "a frame at rest owing nothing prefetches");
+        let one = prefetch(&ask);
+        assert_eq!(one.prefetched, 1);
+        assert!(one.prefetching);
+        let before = loquax_android::map::tile_stats(home.path()).expect("a renderer");
+        let north = MapRequest {
+            pan_y: -(tiles::TILE as i32),
+            moving: true,
+            ..ask.clone()
+        };
+        let _ = frame(&loquax_android::map::render(
+            &north,
+            Some(Vec::new()),
+            now(),
+        ));
+        let after = loquax_android::map::tile_stats(home.path()).expect("a renderer");
+        assert_eq!(
+            after.prefetch_hits - before.prefetch_hits,
+            hits,
+            "way {way}"
+        );
+    }
+}
+
+/// A prefetch runs to its plan's end within its budget; any frame, a
+/// gesture's or a new view's, drops the plan, and a frame while the
+/// finger is down leaves none to prefetch.
+#[test]
+fn a_gesture_cancels_the_prefetch_and_the_budget_bounds_it() {
+    let home = home();
+    let ask = request(home.path(), false);
+    let (rest, _) = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
+    assert!(rest.prefetching);
+    let mut drawn = 0;
+    let mut calls = 0;
+    loop {
+        let answer = prefetch(&ask);
+        drawn += answer.prefetched as usize;
+        calls += 1;
+        if !answer.prefetching {
+            break;
+        }
+        assert!(calls < 1000);
+    }
+    assert!(drawn > 0 && drawn <= tiles::PREFETCH_BUDGET, "{drawn}");
+    let stats = loquax_android::map::tile_stats(home.path()).expect("a renderer");
+    assert_eq!(stats.prefetched as usize, drawn);
+    assert_eq!(prefetch(&ask).prefetched, 0, "the plan is done");
+
+    let moving = MapRequest {
+        pan_x: 30,
+        moving: true,
+        ..ask.clone()
+    };
+    let (shown, _) = frame(&loquax_android::map::render(
+        &moving,
+        Some(Vec::new()),
+        now(),
+    ));
+    assert!(!shown.prefetching);
+    let answer = prefetch(&ask);
+    assert_eq!((answer.prefetched, answer.prefetching), (0, false));
+
+    // A new view at rest plans anew; a frame between two calls drops it.
+    let (rest, _) = frame(&loquax_android::map::render(
+        &moving,
+        Some(Vec::new()),
+        now(),
+    ));
+    assert!(!rest.prefetching, "still the finger down");
+    // Far enough that its ring is not the tiles drawn already.
+    let at_rest = MapRequest {
+        pan_x: 4000,
+        moving: false,
+        ..moving.clone()
+    };
+    let (rest, _) = frame(&loquax_android::map::render(
+        &at_rest,
+        Some(Vec::new()),
+        now(),
+    ));
+    assert!(rest.prefetching);
+    assert!(prefetch(&at_rest).prefetching);
+    let _ = frame(&loquax_android::map::render(
+        &moving,
+        Some(Vec::new()),
+        now(),
+    ));
+    assert!(!prefetch(&at_rest).prefetching, "the gesture dropped it");
 }

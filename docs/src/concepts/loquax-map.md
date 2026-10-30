@@ -247,7 +247,19 @@ The frontends:
   are drawn over the tiles every frame, so a pin costs no tile. A pinch
   keeps the step it is composed from while it stays within a step of it,
   and a frame shows the last step's cached tiles where the new step's are
-  still owed. The terminal and the window keep whole steps.
+  still owed. A view at rest with every tile drawn prefetches (1135,
+  `loquax::tiles::plan`): the ring of tiles around the frame, then the
+  next step in over its central half, the step out only after a pinch
+  out, then a second ring into spare room only; each group ordered by
+  the pan's velocity, a moving average that fades within about two
+  seconds of rest, the tiles ahead of the last movement first, nearest
+  first without one. At most 128 tiles a view, a tile a worker a call,
+  so a gesture waits one tile at most and drops the plan; a prefetched
+  tile no frame used is evicted first, and a prefetch evicts neither a
+  tile on screen nor one it drew. Only while the map is in front and
+  the battery saver is off. When the ring reaches past the regions that
+  hold the frame, the autoload is asked for the ring's area. The
+  terminal and the window keep whole steps.
 - **The M9.** The same pipeline straight into the panel's
   `embedded-graphics` target, as the measurement firmware does
   (`leviculum-mapfill/m9/`), with mousefood's cells for the labels.

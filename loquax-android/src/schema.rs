@@ -44,7 +44,8 @@
 //! long press's requests and queries (1137) and a row's `key` and quote
 //! came the same way, and so did the address book's (1139): the link
 //! requests and queries, a row's `photo` and `linked`, and the header's
-//! link fields.
+//! link fields; and the map's `prefetch` with its answer's `prefetching`
+//! and `prefetched` (1135).
 
 use serde::{Deserialize, Serialize};
 
@@ -633,6 +634,11 @@ pub struct MapRequest {
     /// auto`.
     #[serde(default)]
     pub follow_phone: bool,
+    /// Draw a batch of the tiles around the last frame at rest instead of
+    /// a frame (1135): the answer has no pixels. Java asks while the view
+    /// is idle, the app in front and the battery saver off.
+    #[serde(default)]
+    pub prefetch: bool,
 }
 
 /// The map frame's description; its pixels follow it (see the table
@@ -688,6 +694,14 @@ pub struct MapShown {
     pub dark: bool,
     #[serde(default)]
     pub theme_chosen: bool,
+    /// Tiles around the view are still to prefetch (1135): a frame at
+    /// rest that owes none says so, a prefetch answer until its plan is
+    /// done.
+    #[serde(default)]
+    pub prefetching: bool,
+    /// Tiles a prefetch answer drew.
+    #[serde(default)]
+    pub prefetched: u32,
 }
 
 /// A map frame for Java: the description's length, the description, the
