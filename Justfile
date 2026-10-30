@@ -1936,6 +1936,13 @@ build-deb-amd64: (_require-cargo-deb) _deb-stamp
 build-deb-arm64: (_require-cargo-deb) _deb-stamp
     @bash scripts/build-deb.sh arm64
 
+# armhf (armv7, hard float) musl-static .debs, the same way as arm64: for a
+# Raspberry Pi 2, 3 or Zero 2 under a 32-bit OS (1153). Not yet published by
+# the nightly, which ships amd64 and arm64.
+[doc('Build the armhf (armv7) musl-static .debs via cargo-zigbuild')]
+build-deb-armhf: (_require-cargo-deb) _deb-stamp
+    @bash scripts/build-deb.sh armhf
+
 # The heap-accounting variants of the leviculum package (#437) and of the
 # lnpnd package (550), for one architecture. Both build-deb-* recipes produce them
 # beside the plain packages, because scripts/build-deb.sh always does; this
@@ -1959,8 +1966,8 @@ lnflash-deb: (_require-cargo-deb) _deb-stamp
 # toolchain: `just lnflash-deb`). _deb-stamp runs first (a dependency of each
 # child), so all the packages share one build-id and a consistent set of
 # per-package versions.
-[doc('Build the .debs, both architectures, on one shared build id')]
-build-deb: build-deb-amd64 build-deb-arm64
+[doc('Build the .debs, all three architectures, on one shared build id')]
+build-deb: build-deb-amd64 build-deb-arm64 build-deb-armhf
 
 # The nightly release, built and published from this tree (517). Runs on the
 # tier-2 nightly host after a green-or-attributed night, with
@@ -1982,7 +1989,7 @@ nightly-publish:
 # required — nothing is installed.
 #
 # Deliberately not part of any test tier: it presupposes a build-deb run,
-# which does a `cargo clean` on three crates and cross-builds for two
+# which does a `cargo clean` on three crates and cross-builds for three
 # targets. That is minutes of rebuild plus a zig toolchain, which does
 # not belong in the 15-minute Tier 1 budget. Run it by hand whenever
 # packaging changes, together with a real install test in a systemd
@@ -1996,10 +2003,10 @@ _require-cargo-deb:
     @cargo deb --version >/dev/null 2>&1 || (echo "cargo-deb not found — run: just _deb-prereqs (or cargo install cargo-deb)" && exit 1)
 
 # Best-effort, idempotent install of the cross-build toolchain the
-# build-deb* recipes need: the two musl rustup targets, cargo-deb, and
-# cargo-zigbuild + ziglang for the arm64 cross-link. Safe to re-run.
+# build-deb* recipes need: the three musl rustup targets, cargo-deb, and
+# cargo-zigbuild + ziglang for the arm64 and armhf cross-links. Safe to re-run.
 _deb-prereqs:
-    rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+    rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl armv7-unknown-linux-musleabihf
     cargo install --locked cargo-deb
     cargo install --locked cargo-zigbuild
     @echo "[_deb-prereqs] also ensure ziglang is available for arm64:"
