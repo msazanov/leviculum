@@ -28,12 +28,12 @@ Since slice (a), every position. The engine passes an incoming message's
 fields on (`Message::fields`, `leviculum-lxmf/src/message.rs:84`):
 `RouterEvent::MessageReceived` becomes `OutboxEvent::Received` with the
 fields beside id, source, title, body and the verification
-(`loquax/src/engine.rs:460`, `loquax/src/outbox.rs:232`). The core reads
+(`loquax/src/engine.rs:460`, `loquax/src/outbox.rs:245`). The core reads
 the two telemetry fields into positions (`telemetry::read`,
 `loquax/src/telemetry.rs:130`), the screen model keeps each peer's latest
 and hands every one to the store (`take_telemetry`,
-`loquax/src/ui.rs:3013`), and the store keeps the fields whole in its
-`fields` column (`loquax/src/store.rs:2157`) and the positions in a table of
+`loquax/src/ui.rs:3070`), and the store keeps the fields whole in its
+`fields` column (`loquax/src/store.rs:2255`) and the positions in a table of
 their own (`SCHEMA_V2`, `loquax/src/store.rs:173`). The sender's timestamp
 is still not carried: `OutboxEvent`, the screen's `Message` and every type
 the model folds derive `Eq`, which an `f64` cannot, so carrying it is a
@@ -278,7 +278,60 @@ The frontends:
   itself, the names kept, the prefetch's plan and the view held to one
   world are `loquax::mapframe`, which the window calls too (1144); the
   phone's glue keeps its requests, its fit and its autoload. The
-  terminal keeps whole steps.
+  terminal keeps whole steps. Since 1154 a frame at rest sets its names
+  from what the last one set: every name in view is shaped once for its
+  size, only one with a spot in the picture is rasterised and only a
+  placed one gets its halo, all kept by text, size, pad and slant
+  (`loquax::mapnames::Typesetter`, at most 8192 masks, 8192 halos and
+  4 MB); the halo is widened by row spans, and a placed name's sprite is
+  sampled over its turned box only, the names dealt over the cache's
+  workers. A frame with every tile there is composed into the last
+  frame's buffer, which the phone's facade hands back
+  (`loquax::mapframe::Frames::recycle`), copies the tiles' rows whole at
+  a whole step and mixes two channels a `u64` between steps. Every frame
+  is the same bytes as before, which
+  `the_fast_paths_give_the_frames_of_the_old_ones` in
+  `loquax/src/mapframe.rs` holds against the old paths, kept as test
+  references. On the coder host, through `map_fps` (the facade's frame
+  copy included, the host shared with other builds), the phone's frame
+  at rest with the tiles cached went from 202 to 212 ms to 21 to 30 ms on
+  eight workers and from 213 to 224 ms to 30 to 39 ms on one, a pan with
+  the tiles cached from 20 to 42 ms to 8 to 16 ms. Since 1155 the
+  phone's frame is composed straight into the Bitmap the app shows next,
+  locked through the NDK's jnigraphics
+  (`loquax-android/src/bitmap.rs`, `AndroidBitmap_lockPixels`): only the
+  frame's description crosses JNI, no `byte[]` of the frame's size and
+  no copy into the Bitmap. While a pinch or the window's wheel zooms, a
+  frame is the tile step one to one, never a step above the zoom, and
+  the phone's Canvas or the window's image scales it the rest of the way
+  (`Ask::scaled_while_moving`); a pan at the zoom at rest stays drawn at
+  that zoom. A painter keeps its filler's storage from tile to tile and
+  turns a tile to RGBA in one pass. Through `map_fps` on the coder host:
+  the facade's own frame on a warm pan from 13.9 to 16.5 ms copied out to
+  4.3 to 6.4 ms into the Bitmap, a pinch with its tiles held from 36.6 to
+  5.1 ms on one worker and from 9.7 to 4.9 ms on eight, a cold frame's
+  tile time on one worker from 71 to 56 to 58 ms. Since 1163 a frame
+  while the view moves that owes tiles covers only the owed tiles'
+  pixels: the tiles held are copied, the stand-in steps taken nearest
+  over the owed tiles' rectangles alone, their pixels doubled or halved,
+  then the outline there; at rest the stand-ins stay scaled bilinear
+  over the frame (`loquax::tiles::Frame::moving`). A pinch's frame at
+  the step below covers more than the frontend shows of it scaled up: a
+  tile outside the screen and the margins over the scale is used when
+  held, and otherwise neither drawn nor owed, its pixels water
+  (`Frame::asked`). Frames at rest and frames with every tile held are
+  the same bytes as before. Through `map_fps` on the coder host, the
+  pinch that owes tiles from 62 ms to 6.7 ms on one worker, the tiles
+  it owes over the pinch from 7 to 4 on eight workers and from 20 to 10
+  on one. Since 1156 a placed name's sprite is a box of
+  `(halo, ink)` levels out of 255 blended in integers row by row
+  (`loquax::mapnames::Sprite`): a level name is the same bytes as
+  before, a turned one's coverage is rounded to a level, so a channel
+  may move a step, or two where the halo's step carries into the
+  glyphs' blend (2159 of the 460800 bytes of each Florence golden, four
+  of them by two). Through `map_fps` on the coder host the phone's
+  sprites went from 9.19 MB to 0.89 MB and drawing them from 2.7 to
+  3.1 ms to 1.2 to 1.3 ms.
 - **The M9.** The same pipeline straight into the panel's
   `embedded-graphics` target, as the measurement firmware does
   (`leviculum-mapfill/m9/`), with mousefood's cells for the labels.

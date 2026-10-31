@@ -31,8 +31,16 @@ import java.util.Map;
  * the name, two lines of the last message, the time, and the unread count
  * or our last message's delivery mark; newest activity first, as the
  * library orders it, again on every `changed`; a round button for a new one.
+ *
+ * A long press on a row (1146), after Signal's, marks it and opens its
+ * menu: read or unread, pin, mute, archive, delete. The archived
+ * conversations are this screen again with ARCHIVED, reached from the
+ * menu and from the list's last row; the menu's settings hold the blocked
+ * contacts and the service's end.
  */
 public class ConversationsActivity extends Activity implements Events.Listener {
+    /** The extra that makes this screen the archived view. */
+    static final String ARCHIVED = "archived";
     /** Every row the library listed, and those the search leaves. */
     private final List<Map<String, Object>> all = new ArrayList<>();
     private final List<Map<String, Object>> rows = new ArrayList<>();
@@ -42,6 +50,10 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     private ImageButton search;
     private AvatarView own;
     private Adapter adapter;
+    private boolean archivedView;
+    private boolean homeClient;
+    /** The list's last row: the archived view, with how many. */
+    private TextView archivedRow;
     private final ServiceLink link = new ServiceLink(this);
     /** "Jetzt" turns into "1 Min." without a message: the rows redraw twice a minute. */
     private final Handler ticker = new Handler(Looper.getMainLooper());
@@ -61,17 +73,45 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         title = (TextView) findViewById(R.id.title);
         query = (EditText) findViewById(R.id.query);
         own = (AvatarView) findViewById(R.id.avatar);
+        archivedView = getIntent().getBooleanExtra(ARCHIVED, false);
         int text = getColor(R.color.text);
         ListView list = (ListView) findViewById(R.id.list);
+        archivedRow = new TextView(this);
+        archivedRow.setTextColor(getColor(R.color.text_secondary));
+        archivedRow.setTextSize(15);
+        archivedRow.setGravity(android.view.Gravity.CENTER);
+        int pad = Math.round(16 * getResources().getDisplayMetrics().density);
+        archivedRow.setPadding(pad, pad, pad, pad);
+        archivedRow.setVisibility(View.GONE);
+        list.addFooterView(archivedRow, null, true);
         adapter = new Adapter();
         list.setAdapter(adapter);
         list.setEmptyView(findViewById(R.id.empty));
         list.setOnItemClickListener(new AdapterView.OnItemClickListener() {
             @Override
             public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
+                if (position >= rows.size()) {
+                    archived();
+                    return;
+                }
                 chat(Core.str(rows.get(position), "peer"));
             }
         });
+        list.setOnItemLongClickListener(new AdapterView.OnItemLongClickListener() {
+            @Override
+            public boolean onItemLongClick(AdapterView<?> parent, View view, int position, long id) {
+                if (position >= rows.size()) {
+                    return false;
+                }
+                rowMenu(view, rows.get(position));
+                return true;
+            }
+        });
+        if (archivedView) {
+            title.setText(R.string.archived);
+            ((TextView) findViewById(R.id.empty)).setText(R.string.archived_none);
+            findViewById(R.id.write).setVisibility(View.GONE);
+        }
         search = (ImageButton) findViewById(R.id.search);
         search.setImageDrawable(new Glyph(Glyph.Kind.SEARCH, text));
         search.setOnClickListener(new View.OnClickListener() {
@@ -111,12 +151,15 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         Asks.once(this);
     }
 
-    /** The bar's menu: pull now, the map, and the session's end. */
+    /** The bar's menu: pull now, the map, the archived view, the settings. */
     private void showMenu(View anchor) {
         PopupMenu popup = new PopupMenu(this, anchor);
         popup.getMenu().add(0, R.string.refresh, 0, R.string.refresh);
         popup.getMenu().add(0, R.string.map, 1, R.string.map);
-        popup.getMenu().add(0, R.string.stop_service, 2, R.string.stop_service);
+        if (!archivedView) {
+            popup.getMenu().add(0, R.string.archived, 2, R.string.archived);
+        }
+        popup.getMenu().add(0, R.string.settings, 3, R.string.settings);
         popup.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
             @Override
             public boolean onMenuItemClick(MenuItem item) {
@@ -125,12 +168,69 @@ public class ConversationsActivity extends Activity implements Events.Listener {
                     say(Core.pull());
                 } else if (id == R.string.map) {
                     startActivity(new Intent(ConversationsActivity.this, MapActivity.class));
+                } else if (id == R.string.archived) {
+                    archived();
                 } else {
-                    // What the notification's stop button does: the
-                    // service ends the session, `stopped` closes the screens.
-                    startService(new Intent(ConversationsActivity.this, LoquaxService.class)
-                            .setAction(LoquaxService.STOP));
+                    startActivity(new Intent(ConversationsActivity.this, SettingsActivity.class));
                 }
+                return true;
+            }
+        });
+        popup.show();
+    }
+
+    private void archived() {
+        startActivity(new Intent(this, ConversationsActivity.class).putExtra(ARCHIVED, true));
+    }
+
+    /**
+     * A row's menu, after Signal's long press: the row marked while it is
+     * open; read or unread, pin, mute, archive, delete.
+     */
+    private void rowMenu(final View view, Map<String, Object> row) {
+        final String peer = Core.str(row, "peer");
+        final String name = Core.str(row, "name");
+        final boolean unread = Core.num(row, "unread") > 0;
+        final boolean pinned = Core.bool(row, "pinned");
+        final boolean muted = Core.bool(row, "muted");
+        view.setBackgroundColor(getColor(R.color.selected_row));
+        PopupMenu popup = new PopupMenu(this, view, android.view.Gravity.END);
+        popup.getMenu().add(0, R.string.mark_read, 0, unread ? R.string.mark_read : R.string.mark_unread);
+        if (!archivedView) {
+            popup.getMenu().add(0, R.string.pin, 1, pinned ? R.string.unpin : R.string.pin);
+        }
+        popup.getMenu().add(0, R.string.mute, 2, muted ? R.string.unmute : R.string.mute);
+        popup.getMenu().add(0, R.string.archive, 3, archivedView ? R.string.unarchive : R.string.archive);
+        popup.getMenu().add(0, R.string.delete, 4, R.string.delete);
+        popup.setOnDismissListener(new PopupMenu.OnDismissListener() {
+            @Override
+            public void onDismiss(PopupMenu menu) {
+                view.setBackgroundColor(0);
+            }
+        });
+        final Runnable again = new Runnable() {
+            @Override
+            public void run() {
+                refresh();
+            }
+        };
+        popup.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
+            @Override
+            public boolean onMenuItemClick(MenuItem item) {
+                int id = item.getItemId();
+                if (id == R.string.mark_read) {
+                    say(Core.unread(peer, !unread));
+                } else if (id == R.string.pin) {
+                    say(Core.pin(peer, !pinned));
+                } else if (id == R.string.mute) {
+                    ContactActivity.muteDialog(ConversationsActivity.this, peer, muted, again);
+                } else if (id == R.string.archive) {
+                    say(Core.archive(peer, !archivedView));
+                } else if (id == R.string.delete) {
+                    ContactActivity.deleteDialog(ConversationsActivity.this, peer, name,
+                            homeClient, again);
+                }
+                refresh();
                 return true;
             }
         });
@@ -214,12 +314,16 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     }
 
     private void refresh() {
-        Map<String, Object> answer = Core.conversations();
+        Map<String, Object> answer = archivedView ? Core.archived() : Core.conversations();
         if (answer.containsKey("error")) {
             line(Core.str(answer, "error"));
             return;
         }
         own.show(Core.str(answer, "address"), answer);
+        homeClient = Core.bool(answer, "home_client");
+        long archived = Core.num(answer, "archived");
+        archivedRow.setVisibility(!archivedView && archived > 0 ? View.VISIBLE : View.GONE);
+        archivedRow.setText(getString(R.string.archived_count, archived));
         all.clear();
         all.addAll(Core.list(answer, "conversations"));
         filter();
@@ -281,7 +385,10 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             Map<String, Object> row = rows.get(position);
             long unread = Core.num(row, "unread");
             TextView name = (TextView) view.findViewById(R.id.name);
-            name.setText(Core.str(row, "name"));
+            // Pinned and muted marks after the name (1146).
+            String marks = (Core.bool(row, "pinned") ? " \uD83D\uDCCC" : "")
+                    + (Core.bool(row, "muted") ? " \uD83D\uDD15" : "");
+            name.setText(Core.str(row, "name") + marks);
             name.setTypeface(null, unread > 0 ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
             ((TextView) view.findViewById(R.id.last)).setText(Ui.preview(ConversationsActivity.this, row));
             TextView at = (TextView) view.findViewById(R.id.at);

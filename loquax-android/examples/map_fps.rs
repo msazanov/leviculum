@@ -1,21 +1,28 @@
 //! Host frame rate of the phone's map frame (1131, 1134): a portrait
 //! 1080 x 2400 screen at a density of 2.75, Frankfurt at z15, drawn
-//! through the facade's own call ([`loquax_android::map::render`]) with a
-//! quarter screen of margin on each side, as the app asks.
+//! through the facade's own call straight into a Bitmap-sized buffer
+//! ([`loquax_android::map::render_into`], 1155) with a quarter screen of
+//! margin on each side, as the app asks.
 //!
 //! Rows: a pan with the tile cache warm (each frame 40 pixels from the
 //! last, the finger down), the frame at rest where that pan started (the
-//! names placed), a pan that uncovers a new tile column every frame (256
+//! names placed), its names drawn again from their sprites with the bytes
+//! the sprites hold (1156), a pan that uncovers a new tile column every frame (256
 //! pixels a frame), a cold frame at rest (the cache dropped, every tile
 //! drawn and the names placed), a cold frame while the finger is down (at
 //! most two tiles a worker drawn, the rest owed), and a pinch from z14.3
-//! to z15.7 in steps of 0.07 with the finger down, then at rest. Each with
-//! every core the cache takes and with one. Then the prefetch (1135): a
+//! to z15.7 in steps of 0.07 with the finger down (since 1155 the step's
+//! tiles one to one, the app's Canvas scaling them), then at rest, then
+//! the same pinch again with its tiles held. Each
+//! with every core the cache takes and with one. Then the facade's own
+//! cost, the frame copied out as before 1155 against drawn into the
+//! Bitmap, on a warm pan and at rest. Then the prefetch (1135): a
 //! pan north with the finger down, a frame at rest, then for one second
 //! the prefetch calls the app makes while idle (tiles drawn, a call's
 //! time, which is what a gesture waits at most), and the first frame of a
 //! further pan north by a tile row, with and without the prefetch before
-//! it. The cache's memory after the run is printed last.
+//! it. The cache's memory after the run is printed last. The cold rows
+//! also say the time the workers spent drawing tiles, summed.
 //!
 //! ```sh
 //! cargo run --release -p loquax-android --example map_fps -- HOME
@@ -26,12 +33,32 @@
 //! `map_autoload = off`. The median of the frames after one warm-up. A
 //! measuring tool for the reviewer and the commit message, not a gate.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::time::Instant;
 
 use leviculum_map::mercator::{project, LatLon};
 use loquax::when::WallTime;
+use loquax_android::map::Canvas;
 use loquax_android::schema::{self, MapRequest, MapShown};
+
+/// The app's Bitmap: one of the frame's size, made anew when it changes,
+/// as `MapView` keeps its spare.
+#[derive(Default)]
+struct Bitmap {
+    size: (u32, u32),
+    rgba: Vec<u8>,
+}
+
+impl Canvas for Bitmap {
+    fn pixels(&mut self, w: u32, h: u32) -> Result<&mut [u8], String> {
+        if self.size != (w, h) {
+            self.size = (w, h);
+            self.rgba = vec![0; w as usize * h as usize * 4];
+        }
+        Ok(&mut self.rgba)
+    }
+}
 
 fn main() {
     let Some(home) = std::env::args_os().nth(1).map(PathBuf::from) else {
@@ -56,13 +83,17 @@ fn main() {
         margin_y: h / 4,
         ..MapRequest::default()
     };
+    // As the app draws since 1155: straight into its Bitmap, the
+    // description encoded for Java.
+    let bitmap = RefCell::new(Bitmap::default());
     let draw = |ask: &MapRequest| -> MapShown {
-        let bytes = loquax_android::map::render(ask, Some(Vec::new()), now);
-        let Ok((shown, rgba)) = schema::unframe(&bytes) else {
-            eprintln!("no frame");
+        let mut bitmap = bitmap.borrow_mut();
+        let shown = loquax_android::map::render_into(ask, Some(Vec::new()), now, &mut *bitmap);
+        std::hint::black_box(schema::encode(&shown));
+        if !shown.ok {
+            eprintln!("no frame: {:?}", shown.error);
             std::process::exit(1);
-        };
-        std::hint::black_box(rgba.len());
+        }
         shown
     };
     let timed = |ask: &MapRequest| -> (f64, MapShown) {
@@ -112,6 +143,24 @@ fn main() {
         };
         let ms: Vec<f64> = (0..5).map(|_| timed(&rest).0).collect();
         row("at rest, cache warm, names placed", median(ms), 0.0, 0);
+        // Its names drawn again from their sprites, as a moving frame
+        // draws them, and the bytes the sprites hold.
+        let (fw, fh) = (w + 2 * base.margin_x, h + 2 * base.margin_y);
+        let mut draws = Vec::new();
+        let mut bytes = 0;
+        for _ in 0..11 {
+            if let Some((b, ms)) = loquax_android::map::sprite_cost(&home, fw, fh) {
+                bytes = b;
+                draws.push(ms);
+            }
+        }
+        if !draws.is_empty() {
+            println!(
+                "| names drawn from their sprites, {:.2} MB of sprites | {threads} | {:.2} | | | |",
+                bytes as f64 / 1e6,
+                median(draws)
+            );
+        }
         // A pan that uncovers a tile column a frame.
         let before = stats().rendered;
         let (mut ms, mut owed) = (Vec::new(), 0);
@@ -130,7 +179,7 @@ fn main() {
                 moving,
                 ..base.clone()
             };
-            let before = stats().rendered;
+            let before = stats();
             let (mut ms, mut owed) = (Vec::new(), 0);
             for _ in 0..7 {
                 loquax_android::map::tune_tiles(&home, None, true);
@@ -138,12 +187,14 @@ fn main() {
                 owed = owed.max(u32::from(shown.pending));
                 ms.push(t);
             }
-            let drawn = (stats().rendered - before) as f64 / 7.0;
+            let drawn = (stats().rendered - before.rendered) as f64 / 7.0;
+            let cpu = (stats().render_us - before.render_us) as f64 / 7e3;
             let name = match moving {
                 false => "cold, at rest, names placed",
                 true => "cold, finger down",
             };
             row(name, median(ms), drawn, owed);
+            println!("| {name}: tile time, workers summed | {threads} | {cpu:.1} | | | |");
         }
         // A pinch from z14.3 to z15.7, the finger down, then at rest.
         let start = MapRequest {
@@ -174,7 +225,7 @@ fn main() {
         );
         let rest = MapRequest {
             moving: false,
-            ..pinch
+            ..pinch.clone()
         };
         let (t, shown) = timed(&rest);
         row(
@@ -186,7 +237,26 @@ fn main() {
             0.0,
             u32::from(shown.pending),
         );
+        // The same pinch again, every tile it shows held (the frames at
+        // rest at z14 and z15 draw them all): what a frame of the pinch
+        // costs itself, no tile drawn or owed.
+        for z in [14_000, 15_000, 14_300] {
+            let _ = draw(&MapRequest {
+                zoom_milli: Some(z),
+                ..start.clone()
+            });
+        }
+        let mut ms = Vec::new();
+        let mut owed = 0;
+        for z in (14_370..=15_700).step_by(70) {
+            pinch.zoom_milli = Some(z);
+            let (t, shown) = timed(&pinch);
+            owed += u32::from(shown.pending);
+            ms.push(t);
+        }
+        row("pinch again, tiles held (median)", median(ms), 0.0, owed);
     }
+    facade(&home, &base, &draw, now, median, workers);
     prefetch(&home, &base, draw, timed, median, workers);
     if let Some((tiles, bytes)) = loquax_android::map::tile_memory(&home) {
         println!(
@@ -295,5 +365,63 @@ fn prefetch(
             "| first pan frame {name}: prefetched tiles hit | {n} | {:.0} |",
             median(hits_first[i].clone())
         );
+    }
+}
+
+/// The facade's own cost (1155) on a warm pan and at rest, every worker:
+/// the frame as Java got it before, copied out behind its description
+/// into the answer's bytes, against the frame drawn into the Bitmap with
+/// the description encoded. Java's side, the `byte[]` and the Bitmap
+/// copy it no longer makes, is not in either.
+fn facade(
+    home: &std::path::Path,
+    base: &MapRequest,
+    into: &impl Fn(&MapRequest) -> MapShown,
+    now: WallTime,
+    median: impl Fn(Vec<f64>) -> f64,
+    workers: usize,
+) {
+    loquax_android::map::tune_tiles(home, Some(workers), false);
+    let copied = |ask: &MapRequest| -> MapShown {
+        let bytes = loquax_android::map::render(ask, Some(Vec::new()), now);
+        let Ok((shown, rgba)) = schema::unframe(&bytes) else {
+            eprintln!("no frame");
+            std::process::exit(1);
+        };
+        std::hint::black_box(rgba.len());
+        shown
+    };
+    println!("\n| facade, {workers} workers | copied out, ms | into the Bitmap, ms |");
+    println!("|---|---|---|");
+    for moving in [true, false] {
+        let mut ask = MapRequest {
+            moving,
+            ..base.clone()
+        };
+        let _ = into(&ask);
+        let (mut old, mut new) = (Vec::new(), Vec::new());
+        for i in 0..21 {
+            ask.pan_x = match moving {
+                true if i % 2 == 0 => 40,
+                true => -40,
+                false => 0,
+            };
+            let t = Instant::now();
+            let shown = match i % 2 == 0 {
+                true => copied(&ask),
+                false => into(&ask),
+            };
+            let ms = t.elapsed().as_secs_f64() * 1e3;
+            match i % 2 == 0 {
+                true => old.push(ms),
+                false => new.push(ms),
+            }
+            (ask.x, ask.y) = (Some(shown.x), Some(shown.y));
+        }
+        let name = match moving {
+            true => "pan, cache warm",
+            false => "at rest, cache warm",
+        };
+        println!("| {name} | {:.2} | {:.2} |", median(old), median(new));
     }
 }

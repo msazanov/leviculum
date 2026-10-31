@@ -180,35 +180,47 @@ pub struct ListRow {
     /// Ours only: the last message's delivery, drawn where an unread count
     /// would be.
     pub mark: Option<Mark>,
+    pub pinned: bool,
+    pub muted: bool,
 }
 
 /// The conversation list as the model orders it.
 pub fn list_rows<B>(model: &UiModel<B>) -> Vec<ListRow> {
-    model
-        .order()
+    rows(model, model.order())
+}
+
+/// The rows for the conversations `order` names, in its order.
+pub fn rows<B>(model: &UiModel<B>, order: Vec<usize>) -> Vec<ListRow> {
+    order
         .into_iter()
-        .map(|index| {
-            let conversation = &model.conversations[index];
-            let peer = conversation.peer;
-            let last = conversation.messages.last();
-            ListRow {
-                peer,
-                name: model.names.label(&peer),
-                last: last.map(preview).unwrap_or_default(),
-                ours: last.is_some_and(|m| m.outbound),
-                at: last.and_then(|m| m.at),
-                unread: conversation.unread,
-                initials: initials(model.names.shown(&peer), &peer),
-                icon: latest_appearance(&conversation.messages),
-                kind: last.map_or("", kind),
-                reaction: last
-                    .filter(|m| m.is_reaction())
-                    .and_then(|m| m.reaction())
-                    .map(|(_, content)| content),
-                mark: last.filter(|m| m.outbound).map(|m| Mark::of(m.delivery)),
-            }
-        })
+        .map(|index| list_row(model, &model.conversations[index].peer))
         .collect()
+}
+
+/// The row for `peer`, empty when it has no conversation: a blocked peer
+/// is listed whether it wrote or not.
+pub fn list_row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> ListRow {
+    let conversation = model.conversations.iter().find(|c| c.peer == *peer);
+    let messages = conversation.map_or(&[][..], |c| c.messages.as_slice());
+    let last = messages.last();
+    ListRow {
+        peer: *peer,
+        name: model.names.label(peer),
+        last: last.map(preview).unwrap_or_default(),
+        ours: last.is_some_and(|m| m.outbound),
+        at: last.and_then(|m| m.at),
+        unread: conversation.map_or(0, |c| c.unread),
+        initials: initials(model.names.shown(peer), peer),
+        icon: latest_appearance(messages),
+        kind: last.map_or("", kind),
+        reaction: last
+            .filter(|m| m.is_reaction())
+            .and_then(|m| m.reaction())
+            .map(|(_, content)| content),
+        mark: last.filter(|m| m.outbound).map(|m| Mark::of(m.delivery)),
+        pinned: conversation.is_some_and(|c| c.pinned),
+        muted: model.muted(peer),
+    }
 }
 
 /// Whether `row` is found by the list's search `query`: every word of it,
@@ -710,6 +722,8 @@ mod tests {
             kind: "text",
             reaction: None,
             mark: None,
+            pinned: false,
+            muted: false,
         };
         assert!(row_matches(&row, ""));
         assert!(row_matches(&row, "anna"));

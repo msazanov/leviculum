@@ -13,8 +13,8 @@
 //! msgpack schema of [`schema`]: [`start`], [`command`], [`query`],
 //! [`next_event`] (blocking, on a Java thread of its own) and [`stop`].
 //! One [`session::Session`] per process, which is what an app is. Beside
-//! them the map screen's [`render_map`] (1128), which needs no session:
-//! Rust draws the map, Java hosts the bitmap ([`map`]).
+//! them the map screen's [`render_map_into`] (1128, 1155), which needs no
+//! session: Rust draws the map into the Bitmap Java hosts ([`map`]).
 //!
 //! `unsafe_code` is denied and allowed once per exported symbol: an
 //! exported, unmangled name is what the lint counts, and it is what JNI
@@ -22,9 +22,13 @@
 
 #![deny(unsafe_code)]
 
+#[cfg(target_os = "android")]
+pub mod bitmap;
 pub mod links;
+pub mod mailbox;
 pub mod map;
 pub mod pull_line;
+pub mod scan;
 pub mod schema;
 pub mod session;
 
@@ -82,6 +86,7 @@ pub fn start(request: &[u8]) -> Vec<u8> {
                         address: Some(loquax::address::to_hex(&session.address())),
                         server: Some(session.server().to_string()),
                         link: session.link(),
+                        here: session.is_here(),
                     }
                 }
                 Err(error) => Started {
@@ -92,6 +97,7 @@ pub fn start(request: &[u8]) -> Vec<u8> {
                     address: None,
                     server: None,
                     link: false,
+                    here: false,
                 },
             }
         }
@@ -144,8 +150,9 @@ pub fn next_event(wait: Duration) -> Option<Vec<u8>> {
 }
 
 /// One frame of the map screen for a [`schema::MapRequest`], laid out as
-/// [`schema::frame`] says. The pins are the running session's, or the
-/// store's in the request's directory without one.
+/// [`schema::frame`] says: the host's path, for the tests. The pins are
+/// the running session's, or the store's in the request's directory
+/// without one. The app draws through [`render_map_into`].
 pub fn render_map(request: &[u8]) -> Vec<u8> {
     match schema::decode::<schema::MapRequest>(request) {
         Err(error) => schema::frame(&map::failed(error), &[]),
@@ -158,6 +165,24 @@ pub fn render_map(request: &[u8]) -> Vec<u8> {
             map::render(&request, pins, now)
         }
     }
+}
+
+/// One frame of the map screen for a [`schema::MapRequest`], composed
+/// into `canvas` (the app's Bitmap, 1155); the [`schema::MapShown`] back,
+/// msgpack, the pixels being in the canvas. Pins as [`render_map`]'s.
+pub fn render_map_into(request: &[u8], canvas: &mut dyn map::Canvas) -> Vec<u8> {
+    let shown = match schema::decode::<schema::MapRequest>(request) {
+        Err(error) => map::failed(error),
+        Ok(request) => {
+            let pins = current().map(|session| session.map_pins());
+            let now = loquax::when::WallTime {
+                unix_secs: leviculum_std::local_time::unix_now_secs(),
+                offset_secs: 0,
+            };
+            map::render_into(&request, pins, now, canvas)
+        }
+    };
+    schema::encode(&shown)
 }
 
 /// Clear the slot if it still holds `session`, and stop it: its runtime
@@ -197,16 +222,21 @@ pub fn stop() {
     }
 }
 
-/// What the app's first screen says about this device: the loquax version,
+/// What the app's first screen says about this device: the Loquax version,
 /// and whether `home` (the app's files directory, which is its loquax home)
 /// makes it a client of a home node, with the home node's LXMF address and
 /// the last archive entry pulled.
 pub fn describe(home: &Path) -> String {
     let state = match loquax::home::client::load_client(home) {
-        Ok(None) => "Not a client of a home node.".to_string(),
+        Ok(None) => "This phone holds no mailbox and reads none.".to_string(),
         Ok(Some(key)) => match loquax::home::lxmf_address(&key) {
+            Ok(address) if mailbox::is_here(home) => format!(
+                "The mailbox {} is on this phone, last entry pulled {}.",
+                loquax::address::to_hex(&address),
+                loquax::home::client::load_cursor(home)
+            ),
             Ok(address) => format!(
-                "Client of the home node {}, last entry pulled {}.",
+                "Reads the mailbox {}, last entry pulled {}.",
                 loquax::address::to_hex(&address),
                 loquax::home::client::load_cursor(home)
             ),
@@ -214,7 +244,7 @@ pub fn describe(home: &Path) -> String {
         },
         Err(error) => error,
     };
-    format!("loquax {}\n{state}", loquax::VERSION)
+    format!("Loquax {}\n{state}", loquax::VERSION)
 }
 
 /// `static native String describe(String home)` of `Native`: [`describe`].
@@ -290,19 +320,50 @@ pub extern "system" fn Java_network_leviculum_loquax_Native_query<'caller>(
         .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
-/// `static native byte[] renderMap(byte[] request)` of `Native`:
-/// [`render_map`]. Called off the UI thread.
+/// `static native byte[] renderMapInto(byte[] request, Bitmap into)` of
+/// `Native`: [`render_map_into`] into the Bitmap, locked while the frame
+/// is drawn ([`bitmap::Locked`]); `into` is null for a prefetch. Called
+/// off the UI thread. Only in the Android build, which links jnigraphics.
+#[cfg(target_os = "android")]
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_network_leviculum_loquax_Native_renderMap<'caller>(
+pub extern "system" fn Java_network_leviculum_loquax_Native_renderMapInto<'caller>(
     mut unowned: EnvUnowned<'caller>,
     _class: JClass<'caller>,
     request: JByteArray<'caller>,
+    into: jni::objects::JObject<'caller>,
 ) -> JByteArray<'caller> {
     unowned
         .with_env(|env| -> Result<_, jni::errors::Error> {
             let request = bytes_of(env, &request)?;
-            env.byte_array_from_slice(&render_map(&request))
+            let mut canvas = bitmap::Locked::new(env, &into);
+            let answer = render_map_into(&request, &mut canvas);
+            // Unlocked before the answer goes back: Java shows it next.
+            drop(canvas);
+            env.byte_array_from_slice(&answer)
+        })
+        .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+/// `static native String scan(byte[] luma, int width, int height, int stride)`
+/// of `Native`: the first QR code in a camera frame's luminance plane
+/// ([`scan::decode`]), empty for none. Called off the UI thread.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_network_leviculum_loquax_Native_scan<'caller>(
+    mut unowned: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    luma: JByteArray<'caller>,
+    width: jint,
+    height: jint,
+    stride: jint,
+) -> JString<'caller> {
+    unowned
+        .with_env(|env| -> Result<_, jni::errors::Error> {
+            let luma = bytes_of(env, &luma)?;
+            let size = |value: jint| usize::try_from(value).unwrap_or(0);
+            let found = scan::decode(size(width), size(height), size(stride), &luma);
+            JString::from_str(env, found.into_iter().next().unwrap_or_default())
         })
         .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
@@ -352,8 +413,11 @@ mod tests {
     fn a_fresh_home_is_no_client() {
         let home = tempfile::tempdir().expect("tempdir");
         let text = describe(home.path());
-        assert!(text.starts_with(&format!("loquax {}\n", loquax::VERSION)));
-        assert!(text.ends_with("Not a client of a home node."), "{text}");
+        assert!(text.starts_with(&format!("Loquax {}\n", loquax::VERSION)));
+        assert!(
+            text.ends_with("This phone holds no mailbox and reads none."),
+            "{text}"
+        );
     }
 
     #[test]
@@ -367,7 +431,7 @@ mod tests {
         let text = describe(home.path());
         assert!(
             text.ends_with(&format!(
-                "Client of the home node {}, last entry pulled 42.",
+                "Reads the mailbox {}, last entry pulled 42.",
                 loquax::address::to_hex(&address)
             )),
             "{text}"

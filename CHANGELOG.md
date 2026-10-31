@@ -516,7 +516,11 @@ Toolchain: Rust 1.97.1
   terminal's list title and help, the window title, the messages it prints
   for people, the fallback display name and the docs say Loquax. The
   command, package, crate, paths, config keys and variables stay `loquax`.
-  `just loquax-name` refuses a prose `loquax` in `docs/src`.
+  `just loquax-name` refuses a prose `loquax` in `docs/src`. The Android
+  app follows (1148): launcher label, list title, notifications, its
+  strings in English and German and its first screen say Loquax; the
+  package `network.leviculum.loquax` stays, and the guard reads
+  `loquax-android/README.md` too.
 - lnmsg is now loquax (#232): crate, binary, package (it replaces the lnmsg
   package), man page and concept pages. The config directory moves on first
   start: `~/.config/lnmsg` becomes `~/.config/loquax` when only the old one

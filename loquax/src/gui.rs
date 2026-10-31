@@ -338,9 +338,10 @@ enum Job {
 }
 
 /// `order` drawn through the map's frames ([`loquax::mapframe`], the
-/// phone's pipeline): the tiles composed at the exact zoom, the names
-/// placed at rest and kept while moving, the pins placed with the
-/// window's font and left for its canvas.
+/// phone's pipeline): the tiles composed at the exact zoom, while the
+/// wheel turns at the tile step one to one for the canvas to scale
+/// (1155), the names placed at rest and kept while moving, the pins
+/// placed with the window's font and left for its canvas.
 pub fn draw(frames: &Mutex<Frames>, order: Order) -> Arc<Shown> {
     let mut frames = frames.lock().unwrap_or_else(PoisonError::into_inner);
     frames.set_motion(order.motion);
@@ -355,6 +356,7 @@ pub fn draw(frames: &Mutex<Frames>, order: Order) -> Arc<Shown> {
         zooms: order.zooms,
         draw_pins: false,
         measure: Some(map::measure),
+        scaled_while_moving: true,
     });
     let (w, h) = shot.view.size();
     Arc::new(Shown {
@@ -1390,7 +1392,17 @@ mod tests {
         let (turning, _) = run(&mut app);
         let turning = turning.expect("a frame while the wheel turns");
         assert!(turning.order.moving);
-        assert_eq!(turning.view.zoom_milli(), 14_370);
+        // While it turns the frame is the step one to one (1155), and
+        // the image scales it to the view: the point stays under it.
+        assert_eq!(turning.view.zoom_milli(), 14_000);
+        let (tx, ty, k) = onto(&turning.view, &app.view);
+        assert!((k - 2f64.powf(0.37)).abs() < 1e-9, "{k}");
+        let (fx, fy) = turning.view.to_screen(held);
+        let (x, y) = (tx + k * fx, ty + k * fy);
+        assert!(
+            (x - under.0).abs() < 1.0 && (y - under.1).abs() < 1.0,
+            "{x} {y}"
+        );
         std::thread::sleep(Duration::from_millis(WHEEL_REST_MS + 50));
         app.apply(Message::WheelRest);
         let (rested, prefetch) = run(&mut app);

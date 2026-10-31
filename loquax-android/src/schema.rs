@@ -13,7 +13,7 @@
 //! | `start` | [`Start`] |
 //! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink` |
 //! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links` |
-//! | `renderMap` | [`MapRequest`] |
+//! | `renderMapInto` | [`MapRequest`], and the Bitmap to draw into (null for a prefetch) |
 //!
 //! Rust to Java:
 //!
@@ -23,11 +23,15 @@
 //! | `command` | [`Done`] |
 //! | `query` | [`Conversations`], [`Messages`], [`Info`], [`Recents`], [`Suggestions`], [`Addresses`] or [`Links`], or [`Done`] with the error |
 //! | `nextEvent` | [`Event`], tagged by `t`: `changed`, `notice`, `sync`, `link`, `stopped`; none when the wait ran out |
-//! | `renderMap` | a frame: four bytes big endian, the length of a [`MapShown`], the [`MapShown`], and its `w` times `h` RGBA pixels |
+//! | `renderMapInto` | [`MapShown`]; its `w` times `h` RGBA pixels are in the Bitmap |
 //!
-//! The map's pixels go raw behind the map, not as msgpack, so ten megabytes
-//! of a phone's screen are one copy into a Java `byte[]` and one into its
-//! bitmap. The map call needs no session: it draws the regions in the
+//! The map's pixels do not cross as bytes (1155): Rust composes them
+//! straight into the Bitmap Java hands over, locked through the NDK's
+//! jnigraphics, so twenty megabytes of a phone's frame are neither copied
+//! into a Java `byte[]` nor from there into the Bitmap. The host's tests
+//! read the frame as [`frame`] lays it out: four bytes big endian, the
+//! length of a [`MapShown`], the [`MapShown`], and its pixels. The map
+//! call needs no session: it draws the regions in the
 //! app's maps directory and the pins the store knows, with or without one.
 //! A change that Java cannot read is a new [`VERSION`]: every answer
 //! carries it, and Java refuses one it does not know. A field or an event
@@ -74,6 +78,19 @@ pub struct Start {
     /// writes into a message's history.
     #[serde(default)]
     pub offset: i32,
+    /// Make this phone the mailbox (the first start's choice, 1152): the
+    /// session starts the home node in the app and joins it itself, with no
+    /// code and no server. A phone that chose it once keeps it without
+    /// saying it again.
+    #[serde(default)]
+    pub here: bool,
+    /// A backup line (`lqxb1...`) to restore the address from before the
+    /// mailbox on this phone first starts ("I already have a Loquax
+    /// address"), with its passphrase; only with [`Start::here`].
+    #[serde(default)]
+    pub restore: Option<String>,
+    #[serde(default)]
+    pub passphrase: Option<String>,
 }
 
 /// What became of [`Start`].
@@ -94,6 +111,9 @@ pub struct Started {
     /// `link` event tells each change after.
     #[serde(default)]
     pub link: bool,
+    /// Whether the mailbox is on this phone.
+    #[serde(default)]
+    pub here: bool,
 }
 
 /// What the user did.
@@ -136,6 +156,9 @@ pub enum Request {
     /// front and with the watching link down, the session pulls every
     /// minute.
     Front { front: bool },
+    /// The name recipients see, for the mailbox on this phone (the first
+    /// start's last screen, 1152).
+    Name { name: String },
     /// Linked `peer` to a contact of the address book the user picked or
     /// confirmed (1139), or the link's copy refreshed: what the contact
     /// said right then, its thumbnail's bytes among it.
@@ -156,6 +179,25 @@ pub enum Request {
     /// `READ_CONTACTS`): each address loquax knows and has not linked
     /// becomes a link, unless two contacts carry it.
     Relink { rows: Vec<ImRow> },
+    /// Pinned the conversation to the top of the list, or loosened it
+    /// (1146). Pin, mute, archive and block reach the home's other devices.
+    Pin { peer: String, on: bool },
+    /// Muted the conversation for `secs` from now, for always when
+    /// negative, or unmuted it with 0.
+    Mute { peer: String, secs: i64 },
+    /// Moved the conversation into the archive, or back.
+    Archive { peer: String, on: bool },
+    /// Blocked the peer, or lifted the block.
+    Block { peer: String, on: bool },
+    /// Marked the peer's identity verified after comparing it in person,
+    /// or took it back; on this device only.
+    Verify { peer: String, on: bool },
+    /// Marked the conversation unread on this device, or read as opening
+    /// it would.
+    Unread { peer: String, on: bool },
+    /// Deleted the conversation from this device, or from every device of
+    /// the home.
+    Forget { peer: String, everywhere: bool },
 }
 
 /// What a contact said when loquax read it.
@@ -245,6 +287,43 @@ pub enum Query {
     Contact { lookup: String },
     /// Every link, for the refresh that reads the contacts again.
     Links,
+    /// What the contact screen shows of `peer` (1146).
+    Detail { peer: String },
+    /// The archived conversations, as the list's rows.
+    Archived,
+    /// The blocked peers, as the list's rows, conversation or not.
+    Blocked,
+    /// This phone's own address, for the first start's last screen (1152).
+    Me,
+    /// The address's backup, sealed with `passphrase` (1152).
+    Backup { passphrase: String },
+}
+
+/// What [`Query::Backup`] answers: the line the file holds, and the same
+/// line as the paper code's modules.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Backup {
+    pub v: u32,
+    pub line: String,
+    pub qr_size: u32,
+    pub qr: Blob,
+}
+
+/// What [`Query::Me`] answers: the address to give people, as text and as
+/// a QR code, and the mailbox's facts the screen shows beside it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Me {
+    pub v: u32,
+    pub address: String,
+    /// The address in groups of four, as the contact screen shows one.
+    pub fingerprint: String,
+    pub qr_size: u32,
+    /// `qr_size` squared modules, one byte each, row by row.
+    pub qr: Blob,
+    /// The name recipients see; empty when none was given.
+    pub name: String,
+    /// Whether the mailbox is on this phone.
+    pub here: bool,
 }
 
 /// One contact's name fields, for [`Query::Suggest`].
@@ -306,6 +385,66 @@ pub struct AddressRow {
 pub struct Links {
     pub v: u32,
     pub links: Vec<LinkRow>,
+}
+
+/// The contact screen (1146), after Signal's: who the peer is, the
+/// reader's word on it, its identity to compare, what this device knows of
+/// reaching it, and its positions.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Detail {
+    pub v: u32,
+    pub peer: String,
+    pub name: String,
+    pub initials: String,
+    #[serde(default)]
+    pub icon_fg: Option<String>,
+    #[serde(default)]
+    pub icon_bg: Option<String>,
+    #[serde(default)]
+    pub photo: Option<String>,
+    pub linked: bool,
+    #[serde(default)]
+    pub lookup: Option<String>,
+    #[serde(default)]
+    pub contact_id: Option<i64>,
+    #[serde(default)]
+    pub petname: Option<String>,
+    #[serde(default)]
+    pub announced: Option<String>,
+    /// The address in groups of four hex digits, to read out and compare.
+    pub fingerprint: String,
+    /// The address as a QR code: the side in modules and one byte a
+    /// module, row by row, 1 for dark, without the quiet zone.
+    pub qr_size: u32,
+    pub qr: Blob,
+    pub verified: bool,
+    pub blocked: bool,
+    pub pinned: bool,
+    pub archived: bool,
+    /// Whether it is muted now, and until when: unix seconds, -1 for
+    /// always, 0 for not.
+    pub muted: bool,
+    pub muted_until: i64,
+    /// When the newest message from the peer came, unix seconds, 0 for
+    /// none; when the newest to it was written, and how it went.
+    pub last_received: i64,
+    pub last_sent: i64,
+    #[serde(default)]
+    pub last_sent_how: String,
+    /// Whether this device is a client of a home node, which routes for
+    /// it: then no path of its own is known here.
+    pub home_client: bool,
+    /// The peer's newest positions, newest first.
+    pub positions: Vec<PositionRow>,
+}
+
+/// One position of a peer, for the contact screen.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PositionRow {
+    /// The fix time the sender claims, unix seconds.
+    pub at: i64,
+    pub lat_e6: i32,
+    pub lon_e6: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -403,6 +542,12 @@ pub struct ConversationRow {
     /// Whether the peer is linked to a contact of the address book.
     #[serde(default)]
     pub linked: bool,
+    /// Pinned to the top, and muted now (1146): the list's marks, and no
+    /// notification for a muted one.
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub muted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -415,6 +560,12 @@ pub struct Conversations {
     pub address: String,
     #[serde(default)]
     pub initials: String,
+    /// How many conversations are archived: the list's last row (1146).
+    #[serde(default)]
+    pub archived: u32,
+    /// Whether a delete may reach every device of the home.
+    #[serde(default)]
+    pub home_client: bool,
 }
 
 /// A reaction under a message: its content, how many sent it, and whether
@@ -512,6 +663,10 @@ pub struct Messages {
     pub petname: Option<String>,
     #[serde(default)]
     pub others: Vec<String>,
+    /// The reader verified the peer's identity in person (1146): the
+    /// header's mark.
+    #[serde(default)]
+    pub verified: bool,
 }
 
 /// What happened, for the screen.
@@ -662,7 +817,9 @@ pub struct MapShown {
     pub y: u32,
     /// The zoom step nearest the view's exact zoom.
     pub zoom: u8,
-    /// The view's exact zoom in thousandths of a step (1134).
+    /// The view's exact zoom in thousandths of a step (1134). While a
+    /// pinch moves, the frame is drawn at its tile step one to one and
+    /// this is that step's: Java scales it to the fingers' zoom (1155).
     #[serde(default)]
     pub zoom_milli: u32,
     /// The zoom step whose tiles the frame is composed from.
@@ -704,8 +861,9 @@ pub struct MapShown {
     pub prefetched: u32,
 }
 
-/// A map frame for Java: the description's length, the description, the
-/// pixels.
+/// A map frame as the host's tests and tools read it: the description's
+/// length, the description, the pixels. The app gets its pixels in its
+/// Bitmap instead (1155).
 pub fn frame(shown: &MapShown, rgba: &[u8]) -> Vec<u8> {
     let head = encode(shown);
     let mut out = Vec::with_capacity(4 + head.len() + rgba.len());

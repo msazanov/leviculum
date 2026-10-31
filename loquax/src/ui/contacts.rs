@@ -97,8 +97,7 @@ impl<B> UiModel<B> {
             return Vec::new();
         };
         let label = self.names.label(&peer);
-        let mut contact = self.names.contacts.of(&peer);
-        if contact.blocked == blocked {
+        if self.names.contacts.of(&peer).blocked == blocked {
             let state = match blocked {
                 true => "already blocked",
                 false => "not blocked",
@@ -106,16 +105,21 @@ impl<B> UiModel<B> {
             self.toast(ToastKind::Info, format!("{label} is {state}"));
             return Vec::new();
         }
-        contact.blocked = blocked;
-        let effects = self.set_contact(contact);
+        // Unblocking shows the conversation with its history, in the list
+        // it is back in.
+        if !blocked {
+            self.show_blocked = false;
+        }
+        // On a client of a home node the block reaches the home's other
+        // devices (1146).
+        let state = crate::home::wire::PeerState {
+            blocked,
+            ..self.peer_state(&peer)
+        };
+        let effects = self.set_peer_state(peer, state);
         let text = match blocked {
             true => format!("blocked {label}: its messages are kept, :blocked lists them"),
-            false => {
-                // Unblocking shows the conversation with its history, in the
-                // list it is back in.
-                self.show_blocked = false;
-                format!("unblocked {label}")
-            }
+            false => format!("unblocked {label}"),
         };
         self.toast(ToastKind::Info, text);
         effects

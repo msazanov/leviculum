@@ -157,11 +157,13 @@ fn the_frame_is_the_shared_renderers_with_names_and_a_pin() {
     );
     // Composed from tiles, the frame is the view drawn whole but where a
     // dashed path crosses a seam: its dashes start again at each tile's
-    // edge, as they do at a view's.
+    // edge, as they do at a view's. A turned name's sprite rounds its
+    // coverage to a level (1156), so its pixels may be a step or two of
+    // a channel off the whole view's float paint: not counted.
     let differ = rgba
         .chunks(4)
         .zip(direct.picture.rgba.chunks(4))
-        .filter(|(a, b)| a != b)
+        .filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > 2))
         .count();
     assert!(
         differ * 1000 < (W * H) as usize,
@@ -718,8 +720,10 @@ fn a_tap_on_a_text_with_a_position_opens_the_map_at_it() {
 
 /// The zoom a pinch leaves is the zoom the view keeps (Lew's device test
 /// of dd23d987, 1134): a pinch from 14.3 that ends at 15.37 is drawn at
-/// 15.37 while the fingers are down, at rest, and in every frame after,
-/// from the z15 tiles scaled; a double tap goes one step on exactly.
+/// rest at 15.37, and in every frame after, from the z15 tiles scaled; a
+/// double tap goes one step on exactly. While the fingers are down the
+/// frame is the z15 step one to one, and Java's Canvas scales it the 0.37
+/// on (1155), so the next request asks from z15 by what is left.
 #[test]
 fn a_pinch_ending_between_steps_stays_there() {
     let home = home();
@@ -746,23 +750,33 @@ fn a_pinch_ending_between_steps_stays_there() {
         Some(Vec::new()),
         now(),
     ));
-    assert_eq!(moving.zoom_milli, 15_370, "while the fingers are down");
+    assert_eq!(
+        (moving.zoom_milli, moving.tile_zoom),
+        (15_000, 15),
+        "while the fingers are down, the step one to one"
+    );
     let rest = MapRequest {
         x: Some(moving.x),
         y: Some(moving.y),
         zoom_milli: Some(moving.zoom_milli),
+        zoom_by_milli: 370,
+        about_x: (W / 2) as i32,
+        about_y: (H / 2) as i32,
         ..start.clone()
     };
     let (at_rest, _) = frame(&loquax_android::map::render(&rest, Some(Vec::new()), now()));
     assert_eq!(at_rest.zoom_milli, 15_370, "no snap at rest");
     assert_eq!((at_rest.zoom, at_rest.tile_zoom), (15, 15));
     assert_eq!((at_rest.x, at_rest.y), (moving.x, moving.y));
+    let rest = MapRequest {
+        zoom_milli: Some(at_rest.zoom_milli),
+        zoom_by_milli: 0,
+        ..rest
+    };
     let (again, _) = frame(&loquax_android::map::render(&rest, Some(Vec::new()), now()));
     assert_eq!(again.zoom_milli, 15_370, "nor in a frame after");
     let double_tap = MapRequest {
         zoom_by_milli: 1_000,
-        about_x: (W / 2) as i32,
-        about_y: (H / 2) as i32,
         ..rest
     };
     let (tapped, _) = frame(&loquax_android::map::render(
@@ -774,8 +788,9 @@ fn a_pinch_ending_between_steps_stays_there() {
 }
 
 /// While the fingers pinch, a frame keeps the step it was composed from
-/// as long as the pinch is within a step of it; past that it takes the
-/// nearest step's tiles.
+/// as long as the pinch is within a step of it, never above the fingers'
+/// zoom, and is that step one to one; past a step it takes the nearest
+/// step's tiles. At rest the nearest step, scaled to the exact zoom.
 #[test]
 fn a_pinch_keeps_its_tiles_within_a_step() {
     let home = home();
@@ -788,7 +803,7 @@ fn a_pinch_keeps_its_tiles_within_a_step() {
     assert_eq!(shown.tile_zoom, 14);
     ask.moving = true;
     let mut steps = Vec::new();
-    for z in [14_600, 14_900, 15_000, 15_300, 15_700] {
+    for z in [14_600, 14_900, 15_000, 15_300, 15_700, 14_800] {
         ask.zoom_milli = Some(z);
         let (shown, _) = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
         steps.push((shown.zoom_milli, shown.tile_zoom));
@@ -796,18 +811,21 @@ fn a_pinch_keeps_its_tiles_within_a_step() {
     assert_eq!(
         steps,
         [
-            (14_600, 14),
-            (14_900, 14),
-            (15_000, 14),
-            (15_300, 15),
-            (15_700, 15)
+            (14_000, 14),
+            (14_000, 14),
+            (14_000, 14),
+            (15_000, 15),
+            (15_000, 15),
+            // Out below the step it kept: the step below, scaled up.
+            (14_000, 14),
         ]
     );
     ask.moving = false;
+    ask.zoom_milli = Some(15_700);
     let (rest, _) = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
     assert_eq!(
-        (rest.tile_zoom, rest.pending),
-        (16, false),
+        (rest.zoom_milli, rest.tile_zoom, rest.pending),
+        (15_700, 16, false),
         "the nearest step at rest"
     );
 }
@@ -1057,4 +1075,108 @@ fn a_gesture_cancels_the_prefetch_and_the_budget_bounds_it() {
         now(),
     ));
     assert!(!prefetch(&at_rest).prefetching, "the gesture dropped it");
+}
+
+/// The app's Bitmap as the tests see it: a buffer that keeps whatever
+/// the last frame left, poisoned between frames as a Bitmap the screen
+/// showed holds anything.
+struct Bitmap {
+    w: u32,
+    h: u32,
+    rgba: Vec<u8>,
+}
+
+impl loquax_android::map::Canvas for Bitmap {
+    fn pixels(&mut self, w: u32, h: u32) -> Result<&mut [u8], String> {
+        match (self.w, self.h) == (w, h) {
+            true => Ok(&mut self.rgba),
+            false => Err(format!("{}x{} asked {w}x{h}", self.w, self.h)),
+        }
+    }
+}
+
+/// 1155: a frame composed straight into the app's Bitmap is the frame
+/// the host's path gives, byte for byte and description for description:
+/// cold at rest, cold while the finger is down (tiles owed, the stand-in
+/// path), a pan, a pinch scaled by the Canvas, at rest between steps; the
+/// Bitmap holding garbage before each. A Bitmap of another size gets a
+/// line and is left as it was; a prefetch needs none.
+#[test]
+fn a_frame_into_the_bitmap_is_the_frame_of_the_host_path() {
+    let (one, two) = (home(), home());
+    let margins = |ask: MapRequest| MapRequest {
+        margin_x: W / 4,
+        margin_y: H / 4,
+        ..ask
+    };
+    let mut host = margins(request(one.path(), false));
+    let mut into = margins(request(two.path(), false));
+    let (fw, fh) = (W + 2 * (W / 4), H + 2 * (H / 4));
+    let mut bitmap = Bitmap {
+        w: fw,
+        h: fh,
+        rgba: vec![0; (fw * fh * 4) as usize],
+    };
+    let steps: [(bool, i32, i32); 8] = [
+        (true, 0, 0),
+        (true, 37, -11),
+        (false, 0, 0),
+        (true, 40, 23),
+        (true, 0, 400),
+        (true, 0, 300),
+        (false, 0, 0),
+        (false, 0, 0),
+    ];
+    // One worker and no tile held: the first frame with the finger down
+    // owes tiles.
+    for (ask, dir) in [(&host, one.path()), (&into, two.path())] {
+        let _ = loquax_android::map::render(ask, Some(Vec::new()), now());
+        loquax_android::map::tune_tiles(dir, Some(1), true);
+    }
+    let mut owed = 0;
+    for (i, &(moving, pan, zoom_by)) in steps.iter().enumerate() {
+        for ask in [&mut host, &mut into] {
+            ask.moving = moving;
+            ask.pan_x = pan;
+            ask.zoom_by_milli = zoom_by;
+            ask.about_x = (W / 2) as i32;
+            ask.about_y = (H / 2) as i32;
+        }
+        for (k, b) in bitmap.rgba.iter_mut().enumerate() {
+            *b = (k * 7 + i) as u8;
+        }
+        let (want, rgba) = frame(&loquax_android::map::render(&host, Some(Vec::new()), now()));
+        let mut got = loquax_android::map::render_into(&into, Some(Vec::new()), now(), &mut bitmap);
+        assert!(got.ok, "step {i}: {:?}", got.error);
+        got.ms = want.ms;
+        assert_eq!(got, want, "step {i}");
+        assert!(bitmap.rgba == rgba, "step {i}: the pixels differ");
+        owed += u32::from(want.pending);
+        for ask in [&mut host, &mut into] {
+            ask.x = Some(want.x);
+            ask.y = Some(want.y);
+            ask.zoom = None;
+            ask.zoom_milli = Some(want.zoom_milli);
+        }
+    }
+    assert!(owed > 0, "a frame owed tiles: the stand-in path ran");
+    let mut small = Bitmap {
+        w: fw - 1,
+        h: fh,
+        rgba: vec![9; ((fw - 1) * fh * 4) as usize],
+    };
+    let refused = loquax_android::map::render_into(&into, Some(Vec::new()), now(), &mut small);
+    assert!(!refused.ok, "{refused:?}");
+    assert!(small.rgba.iter().all(|&b| b == 9), "left as it was");
+    let ahead = MapRequest {
+        prefetch: true,
+        ..into.clone()
+    };
+    let mut none = Bitmap {
+        w: 0,
+        h: 0,
+        rgba: Vec::new(),
+    };
+    let answer = loquax_android::map::render_into(&ahead, Some(Vec::new()), now(), &mut none);
+    assert!(answer.ok, "{answer:?}");
 }

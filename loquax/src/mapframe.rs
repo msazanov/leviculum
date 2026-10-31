@@ -31,7 +31,7 @@
 
 use leviculum_map::labels::SUBPIXEL;
 use leviculum_map::viewport::{ExactView, MILLI};
-use leviculum_mapfill::style::Style;
+use leviculum_mapfill::style::{MapTheme, Style};
 
 use crate::mapnames::{self, Sprite, Typesetter};
 use crate::picture::{Maps, Painter};
@@ -69,6 +69,14 @@ pub struct Ask<'a> {
     /// The width of a pin's label as the frontend sets it, when it sets
     /// them itself; the map's own typesetter's otherwise.
     pub measure: Option<fn(&str, f32) -> u32>,
+    /// The frontend scales a frame on screen to the view it keeps, with a
+    /// filter (the phone's Canvas, the window's image): a frame while a
+    /// pinch or a wheel zooms (moving, at a zoom other than the last frame
+    /// at rest's) is then drawn at its tile step one to one
+    /// ([`Shot::shows`]), the tiles copied and not resampled, and the
+    /// frontend scales it the rest of the way (1155). A pan at the zoom
+    /// at rest stays drawn at it, its names as sharp as at rest.
+    pub scaled_while_moving: bool,
 }
 
 /// A frame drawn.
@@ -78,6 +86,11 @@ pub struct Shot {
     /// The frame drawn: the screen's view, the margins around it, the
     /// same centre, on a whole pixel at a whole step.
     pub view: ExactView,
+    /// The screen's view the frame shows, before its margins: the view
+    /// asked, or while it zooms with [`Ask::scaled_while_moving`] the
+    /// view at the tile step, the screen's size in the step's pixels,
+    /// about the same centre. What a frontend places the frame by.
+    pub shows: ExactView,
     /// The zoom step its tiles are.
     pub tile_zoom: u8,
     /// The step nearest the view's zoom: the data's zoom.
@@ -88,6 +101,68 @@ pub struct Shot {
     pub attribution: String,
     /// The maps directory's epoch it was drawn at.
     pub epoch: u64,
+}
+
+impl Shot {
+    /// The frame `framed` with its pixels.
+    pub fn of(rgba: Vec<u8>, framed: Framed) -> Self {
+        Self {
+            rgba,
+            view: framed.view,
+            shows: framed.shows,
+            tile_zoom: framed.tile_zoom,
+            rest_zoom: framed.rest_zoom,
+            missing: framed.missing,
+            attribution: framed.attribution,
+            epoch: framed.epoch,
+        }
+    }
+
+    /// Its pixels and the rest.
+    pub fn split(self) -> (Vec<u8>, Framed) {
+        let framed = Framed {
+            view: self.view,
+            shows: self.shows,
+            tile_zoom: self.tile_zoom,
+            rest_zoom: self.rest_zoom,
+            missing: self.missing,
+            attribution: self.attribution,
+            epoch: self.epoch,
+        };
+        (self.rgba, framed)
+    }
+}
+
+/// A frame drawn into a frontend's own pixels ([`Frames::frame_into`]):
+/// a [`Shot`] without its buffer.
+#[derive(Clone, Debug)]
+pub struct Framed {
+    pub view: ExactView,
+    pub shows: ExactView,
+    pub tile_zoom: u8,
+    pub rest_zoom: u8,
+    pub missing: usize,
+    pub attribution: String,
+    pub epoch: u64,
+}
+
+/// Where [`Frames`] composes a frame: a buffer of its own, handed out
+/// with the [`Shot`], or a frontend's.
+enum Target<'a> {
+    Own(&'a mut Vec<u8>),
+    Into(&'a mut [u8]),
+}
+
+/// The size of the frame drawn for `ask`: the screen's view and the
+/// margins on both sides. What a frontend sizes the pixels it hands
+/// [`Frames::frame_into`] by.
+pub fn frame_size(ask: &Ask<'_>) -> (u32, u32) {
+    let (sw, sh) = ask.view.size();
+    let (mx, my) = ask.margin;
+    (
+        sw.saturating_add(mx.saturating_mul(2)),
+        sh.saturating_add(my.saturating_mul(2)),
+    )
 }
 
 /// One prefetch call's work.
@@ -172,6 +247,27 @@ impl Frames {
 
     /// One frame for `ask`.
     pub fn frame(&mut self, ask: &Ask<'_>) -> Shot {
+        let mut rgba = Vec::new();
+        let framed = self.draw(ask, Target::Own(&mut rgba));
+        Shot::of(rgba, framed)
+    }
+
+    /// One frame for `ask` composed into `rgba`, pixels a frontend owns
+    /// and shows (the phone's Bitmap, 1155), [`frame_size`] RGBA rows; it
+    /// may hold anything, an earlier frame or garbage. The same bytes as
+    /// [`frame`](Self::frame)'s, without a buffer of the frame's own or a
+    /// copy out of it. None, and nothing drawn, when `rgba` has another
+    /// size.
+    pub fn frame_into(&mut self, ask: &Ask<'_>, rgba: &mut [u8]) -> Option<Framed> {
+        let (w, h) = frame_size(ask);
+        if rgba.len() != w as usize * h as usize * 4 {
+            return None;
+        }
+        Some(self.draw(ask, Target::Into(rgba)))
+    }
+
+    /// One frame for `ask` into `target`.
+    fn draw(&mut self, ask: &Ask<'_>, target: Target<'_>) -> Framed {
         self.rest = None;
         self.plan = None;
         self.painter.refresh();
@@ -183,19 +279,47 @@ impl Frames {
         // Not held to one world itself, so a margin past the world's edge
         // stays empty rather than moving the view.
         let (sw, sh) = view.size();
-        let (mx, my) = ask.margin;
-        let mut drawn = view.on_whole_pixel();
-        drawn.resize(
-            sw.saturating_add(mx.saturating_mul(2)),
-            sh.saturating_add(my.saturating_mul(2)),
-        );
         // While the view moves the frame keeps the step it was composed
         // from as long as the zoom is within a step of it, the tiles
         // scaled, and draws a few missing tiles a frame.
         let kept = self
             .last_zoom
             .filter(|&z| ask.moving && (view.zoom() - f64::from(z)).abs() <= 1.0);
-        let tile_zoom = kept.unwrap_or(rest_zoom);
+        let mut tile_zoom = kept.unwrap_or(rest_zoom);
+        // A frontend that scales the frame itself gets it at the step,
+        // the tiles copied whole: a pinch's frame then costs a pan's, not
+        // a resample of the whole frame (the render study of 2026-10-30).
+        // Never a step above the view's zoom, so the frontend scales the
+        // frame up, by two at most, and it covers at least the screen and
+        // the margins asked.
+        let rest_at = self.names_view.map(|v| v.zoom_milli());
+        let zooming = ask.moving && rest_at != Some(view.zoom_milli());
+        let shows = match zooming && ask.scaled_while_moving {
+            true => {
+                let below = u8::try_from(view.zoom_milli() / MILLI).unwrap_or(u8::MAX);
+                tile_zoom = tile_zoom.min(below);
+                ExactView::new(view.centre, u32::from(tile_zoom) * MILLI, sw, sh)
+            }
+            false => view,
+        };
+        let mut drawn = shows.on_whole_pixel();
+        let (fw, fh) = frame_size(ask);
+        drawn.resize(fw, fh);
+        // Scaled up by the frontend, the step's frame shows only its middle,
+        // the screen and the margins over the scale (1163): the tiles
+        // outside it held are copied, the others not drawn nor owed.
+        let shown = (shows.zoom_milli() != view.zoom_milli()).then(|| {
+            let s = view.scale_at(tile_zoom).max(1.0);
+            let span = |n: u32| {
+                let half = f64::from(n) / 2.0;
+                let reach = (half / s).ceil() + 1.0;
+                let from = (half - reach).floor().max(0.0) as u32;
+                let to = ((half + reach).ceil() as u32).min(n);
+                (from, to)
+            };
+            let ((x0, x1), (y0, y1)) = (span(fw), span(fh));
+            [x0, y0, x1, y1]
+        });
         let asked = TileFrame {
             view: drawn,
             zoom: tile_zoom,
@@ -205,13 +329,25 @@ impl Frames {
                 .moving
                 .then(|| self.tiles.workers() * MOVING_TILES_PER_WORKER),
             fallback: self.last_zoom,
+            moving: ask.moving,
+            asked: shown,
         };
-        let composed = self.tiles.compose(&asked);
+        // The frontend's pixels are the frame's size (`frame_into`).
+        let (rgba, (attribution, missing)) = match target {
+            Target::Own(own) => {
+                let composed = self.tiles.compose(&asked);
+                *own = composed.rgba;
+                (own.as_mut_slice(), (composed.attribution, composed.missing))
+            }
+            Target::Into(into) => {
+                let composed = self.tiles.compose_into(&asked, into, false);
+                (into, composed.unwrap_or_default())
+            }
+        };
         self.last_zoom = Some(tile_zoom);
-        if !ask.moving && composed.missing == 0 {
+        if !ask.moving && missing == 0 {
             self.rest = Some((asked, ask.zooms));
         }
-        let mut rgba = composed.rgba;
         let (w, h) = drawn.size();
         let (scale, theme) = (ask.scale, ask.style.theme);
         let type_ = &mut self.type_;
@@ -237,28 +373,68 @@ impl Frames {
             };
             let taken = screenmap::taken(&placed, scale);
             let names = mapnames::place(w, h, &labels, px, &taken, scale, &mut self.type_);
-            self.names = names.iter().map(Sprite::of).collect();
+            #[cfg(test)]
+            if self.type_.unkept {
+                self.names = names.iter().map(Sprite::of_whole_reach).collect();
+            } else {
+                self.names = Sprite::of_all(&names, self.tiles.workers());
+            }
+            #[cfg(not(test))]
+            {
+                self.names = Sprite::of_all(&names, self.tiles.workers());
+            }
             self.names_view = Some(drawn);
         }
         if let Some(rest) = self.names_view {
             for name in &self.names {
                 let (x, y) = moved(&rest, &drawn, name.centre);
                 let (dx, dy) = (x - name.centre.0, y - name.centre.1);
-                name.draw(&mut rgba, w, h, theme, dx.round() as i64, dy.round() as i64);
+                name.draw(rgba, w, h, theme, dx.round() as i64, dy.round() as i64);
             }
         }
         if ask.draw_pins {
-            screenmap::draw_pins(&mut rgba, w, h, &placed, scale, theme, &mut self.type_);
+            screenmap::draw_pins(rgba, w, h, &placed, scale, theme, &mut self.type_);
         }
         self.placed = placed;
-        Shot {
-            rgba,
+        Framed {
             view: drawn,
+            shows,
             tile_zoom,
             rest_zoom,
-            missing: composed.missing,
-            attribution: composed.attribution,
+            missing,
+            attribution,
             epoch: self.painter.epoch(),
+        }
+    }
+
+    /// Hand a shot's buffer back once it is shown (1154): the next frame
+    /// is composed into it, so its pages stay mapped and a frame of the
+    /// same size allocates nothing.
+    pub fn recycle(&mut self, rgba: Vec<u8>) {
+        self.tiles.recycle(rgba);
+    }
+
+    /// Drop the names' sizes, masks and halos kept: a measuring tool's
+    /// first frame at rest.
+    pub fn forget_names(&mut self) {
+        self.type_.forget();
+    }
+
+    /// The names' masks and halos kept, and their bytes.
+    pub fn names_kept(&self) -> (usize, usize) {
+        self.type_.kept()
+    }
+
+    /// The bytes the names of the last frame at rest hold as sprites.
+    pub fn sprite_bytes(&self) -> usize {
+        self.names.iter().map(Sprite::bytes).sum()
+    }
+
+    /// Draw the names of the last frame at rest again into `rgba`, `w` by
+    /// `h` pixels, where they were placed: a measuring tool's sprite draw.
+    pub fn draw_names(&self, rgba: &mut [u8], w: u32, h: u32, theme: MapTheme) {
+        for name in &self.names {
+            name.draw(rgba, w, h, theme, 0, 0);
         }
     }
 
@@ -373,4 +549,174 @@ pub fn onto(drawn: &ExactView, screen: &ExactView) -> (f64, f64, f64) {
     let (cx, cy) = screen.to_screen(drawn.centre);
     let (w, h) = drawn.size();
     (cx - f64::from(w) / 2.0 * k, cy - f64::from(h) / 2.0 * k, k)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use leviculum_map::mercator::{project, LatLon};
+    use leviculum_mapfill::style::{MapTheme, Style};
+    use std::path::PathBuf;
+
+    /// The frames over the committed Florence region, which carries its
+    /// names.
+    fn florence() -> Frames {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../leviculum-map/fixtures");
+        Frames::new(crate::picture::Maps::new(Some(dir)))
+    }
+
+    /// The frames as they were before 1154: every name shaped and
+    /// rasterised anew, its halo widened over the whole disc, its sprite
+    /// sampled over its whole reach, every frame composed into a fresh
+    /// buffer pixel by pixel.
+    fn reference() -> Frames {
+        let mut frames = florence();
+        frames.tiles.reference = true;
+        frames.type_.unkept = true;
+        frames
+    }
+
+    fn ask(view: ExactView, moving: bool, scale: f32, theme: MapTheme) -> Ask<'static> {
+        Ask {
+            view,
+            margin: (view.size().0 / 4, view.size().1 / 4),
+            moving,
+            style: Style { theme, ..Style::PC },
+            scale,
+            pins: &[],
+            selected: None,
+            zooms: (10, 17),
+            draw_pins: true,
+            measure: None,
+            scaled_while_moving: false,
+        }
+    }
+
+    /// 1154: the names pipeline (kept sizes, masks and halos, the halo
+    /// widened by spans, the sprite's boxed loop on worker threads) and
+    /// the compose fast path (the buffer reused, whole rows copied at a
+    /// whole step, the lane bilinear between steps) give the frames of
+    /// the path before them byte for byte: at rest at a whole step and
+    /// between steps, panned while moving, through a pinch and back, at
+    /// two densities and in both themes, every buffer handed back dirty.
+    #[test]
+    fn the_fast_paths_give_the_frames_of_the_old_ones() {
+        let centre = project(LatLon::from_degrees(43.7731, 11.2560));
+        for (scale, theme) in [(1.0, MapTheme::Light), (2.75, MapTheme::Dark)] {
+            let mut old = reference();
+            let mut new = florence();
+            new.set_workers(4);
+            let mut view = ExactView::new(centre, 15 * MILLI, 900, 700);
+            let mut steps: Vec<(ExactView, bool)> = vec![(view, false)];
+            for i in 0..4 {
+                view.pan(if i % 2 == 0 { 40 } else { -17 }, 23);
+                steps.push((view, true));
+            }
+            steps.push((view, false));
+            for z in [15_300, 15_700, 16_000] {
+                let mut v = view;
+                v.zoom_about(z, 450.0, 350.0);
+                steps.push((v, true));
+                steps.push((v, false));
+            }
+            steps.push((view, false));
+            let mut names = 0;
+            for (i, &(v, moving)) in steps.iter().enumerate() {
+                let a = ask(v, moving, scale, theme);
+                let want = old.frame(&a);
+                let got = new.frame(&a);
+                assert_eq!(got.missing, want.missing, "step {i}");
+                assert!(
+                    got.rgba == want.rgba,
+                    "step {i} at scale {scale}: the frame differs"
+                );
+                assert_eq!(new.names(), old.names(), "step {i}");
+                names = names.max(new.names().len());
+                // Hand the buffer back poisoned: the next frame must not
+                // show what it held.
+                let mut spent = got.rgba;
+                spent.fill(0x5a);
+                new.recycle(spent);
+            }
+            eprintln!("scale {scale}: up to {names} names a frame");
+            assert!(names > 2, "the frames placed names ({names})");
+            let (kept, bytes) = new.names_kept();
+            assert!(
+                kept > 0 && bytes <= mapnames::MASK_BYTES_KEPT,
+                "{kept} {bytes}"
+            );
+        }
+    }
+
+    /// 1155: a frontend that scales the frame itself gets a pinch's frame
+    /// at the tile step one to one: the bytes of the frame a pan at that
+    /// step gives, the names where it puts them. Out below the step kept,
+    /// the step below. A pan at the zoom at rest is drawn at that zoom,
+    /// as without the switch.
+    #[test]
+    fn a_pinch_frame_is_its_step_one_to_one() {
+        let centre = project(LatLon::from_degrees(43.7731, 11.2560));
+        let theme = MapTheme::Light;
+        let at = |z: u32| {
+            let mut v = ExactView::new(centre, 15 * MILLI, 900, 700);
+            v.zoom_about(z, 450.0, 350.0);
+            v
+        };
+        let scaled = |view: ExactView| Ask {
+            scaled_while_moving: true,
+            ..ask(view, true, 2.75, theme)
+        };
+        let mut pinch = florence();
+        pinch.frame(&ask(at(15_000), false, 2.75, theme));
+        let got = pinch.frame(&scaled(at(15_400)));
+        assert_eq!((got.tile_zoom, got.shows.zoom_milli()), (15, 15_000));
+        assert_eq!(got.shows.centre, at(15_400).centre);
+        assert_eq!(got.shows.size(), (900, 700));
+        assert_eq!(got.view.size(), (900 + 2 * 225, 700 + 2 * 175));
+        let mut pan = florence();
+        pan.frame(&ask(at(15_000), false, 2.75, theme));
+        let want = pan.frame(&ask(at(15_000), true, 2.75, theme));
+        assert!(got.rgba == want.rgba, "the step's frame, byte for byte");
+        let out = pinch.frame(&scaled(at(14_600)));
+        assert_eq!((out.tile_zoom, out.shows.zoom_milli()), (14, 14_000));
+        // At rest between steps, then a pan there: drawn at that zoom.
+        let mut rest = florence();
+        let mut plain = florence();
+        rest.frame(&ask(at(15_400), false, 2.75, theme));
+        plain.frame(&ask(at(15_400), false, 2.75, theme));
+        let mut moved = at(15_400);
+        moved.pan(31, -12);
+        let got = rest.frame(&scaled(moved));
+        let want = plain.frame(&ask(moved, true, 2.75, theme));
+        assert_eq!(got.shows, moved);
+        assert!(
+            got.rgba == want.rgba,
+            "a pan at the zoom at rest is as before"
+        );
+    }
+
+    /// 1163: a pinch's frame at the step below covers more than the
+    /// frontend shows of it scaled; the tiles outside the screen and the
+    /// margins are not owed. After a frame at rest at z14.3 the step's
+    /// frame owes nothing a pinch in, where it owed the tiles past them.
+    #[test]
+    fn a_pinch_owes_only_the_tiles_it_shows() {
+        let centre = project(LatLon::from_degrees(43.7731, 11.2560));
+        let theme = MapTheme::Light;
+        let at = |z: u32| {
+            let mut v = ExactView::new(centre, 15 * MILLI, 900, 700);
+            v.zoom_about(z, 450.0, 350.0);
+            v
+        };
+        let mut pinch = florence();
+        pinch.set_workers(1);
+        pinch.frame(&ask(at(14_300), false, 2.75, theme));
+        let got = pinch.frame(&Ask {
+            scaled_while_moving: true,
+            ..ask(at(14_600), true, 2.75, theme)
+        });
+        assert_eq!(got.tile_zoom, 14);
+        assert_eq!(got.missing, 0);
+        assert!(got.rgba.chunks_exact(4).all(|p| p[3] == 0xff));
+    }
 }

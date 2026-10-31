@@ -1,5 +1,6 @@
 package network.leviculum.loquax;
 
+import android.graphics.Bitmap;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -81,6 +82,35 @@ final class Core {
         if (code != null) request.put("code", code);
         if (name != null) request.put("name", name);
         return answer(Native.start(MsgPack.pack(request)));
+    }
+
+    /**
+     * Start with the mailbox on this phone (1152): the library makes it, and
+     * joins the screens to it itself; with a backup line and its passphrase
+     * it restores the address first. Blocks: not on the UI thread.
+     */
+    static Map<String, Object> startHere(String dir, String restore, String passphrase) {
+        Map<String, Object> request = map("dir", dir, "offset", (long) offset(), "here", true);
+        if (restore != null) {
+            request.put("restore", restore);
+            request.put("passphrase", passphrase);
+        }
+        return answer(Native.start(MsgPack.pack(request)));
+    }
+
+    /** The address's backup line and its paper code, sealed with `passphrase`; `error` when not. */
+    static Map<String, Object> backup(String passphrase) {
+        return answer(Native.query(MsgPack.pack(map("t", "backup", "passphrase", passphrase))));
+    }
+
+    /** This phone's address, its QR code, its name and whether the mailbox is here. */
+    static Map<String, Object> me() {
+        return answer(Native.query(MsgPack.pack(map("t", "me"))));
+    }
+
+    /** The name recipients see, for the mailbox on this phone. Blocks a moment: not on the UI thread. */
+    static String name(String name) {
+        return command(map("t", "name", "name", name));
     }
 
     /** One request; the error in words, or null. */
@@ -199,6 +229,52 @@ final class Core {
         return list(answer(Native.query(MsgPack.pack(map("t", "links")))), "links");
     }
 
+    /** Pin `peer`'s conversation to the top, or loosen it (1146); every device of the home. */
+    static String pin(String peer, boolean on) {
+        return command(map("t", "pin", "peer", peer, "on", on));
+    }
+
+    /** Mute for `secs` from now, always when negative, unmute with 0. */
+    static String mute(String peer, long secs) {
+        return command(map("t", "mute", "peer", peer, "secs", secs));
+    }
+
+    static String archive(String peer, boolean on) {
+        return command(map("t", "archive", "peer", peer, "on", on));
+    }
+
+    static String block(String peer, boolean on) {
+        return command(map("t", "block", "peer", peer, "on", on));
+    }
+
+    /** The identity compared in person; on this phone only. */
+    static String verify(String peer, boolean on) {
+        return command(map("t", "verify", "peer", peer, "on", on));
+    }
+
+    /** Unread on this phone, or read as opening it would be. */
+    static String unread(String peer, boolean on) {
+        return command(map("t", "unread", "peer", peer, "on", on));
+    }
+
+    /** Delete the conversation here, or on every device of the home. */
+    static String forget(String peer, boolean everywhere) {
+        return command(map("t", "forget", "peer", peer, "everywhere", everywhere));
+    }
+
+    /** The contact screen of `peer`; an "error" key when there is none. */
+    static Map<String, Object> detail(String peer) {
+        return answer(Native.query(MsgPack.pack(map("t", "detail", "peer", peer))));
+    }
+
+    static Map<String, Object> archived() {
+        return answer(Native.query(MsgPack.pack(map("t", "archived"))));
+    }
+
+    static Map<String, Object> blocked() {
+        return answer(Native.query(MsgPack.pack(map("t", "blocked"))));
+    }
+
     static String pull() {
         return command(map("t", "pull"));
     }
@@ -216,47 +292,22 @@ final class Core {
         return answer(Native.query(MsgPack.pack(map("t", "messages", "peer", peer))));
     }
 
-    /** A map frame: what it shows, and where its pixels are in the library's bytes. */
-    static final class MapFrame {
-        final Map<String, Object> shown;
-        final byte[] pixels;
-        final int offset;
-        final int length;
-
-        MapFrame(Map<String, Object> shown, byte[] pixels, int offset, int length) {
-            this.shown = shown;
-            this.pixels = pixels;
-            this.offset = offset;
-            this.length = length;
-        }
-    }
-
-    /** One frame of the map (MapView); pixels null when there is none. Not on the UI thread. */
-    @SuppressWarnings("unchecked")
-    static MapFrame renderMap(Map<String, Object> request) {
+    /**
+     * One frame of the map (MapView) drawn into `into`, a bitmap of the
+     * frame's size, or a prefetch with `into` null: what it shows. Not on
+     * the UI thread.
+     */
+    static Map<String, Object> renderMap(Map<String, Object> request, Bitmap into) {
         byte[] bytes;
         try {
-            bytes = Native.renderMap(MsgPack.pack(request));
+            bytes = Native.renderMapInto(MsgPack.pack(request), into);
         } catch (RuntimeException e) {
-            return new MapFrame(map("ok", false, "error", String.valueOf(e.getMessage())), null, 0, 0);
+            return map("ok", false, "error", String.valueOf(e.getMessage()));
         }
-        if (bytes == null || bytes.length < 4) {
-            return new MapFrame(map("ok", false, "error", "the library gave no frame"), null, 0, 0);
+        if (bytes == null) {
+            return map("ok", false, "error", "the library gave no frame");
         }
-        int head = ((bytes[0] & 0xff) << 24) | ((bytes[1] & 0xff) << 16)
-                | ((bytes[2] & 0xff) << 8) | (bytes[3] & 0xff);
-        if (head < 0 || 4 + head > bytes.length) {
-            return new MapFrame(map("ok", false, "error", "the library's frame is cut short"), null, 0, 0);
-        }
-        byte[] described = new byte[head];
-        System.arraycopy(bytes, 4, described, 0, head);
-        Map<String, Object> shown = answer(described);
-        int length = bytes.length - 4 - head;
-        long want = num(shown, "w") * num(shown, "h") * 4;
-        if (!bool(shown, "ok") || length != want || want == 0) {
-            return new MapFrame(shown, null, 0, 0);
-        }
-        return new MapFrame(shown, bytes, 4 + head, length);
+        return answer(bytes);
     }
 
     /** The next event, or null; blocks up to waitMs. */

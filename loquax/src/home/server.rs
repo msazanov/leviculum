@@ -69,6 +69,7 @@ pub fn answer(
         super::SEND_PATH => send(store, home, data, device, now),
         super::MARK_PATH => Answer::only(mark(store, home, data, device, now_secs)),
         super::PETNAME_PATH => Answer::only(petname(store, home, data, device, now_secs)),
+        super::PEERSTATE_PATH => Answer::only(peer_state(store, home, data, device, now_secs)),
         super::WATCH_PATH => watch(store, data, device),
         _ => Answer::only(wire::status_answer(Status::Malformed)),
     }
@@ -219,6 +220,99 @@ fn petname(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], no
         }
         Err(error) => {
             tracing::warn!("HOME petname: {error}");
+            wire::status_answer(Status::Failed)
+        }
+    }
+}
+
+/// Names the home node itself holds for peers, kept as petname entries the
+/// way a client's `/petname` is (1159): an import's contacts and the
+/// contacts file of a home node that imported before names travelled. A
+/// peer the archive already holds a petname entry for, cleared or not,
+/// keeps it: the reader's word on that peer was said. How many were
+/// appended.
+pub fn archive_petnames<'a>(
+    store: &mut Store,
+    names: impl IntoIterator<Item = (&'a [u8; 16], &'a str)>,
+    now: i64,
+    cap_bytes: u64,
+) -> Result<usize, crate::store::StoreError> {
+    let mut appended = 0;
+    for (peer, name) in names {
+        if name.is_empty() || store.archive_holds_petname(peer)? {
+            continue;
+        }
+        let entry = wire::petname_entry(peer, Some(name));
+        if store
+            .archive_petname(*peer, &entry, now, cap_bytes)?
+            .is_some()
+        {
+            appended += 1;
+        }
+    }
+    Ok(appended)
+}
+
+/// Keep each of `peers` as blocked, a peer state entry
+/// ([`crate::home::KIND_PEERSTATE`]) in the bytes a device's block sends
+/// (1162): an import's blocks and the contacts file of a home node that
+/// imported before blocks travelled. A peer the archive holds a peer state
+/// for keeps it: a device said its word on that peer. How many were
+/// appended.
+pub fn archive_blocks<'a>(
+    store: &mut Store,
+    peers: impl IntoIterator<Item = &'a [u8; 16]>,
+    now: i64,
+    cap_bytes: u64,
+) -> Result<usize, crate::store::StoreError> {
+    let blocked = wire::PeerState {
+        blocked: true,
+        ..wire::PeerState::default()
+    };
+    let mut appended = 0;
+    for peer in peers {
+        if store.archive_holds_peer_state(peer)? {
+            continue;
+        }
+        let entry = wire::peer_state_entry(peer, &blocked);
+        if store
+            .archive_peer_state(*peer, &entry, now, cap_bytes)?
+            .is_some()
+        {
+            appended += 1;
+        }
+    }
+    Ok(appended)
+}
+
+/// A client's word on a peer (1146), kept as an archive entry as a
+/// petname is: the newest of each peer, the same one again appending
+/// nothing.
+fn peer_state(
+    store: &mut Store,
+    home: &Home<'_>,
+    data: &[u8],
+    device: [u8; 16],
+    now: i64,
+) -> Vec<u8> {
+    let Ok((peer, _)) = wire::read_peer_state_entry(data) else {
+        return wire::status_answer(Status::Malformed);
+    };
+    if let Some(refused) = refuse_unless_admitted(store, &device, "peerstate") {
+        return refused;
+    }
+    match store.archive_peer_state(peer, data, now, home.cap_bytes) {
+        Ok(seq) => {
+            tracing::info!(
+                "HOME peerstate peer={} device={} seq={}",
+                crate::address::to_hex(&peer),
+                crate::address::to_hex(&device),
+                seq.map_or_else(|| "-".to_string(), |seq| seq.to_string())
+            );
+            wire::status_answer(Status::Ok)
+        }
+        Err(error) => {
+            tracing::warn!("HOME peerstate: {error}");
             wire::status_answer(Status::Failed)
         }
     }
@@ -620,6 +714,52 @@ mod tests {
             1.0,
         );
         assert_eq!(read_status(&answer.bytes), Ok(Status::Malformed));
+    }
+
+    /// A peer state is an archive entry for an admitted device, only the
+    /// newest of a peer stays beside its petname, and it wakes nobody
+    /// (1146).
+    #[test]
+    fn a_peer_state_is_the_newest_entry_of_its_peer_and_wakes_nobody() {
+        let (_dir, mut store) = store();
+        let alice = [0xa1; 16];
+        let ask = |store: &mut Store, state: &wire::PeerState| {
+            let answer = answer(
+                store,
+                &home(),
+                crate::home::PEERSTATE_PATH,
+                &wire::peer_state_entry(&alice, state),
+                Some(LAPTOP),
+                300.0,
+            );
+            read_status(&answer.bytes).expect("status")
+        };
+        let blocked = wire::PeerState {
+            blocked: true,
+            ..wire::PeerState::default()
+        };
+        assert_eq!(ask(&mut store, &blocked), Status::NotAdmitted);
+        admitted(&mut store);
+        let woken = store.archive_newest_waking().expect("waking");
+        assert_eq!(petname(&mut store, LAPTOP, alice, Some("Mum")), Status::Ok);
+        assert_eq!(ask(&mut store, &blocked), Status::Ok);
+        assert_eq!(ask(&mut store, &blocked), Status::Ok);
+        let muted = wire::PeerState {
+            muted_until: Some(i64::MAX),
+            ..wire::PeerState::default()
+        };
+        assert_eq!(ask(&mut store, &muted), Status::Ok);
+        let page = store.archive_since(0, usize::MAX).expect("page");
+        let kinds: Vec<_> = page.entries.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            kinds,
+            [crate::home::KIND_PETNAME, crate::home::KIND_PEERSTATE]
+        );
+        assert_eq!(
+            wire::read_peer_state_entry(&page.entries[1].packed),
+            Ok((alice, muted))
+        );
+        assert_eq!(store.archive_newest_waking().expect("waking"), woken);
     }
 
     /// `/watch` is answered with the newest sequence and keeps the link,

@@ -1557,3 +1557,118 @@ async fn what_one_client_reads_and_sends_shows_on_the_other() {
     drop(node);
     mesh.daemon.stop().await.expect("stop the Rust daemon");
 }
+
+/// Lew's migration on the terminal (1159): the mailbox imported a Ratspeak
+/// history and its contact's name before the client's screen started, so
+/// the screen's start finds nothing in its store. Its first pull writes the
+/// imported rows to the store, and the same running screen lists the
+/// conversation under the imported name and shows the rows when it is
+/// opened: no restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn imported_history_shows_on_the_running_screen_under_its_name() {
+    let mut mesh = Mesh::start_many(&[]).await;
+    let home = mesh.home.path().to_path_buf();
+    let code = admit(&home, "laptop");
+    let node = HomeNode::start(&home, &mesh.instance).await;
+    let client = joined(&mesh, &node, &code).await;
+
+    let peer = [0x09; 16];
+    {
+        let identity = loquax::identity::load_or_create(&home.join("identity")).expect("identity");
+        let address = loquax::engine::delivery_address(&identity).expect("address");
+        let mut store = loquax::store::Store::open_in(&home, address).expect("home store");
+        let row = |id: u8, outbound: bool, at: i64, content: &str| loquax::store::ImportRow {
+            id: [id; 32],
+            outbound,
+            timestamp: Some(at as f64),
+            received_at: Some(at),
+            title: Vec::new(),
+            content: content.to_string(),
+            fields: Vec::new(),
+            delivery: None,
+            signature: loquax::ui::Signature::Unverified,
+            origin_verdict: None,
+            held: None,
+        };
+        let entries: Vec<([u8; 32], i64, Vec<u8>)> = [
+            row(0xa1, false, 1_000, "von Ratspeak"),
+            row(0xa2, true, 2_000, "zurueck"),
+        ]
+        .iter()
+        .map(|r| {
+            let at = r.received_at.unwrap_or(0);
+            (
+                r.id,
+                at,
+                loquax::import::archive::entry("ratspeak", &peer, r),
+            )
+        })
+        .collect();
+        assert_eq!(
+            store.archive_imported(&entries, 1 << 20).expect("archive"),
+            2
+        );
+        let names = [(&peer, "Ratte")];
+        assert_eq!(
+            loquax::home::server::archive_petnames(&mut store, names, 3_000, 1 << 20)
+                .expect("the name"),
+            1
+        );
+    }
+
+    // No `--to`: the list is what the store and the pull bring. The
+    // imported conversation is the only one, so `enter` opens it.
+    let script =
+        "until ready 20\nuntil synced 1 40\nframe pulled\nkey enter\nframe opened\nkey q\n";
+    let script_file = client.path().join("session.script");
+    std::fs::write(&script_file, script).expect("the script");
+    let args: Vec<String> = vec![
+        "tui".into(),
+        "--instance".into(),
+        mesh.instance.clone(),
+        "--sync-interval".into(),
+        "15m".into(),
+        "--script".into(),
+        script_file.display().to_string(),
+        "--size".into(),
+        "80x24".into(),
+    ];
+    let client_home = client.path().to_path_buf();
+    let output = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &client_home)
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax tui");
+        child.wait_with_output().expect("wait for loquax tui")
+    })
+    .await
+    .expect("the tui thread");
+    let tui_log = std::fs::read_to_string(client.path().join("tui.log")).unwrap_or_default();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}\ntui.log:\n{tui_log}\nhome node:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        node.log()
+    );
+    let frames = std::fs::read_to_string(client.path().join("session.frames")).expect("the frames");
+    let (pulled, opened) = frames
+        .split_once(": opened ---")
+        .expect("both frames drawn");
+    assert!(
+        pulled.contains("Ratte"),
+        "the pull lists the conversation under its name:\n{frames}\ntui.log:\n{tui_log}"
+    );
+    assert!(
+        opened.contains("von Ratspeak") && opened.contains("zurueck"),
+        "the opened conversation shows the imported rows:\n{frames}"
+    );
+
+    drop(node);
+    mesh.daemon.stop().await.expect("stop the Rust daemon");
+}

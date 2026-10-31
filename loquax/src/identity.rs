@@ -179,14 +179,20 @@ pub fn load_or_create(path: &Path) -> Result<Identity, IdentityError> {
 
 fn mint(path: &Path) -> Result<Identity, IdentityError> {
     let identity = leviculum_std::generate_identity();
-    let encoded = encode_identity(&identity).ok_or(IdentityError::NotStorable)?;
+    store(path, &identity)?;
+    Ok(identity)
+}
+
+/// Keep `identity` at `path` as [`load_or_create`] reads it, readable by the
+/// user alone: a minted one, or one restored from a backup (1152).
+pub fn store(path: &Path, identity: &Identity) -> Result<(), IdentityError> {
+    let encoded = encode_identity(identity).ok_or(IdentityError::NotStorable)?;
     if let Some(parent) = path.parent() {
         leviculum_std::create_secret_dir_all(parent)
             .map_err(|e| IdentityError::Io(parent.to_owned(), e))?;
     }
     leviculum_std::atomic_write_secret(path, &encoded)
-        .map_err(|e| IdentityError::Io(path.to_owned(), e))?;
-    Ok(identity)
+        .map_err(|e| IdentityError::Io(path.to_owned(), e))
 }
 
 #[cfg(test)]

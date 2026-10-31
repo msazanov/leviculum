@@ -78,6 +78,10 @@ pub enum Command {
     Unblock,
     /// List the blocked conversations instead of the others, and back.
     Blocked,
+    /// Move the open conversation into the archive, or back to the list.
+    Archive,
+    /// List the archived conversations instead of the others, and back.
+    Archived,
     /// Bring over contacts and history from another messenger found in its
     /// default place.
     Import,
@@ -93,7 +97,7 @@ pub struct PaletteEntry {
 }
 
 /// The table, in the order the palette lists it unfiltered.
-pub const COMMANDS: [PaletteEntry; 29] = [
+pub const COMMANDS: [PaletteEntry; 31] = [
     entry("send", Command::Send),
     entry("fetch", Command::Fetch),
     entry("quit", Command::Quit),
@@ -122,6 +126,8 @@ pub const COMMANDS: [PaletteEntry; 29] = [
     entry("block", Command::Block),
     entry("unblock", Command::Unblock),
     entry("blocked", Command::Blocked),
+    entry("archive", Command::Archive),
+    entry("archived", Command::Archived),
     entry("import", Command::Import),
 ];
 

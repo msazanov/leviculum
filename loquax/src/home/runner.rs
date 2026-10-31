@@ -83,11 +83,24 @@ pub async fn send_home(
     UiEvent::SendDone(Ok(()))
 }
 
+/// How a client's pull ended, for the frontend that ran it.
+#[derive(Debug)]
+pub struct PullEnd {
+    /// The received messages that came ([`super::client::Pull::messages`]),
+    /// never entries: a pull that brought only names, marks, states or the
+    /// user's own sent message brought nothing new (1136).
+    pub result: Result<usize, String>,
+    /// For [`settle_pull`].
+    pub cursor: Option<u64>,
+    /// The imported history rows ([`crate::home::KIND_IMPORTED`]) new to
+    /// the store, which the runner wrote there itself: the frontend shows
+    /// them with [`show_imported`] when there are any (1159). Not counted in
+    /// `result`, which says what was received.
+    pub imported: usize,
+}
+
 /// A client's fetch: one pull from its home node, with twice a send's
-/// `budget`, as on the command line. It counts the received messages that
-/// came ([`super::client::Pull::messages`]), never entries: a pull that
-/// brought only names, marks, states or the user's own sent message
-/// brought nothing new (1136). The cursor comes back for
+/// `budget`, as on the command line. The cursor comes back for
 /// [`settle_pull`]: the runner sees the fence on its tap in the same pump
 /// that hands the screen the pulled messages, and the frontend writes those
 /// to the store before it takes the runner's end.
@@ -96,7 +109,12 @@ pub async fn pull(
     client: &HomeClient,
     home: &Path,
     budget: Duration,
-) -> (Result<usize, String>, Option<u64>) {
+) -> PullEnd {
+    let ended = |result, cursor, imported| PullEnd {
+        result,
+        cursor,
+        imported,
+    };
     match super::client::pull_into(
         outbox,
         &client.node,
@@ -109,25 +127,41 @@ pub async fn pull(
     {
         Ok(pull) => {
             if pull.imported.is_empty() {
-                return (Ok(pull.messages()), pull.cursor);
+                return ended(Ok(pull.messages()), pull.cursor, 0);
             }
             // Imported history goes to the store before the cursor may pass
             // it: one that cannot be kept is pulled again next time.
             match keep_imported(home, &client.public_key, &pull.imported) {
-                Ok(_) => (Ok(pull.messages()), pull.cursor),
-                Err(error) => (Err(error), None),
+                Ok(new) => ended(Ok(pull.messages()), pull.cursor, new),
+                Err(error) => ended(Err(error), None, 0),
             }
         }
-        Err(error) => (Err(error.to_string()), None),
+        Err(error) => ended(Err(error.to_string()), None, 0),
     }
+}
+
+/// Show the history a pull wrote into `store` while the screen ran
+/// ([`PullEnd::imported`]): the model takes the store's conversations as
+/// [`crate::ui::UiModel::grown`] says, so the list and an open conversation
+/// show it without a restart (1159). On Android the session outlives the
+/// app's screen, so a restart is not something a user does.
+pub fn show_imported<B: leviculum_ui::input::InputBuffer>(
+    model: &mut crate::ui::UiModel<B>,
+    store: &Store,
+) -> Result<(), String> {
+    let stored = store.restore().map_err(|e| e.to_string())?;
+    model
+        .grown(stored, |peer, before| store.earlier(peer, before, None))
+        .map_err(|e| e.to_string())
 }
 
 /// Write the imported history entries of a pull
 /// ([`crate::home::KIND_IMPORTED`]) into the store of the home identity's
 /// address under `home`, one conversation at a time, as the import on the
 /// home node wrote them: how many rows were new. An entry of another shape
-/// is passed by and said in the log. The screen shows them from its next
-/// start; the store keeps them in time order below its own rows.
+/// is passed by and said in the log. The store keeps them in time order
+/// below its own rows; a running screen shows them once its frontend calls
+/// [`show_imported`].
 pub fn keep_imported(
     home: &Path,
     public_key: &[u8; 64],
@@ -219,6 +253,31 @@ pub async fn hand_petnames(
         match outcome {
             Ok(()) => tracing::info!("HOME petname peer={peer}"),
             Err(error) => tracing::warn!("HOME petname peer={peer} not taken: {error}"),
+        }
+    }
+}
+
+/// The peer states a fold set, handed to the home node in order (1146), as
+/// petnames are.
+pub async fn hand_peer_states(
+    client: HomeClient,
+    states: Vec<([u8; 16], super::wire::PeerState)>,
+    budget: Duration,
+) {
+    for (peer, state) in states {
+        let outcome = super::client::peer_state(
+            &client.node,
+            &client.public_key,
+            &client.device,
+            &peer,
+            &state,
+            budget,
+        )
+        .await;
+        let peer = crate::address::to_hex(&peer);
+        match outcome {
+            Ok(()) => tracing::info!("HOME peerstate peer={peer}"),
+            Err(error) => tracing::warn!("HOME peerstate peer={peer} not taken: {error}"),
         }
     }
 }

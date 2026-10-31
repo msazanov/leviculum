@@ -23,6 +23,7 @@ use alloc::string::String;
 
 use leviculum_core::{Destination, DestinationType, Direction, Identity};
 
+pub mod backup;
 pub mod code;
 pub mod outgoing;
 pub mod relation;
@@ -35,7 +36,7 @@ pub mod client;
 pub mod daemon;
 #[cfg(feature = "std")]
 pub mod lock;
-#[cfg(feature = "tui")]
+#[cfg(feature = "qr")]
 pub mod qr;
 #[cfg(feature = "history")]
 pub mod runner;
@@ -69,6 +70,12 @@ pub const MARK_PATH: &str = "/mark";
 /// archive entry ([`KIND_PETNAME`]), which every client applies on its next
 /// pull, so the reader's name for a peer is the same on each device.
 pub const PETNAME_PATH: &str = "/petname";
+
+/// A client's word on a peer and its conversation (1146): the peer and its
+/// [`wire::PeerState`] in, a status out. Kept as an archive entry
+/// ([`KIND_PEERSTATE`]) as a petname is, so every device of the home blocks,
+/// pins, archives and mutes the same people.
+pub const PEERSTATE_PATH: &str = "/peerstate";
 
 /// A client keeps its link: the cursor in, the newest sequence out, and a
 /// wake over the same link whenever the archive grows ([`wire::wake`]).
@@ -111,6 +118,10 @@ pub const KIND_PETNAME: u8 = 8;
 /// peer first (`crate::import::archive`), never a signed message. A client
 /// writes it into its store as imported history.
 pub const KIND_IMPORTED: u8 = 9;
+/// A client's `/peerstate`: its bytes are the request as the client sent
+/// it ([`wire::peer_state_entry`]). Only a peer's newest is kept, and it
+/// wakes nobody, as a petname does.
+pub const KIND_PEERSTATE: u8 = 10;
 
 /// What a client shows for a state entry of a message it sent through the
 /// home node: the router state its bubble takes, `None` for an entry that
