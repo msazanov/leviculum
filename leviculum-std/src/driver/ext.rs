@@ -162,6 +162,19 @@ impl ReticulumNode {
     }
 }
 
+impl ReticulumNodeBuilder {
+    pub fn link_cipher(mut self, cipher: leviculum_core::LinkCipher) -> Self {
+        self.core_builder = self.core_builder.link_cipher(cipher);
+        self
+    }
+
+    /// Also accept inbound links that ask for standard CBC (links that cross stock Reticulum transports).
+    pub fn accept_cbc_links(mut self, accept: bool) -> Self {
+        self.core_builder = self.core_builder.accept_cbc_links(accept);
+        self
+    }
+}
+
 /// Link tunnel datagrams: nothing to precompute. In particular no payload hash,
 /// which on a bulk link was the single largest cost of the receive thread; core
 /// treats the missing hash as "not needed" for exactly this packet class.

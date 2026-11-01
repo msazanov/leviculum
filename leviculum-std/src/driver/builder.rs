@@ -38,7 +38,7 @@ use super::{CoreProcessor, ReticulumNode};
 /// # }
 /// ```
 pub struct ReticulumNodeBuilder {
-    core_builder: NodeCoreBuilder,
+    pub(super) core_builder: NodeCoreBuilder,
     /// Pre-loaded config (takes priority over config_path)
     loaded_config: Option<Config>,
     config_path: Option<PathBuf>,
@@ -240,17 +240,7 @@ impl ReticulumNodeBuilder {
         self
     }
 
-    pub fn link_cipher(mut self, cipher: leviculum_core::LinkCipher) -> Self {
-        self.core_builder = self.core_builder.link_cipher(cipher);
-        self
-    }
-
-    /// Also accept inbound links that ask for standard CBC (links that cross stock Reticulum transports).
-    pub fn accept_cbc_links(mut self, accept: bool) -> Self {
-        self.core_builder = self.core_builder.accept_cbc_links(accept);
-        self
-    }
-
+    /// Set the proof strategy for the node
     pub fn proof_strategy(mut self, strategy: ProofStrategy) -> Self {
         self.core_builder = self.core_builder.proof_strategy(strategy);
         self
