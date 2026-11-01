@@ -14,6 +14,8 @@ use alloc::vec::Vec;
 
 use crate::constants::{BITS_PER_BYTE, CRC_HIGH_BIT, CRC_INITIAL};
 
+mod ext;
+
 /// HDLC flag byte
 pub const FLAG: u8 = 0x7E;
 
@@ -120,15 +122,7 @@ pub fn frame(data: &[u8], output: &mut Vec<u8>) {
     // Start flag
     output.push(FLAG);
 
-    // Copy ordinary runs in bulk; only special bytes need escaping.
-    let mut rest = data;
-    while let Some(pos) = memchr::memchr2(FLAG, ESCAPE, rest) {
-        output.extend_from_slice(&rest[..pos]);
-        output.push(ESCAPE);
-        output.push(rest[pos] ^ ESCAPE_XOR);
-        rest = &rest[pos + 1..];
-    }
-    output.extend_from_slice(rest);
+    ext::frame_bulk(data, output);
 
     // End flag
     output.push(FLAG);
@@ -189,7 +183,7 @@ pub enum DeframeResult {
 /// Bytes a fresh [`Deframer`] reserves up front. Frames on every interface we
 /// speak are far smaller than any of our HW_MTUs, so the buffer starts small
 /// and grows, rather than reserving the ceiling per connection.
-const INITIAL_BUFFER_CAPACITY: usize = 600;
+pub(super) const INITIAL_BUFFER_CAPACITY: usize = 600;
 
 /// Default ceiling on the unescaped payload a [`Deframer`] will accumulate for
 /// one frame, in bytes.
@@ -240,10 +234,10 @@ pub const DEFAULT_MAX_FRAME: usize = 262_144;
 /// }
 /// ```
 pub struct Deframer {
-    buffer: Vec<u8>,
-    in_frame: bool,
-    escape_next: bool,
-    max_frame: usize,
+    pub(super) buffer: Vec<u8>,
+    pub(super) in_frame: bool,
+    pub(super) escape_next: bool,
+    pub(super) max_frame: usize,
 }
 
 impl Deframer {
@@ -296,46 +290,11 @@ impl Deframer {
 
     /// Process incoming bytes
     pub fn process(&mut self, data: &[u8]) -> Vec<DeframeResult> {
-        let mut results = Vec::new();
-
-        let mut rest = data;
-        while !rest.is_empty() {
-            if !self.in_frame {
-                // Discard noise without running the state machine per byte.
-                let Some(pos) = memchr::memchr(FLAG, rest) else {
-                    break;
-                };
-                self.process_byte(FLAG);
-                rest = &rest[pos + 1..];
-                continue;
-            }
-            if self.escape_next || needs_escape(rest[0]) {
-                if let Some(result) = self.process_byte(rest[0]) {
-                    results.push(result);
-                }
-                rest = &rest[1..];
-                continue;
-            }
-            let len = memchr::memchr2(FLAG, ESCAPE, rest).unwrap_or(rest.len());
-            let room = self.max_frame - self.buffer.len();
-            if len > room {
-                // Match the scalar path exactly: consume the first overflowing
-                // byte, discard the frame, then resynchronise at the next FLAG.
-                self.reset();
-                self.buffer.shrink_to(INITIAL_BUFFER_CAPACITY);
-                results.push(DeframeResult::Oversized);
-                rest = &rest[room + 1..];
-            } else {
-                self.buffer.extend_from_slice(&rest[..len]);
-                rest = &rest[len..];
-            }
-        }
-
-        results
+        ext::deframer_process_bulk(self, data)
     }
 
     /// Process a single byte
-    fn process_byte(&mut self, byte: u8) -> Option<DeframeResult> {
+    pub(super) fn process_byte(&mut self, byte: u8) -> Option<DeframeResult> {
         if byte == FLAG {
             if self.in_frame && !self.buffer.is_empty() {
                 // End of frame
@@ -402,39 +361,7 @@ impl Default for Deframer {
 mod tests {
     use super::*;
 
-    #[test]
-    fn bulk_deframer_matches_scalar_across_fragments_and_limits() {
-        // Arbitrary streams, including noise, escapes split across reads,
-        // consecutive flags and frames exceeding the receive ceiling.
-        for cap in [0, 1, 8, 600, 16384] {
-            for chunk in [1, 2, 7, 1024, 17000] {
-                let mut seed = 0x12345678u32;
-                let mut data = Vec::new();
-                for i in 0..40000 {
-                    seed ^= seed << 13;
-                    seed ^= seed >> 17;
-                    seed ^= seed << 5;
-                    data.push(match i % 97 {
-                        0 => FLAG,
-                        1 | 2 => ESCAPE,
-                        _ => seed as u8,
-                    });
-                }
-                let mut bulk = Deframer::with_max_frame(cap);
-                let mut scalar = Deframer::with_max_frame(cap);
-                for part in data.chunks(chunk) {
-                    let expected: Vec<_> = part
-                        .iter()
-                        .filter_map(|&b| scalar.process_byte(b))
-                        .collect();
-                    assert_eq!(bulk.process(part), expected, "cap={cap}, chunk={chunk}");
-                    assert_eq!(bulk.buffer, scalar.buffer);
-                    assert_eq!(bulk.in_frame, scalar.in_frame);
-                    assert_eq!(bulk.escape_next, scalar.escape_next);
-                }
-            }
-        }
-    }
+    mod ext;
 
     /// Regression (Codeberg #271): a peer that opens a frame and then streams
     /// bytes containing no FLAG octet must not grow the buffer without limit.
