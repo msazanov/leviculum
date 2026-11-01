@@ -13,10 +13,15 @@
 //! (called at shutdown from the driver). Ratchet data uses write-through
 //! persistence (written immediately on each update).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+mod ext;
+use ext::RatchetWriteFilter;
+#[cfg(test)]
+pub(super) use ext::RATCHET_REFRESH_MS;
 
 use leviculum_core::cached_announce_app_data;
 use leviculum_core::constants::{IDENTITY_KEY_SIZE, TRUNCATED_HASHBYTES};
@@ -53,10 +58,6 @@ use leviculum_core::ratchet_store::RatchetStore;
 /// ten times larger.
 pub(crate) const FILE_STORAGE_PACKET_HASH_CAP: usize = 100_000;
 
-/// Minimum interval between disk rewrites of an unchanged known ratchet (the
-/// expiry is 30 days; this only bounds how stale the on-disk timestamp gets).
-const RATCHET_REFRESH_MS: u64 = 3_600_000;
-
 pub struct Storage {
     // Snapshotted by take_flush_snapshot: the off-lock flush writer builds
     // its own store handles from this root (leviculum#44).
@@ -70,11 +71,7 @@ pub struct Storage {
     // Spelled out rather than `KnownDestTable`: the census test finds
     // collections by their type name.
     known_dest_entries: Arc<BTreeMap<[u8; TRUNCATED_HASHBYTES], KnownDestEntry>>,
-    // When each known ratchet was last written to disk (monotonic ms). An
-    // announce re-delivers the same ratchet every few minutes only to refresh
-    // its expiry; rewriting the file each time costs a synchronous
-    // write+rename on the transport thread, which stalls on a slow disk.
-    ratchet_saved_ms: HashMap<[u8; TRUNCATED_HASHBYTES], u64>,
+    ratchet_filter: RatchetWriteFilter,
     // Packet hash state (two-generation rotation)
     packet_cache: HashSet<[u8; 32]>,
     packet_cache_prev: HashSet<[u8; 32]>,
@@ -191,14 +188,13 @@ impl Storage {
 
         // Load ratchets via store
         let mut ratchet_store = FileRatchetStore::new(&base_path);
-        let mut ratchet_saved_ms = HashMap::new();
+        let mut ratchet_filter = RatchetWriteFilter::new();
         match ratchet_store.load_known_ratchets() {
             Ok(ratchets) => {
                 for (dest_hash, entry) in ratchets {
                     let mono_ms = wallclock_secs_to_mono_ms(entry.received_at_secs, mono_offset_ms);
                     inner.remember_known_ratchet(dest_hash, entry.ratchet, mono_ms);
-                    // the file on disk carries exactly this timestamp
-                    ratchet_saved_ms.insert(dest_hash, mono_ms);
+                    ratchet_filter.record_loaded(dest_hash, mono_ms);
                 }
             }
             Err(error) => tracing::warn!("Failed to load known ratchets: {error}"),
@@ -219,7 +215,7 @@ impl Storage {
             inner,
             ratchet_store,
             known_dest_entries: Arc::new(known_dest_entries),
-            ratchet_saved_ms,
+            ratchet_filter,
             packet_cache,
             packet_cache_prev: HashSet::new(),
             packet_hash_cap,
@@ -1264,7 +1260,7 @@ impl leviculum_core::traits::Storage for Storage {
         // One entry per known ratchet; removed with it on expiry.
         counts.push(CollectionCount::unbounded(
             "ratchet_saved_ms",
-            self.ratchet_saved_ms.len(),
+            self.ratchet_filter.len(),
         ));
         counts
     }
@@ -1337,16 +1333,7 @@ impl leviculum_core::traits::Storage for Storage {
             n, raw, est
         );
 
-        // ratchet_saved_ms: HashMap<[u8; 16], u64>, 1.5x
-        let n = self.ratchet_saved_ms.len();
-        let raw = (n * (TRUNCATED_HASHBYTES + std::mem::size_of::<u64>())) as u64;
-        let est = raw * 3 / 2;
-        total += est;
-        let _ = writeln!(
-            s,
-            "ratchet_saved_ms: {} entries, raw {} bytes, estimated {} bytes (HashMap 1.5x)",
-            n, raw, est
-        );
+        self.ratchet_filter.append_diagnostic_dump(&mut s, &mut total);
 
         // Delegate remaining collections to inner MemoryStorage
         let (s2, total2) = self.inner.diagnostic_dump_non_packet_cache();
@@ -1369,25 +1356,17 @@ impl leviculum_core::traits::Storage for Storage {
         ratchet: [u8; leviculum_core::constants::RATCHET_SIZE],
         received_at_ms: u64,
     ) {
-        let path = self
-            .base_path
-            .join(crate::file_ratchet_store::RATCHETS_DIR)
-            .join(hex_encode(&dest_hash));
-        if crate::write_behind::take_write_failure(&path) {
-            self.ratchet_saved_ms.remove(&dest_hash);
-        }
         let unchanged = self.inner.get_known_ratchet(&dest_hash) == Some(ratchet);
         self.inner
             .remember_known_ratchet(dest_hash, ratchet, received_at_ms);
 
-        // Same key again: the disk copy only needs a fresher timestamp, and the
-        // expiry is 30 days, so refresh it at most once per RATCHET_REFRESH_MS.
-        if unchanged {
-            if let Some(saved) = self.ratchet_saved_ms.get(&dest_hash) {
-                if received_at_ms.saturating_sub(*saved) < RATCHET_REFRESH_MS {
-                    return;
-                }
-            }
+        if !self.ratchet_filter.should_write(
+            &self.base_path,
+            &dest_hash,
+            unchanged,
+            received_at_ms,
+        ) {
+            return;
         }
 
         // Write-through to disk via ratchet store
@@ -1398,12 +1377,12 @@ impl leviculum_core::traits::Storage for Storage {
         };
         match self.ratchet_store.save_known_ratchet(&dest_hash, &entry) {
             Ok(()) => {
-                self.ratchet_saved_ms.insert(dest_hash, received_at_ms);
+                self.ratchet_filter.record_saved(dest_hash, received_at_ms);
             }
             Err(e) => {
                 // A changed in-memory key must not inherit the refresh window
                 // of the old on-disk key after a rejected enqueue.
-                self.ratchet_saved_ms.remove(&dest_hash);
+                self.ratchet_filter.record_failed(&dest_hash);
                 tracing::warn!("Failed to persist known ratchet: {e}");
             }
         }
@@ -1424,7 +1403,7 @@ impl leviculum_core::traits::Storage for Storage {
             if let Err(e) = self.ratchet_store.delete_known_ratchet(hash) {
                 tracing::warn!("Failed to queue expired known ratchet deletion: {e}");
             }
-            self.ratchet_saved_ms.remove(hash);
+            self.ratchet_filter.record_expired(hash);
         }
 
         count
@@ -2403,7 +2382,7 @@ mod tests {
         let ratchet = [0xaa; 32];
         CoreStorage::remember_known_ratchet(&mut storage, hash, ratchet, 5000);
 
-        // Verify file exists (запись идёт в фоновом потоке, дождаться её)
+        // Verify file exists (queued writes settle off-thread, sync first)
         crate::write_behind::sync();
         let hex = hex_encode(&hash);
         let file_path = path.path().join(RATCHETS_DIR).join(&hex);
@@ -2416,152 +2395,7 @@ mod tests {
         assert_eq!(loaded, Some(ratchet), "Ratchet should survive restart");
     }
 
-    #[test]
-    fn test_unchanged_known_ratchet_is_not_rewritten_within_refresh_window() {
-        let (mut storage, path) = unique_temp_storage("kr_skip");
-        let hash = [0x21; TRUNCATED_HASHBYTES];
-        let file_path = path.path().join(RATCHETS_DIR).join(hex_encode(&hash));
-
-        CoreStorage::remember_known_ratchet(&mut storage, hash, [0xaa; 32], 5_000);
-        crate::write_behind::sync();
-        assert!(file_path.exists());
-        // mark the file so a rewrite is detectable
-        std::fs::write(&file_path, b"marker").unwrap();
-
-        // same key again, well inside the window: memory is refreshed, disk is not touched
-        CoreStorage::remember_known_ratchet(
-            &mut storage,
-            hash,
-            [0xaa; 32],
-            5_000 + RATCHET_REFRESH_MS - 1,
-        );
-        crate::write_behind::sync();
-        assert_eq!(
-            std::fs::read(&file_path).unwrap(),
-            b"marker",
-            "unchanged ratchet must not be rewritten"
-        );
-        assert_eq!(
-            CoreStorage::get_known_ratchet(&storage, &hash),
-            Some([0xaa; 32])
-        );
-
-        // window elapsed: timestamp refresh reaches the disk
-        CoreStorage::remember_known_ratchet(
-            &mut storage,
-            hash,
-            [0xaa; 32],
-            5_000 + RATCHET_REFRESH_MS,
-        );
-        crate::write_behind::sync();
-        assert_ne!(
-            std::fs::read(&file_path).unwrap(),
-            b"marker",
-            "stale timestamp must be refreshed"
-        );
-
-        // a different key is always written at once
-        std::fs::write(&file_path, b"marker").unwrap();
-        CoreStorage::remember_known_ratchet(
-            &mut storage,
-            hash,
-            [0xbb; 32],
-            5_000 + RATCHET_REFRESH_MS + 1,
-        );
-        crate::write_behind::sync();
-        assert_ne!(
-            std::fs::read(&file_path).unwrap(),
-            b"marker",
-            "changed ratchet must be written"
-        );
-        assert_eq!(
-            CoreStorage::get_known_ratchet(&storage, &hash),
-            Some([0xbb; 32])
-        );
-
-        // after a restart the loaded timestamp counts as already saved
-        drop(storage);
-        let mut storage2 = Storage::new(&path).unwrap();
-        std::fs::write(&file_path, b"marker").unwrap();
-        let ts = 5_000 + RATCHET_REFRESH_MS + 1;
-        let mono = wallclock_secs_to_mono_ms(
-            crate::storage::mono_to_wallclock_secs(ts, storage2.mono_offset_ms),
-            storage2.mono_offset_ms,
-        );
-        CoreStorage::remember_known_ratchet(&mut storage2, hash, [0xbb; 32], mono + 10);
-        crate::write_behind::sync();
-        assert_eq!(
-            std::fs::read(&file_path).unwrap(),
-            b"marker",
-            "freshly loaded ratchet must not be rewritten at once"
-        );
-        let _ = std::fs::remove_dir_all(&path);
-    }
-
-    #[test]
-    fn changed_ratchet_enqueue_failure_does_not_suppress_the_next_observation() {
-        let (mut storage, path) = unique_temp_storage("kr_retry_enqueue");
-        let hash = [0x2A; TRUNCATED_HASHBYTES];
-        let dir = path.path().join(RATCHETS_DIR);
-        CoreStorage::remember_known_ratchet(&mut storage, hash, [0xA1; 32], 1_000);
-        crate::write_behind::sync();
-
-        std::fs::remove_file(dir.join(hex_encode(&hash))).unwrap();
-        std::fs::remove_dir(&dir).unwrap();
-        std::fs::write(&dir, b"not a directory").unwrap();
-        CoreStorage::remember_known_ratchet(&mut storage, hash, [0xB2; 32], 10_000);
-        std::fs::remove_file(&dir).unwrap();
-        std::fs::create_dir(&dir).unwrap();
-
-        // Same key well inside the refresh window: this must retry because the
-        // first changed-key enqueue failed and cannot inherit A's saved time.
-        CoreStorage::remember_known_ratchet(&mut storage, hash, [0xB2; 32], 70_000);
-        crate::write_behind::sync();
-        let restored = Storage::new(path.path()).unwrap();
-        assert_eq!(
-            CoreStorage::get_known_ratchet(&restored, &hash),
-            Some([0xB2; 32])
-        );
-    }
-
-    /// The enqueue succeeds, then the worker fails (directory not writable):
-    /// the later observation of the same key must retry instead of inheriting
-    /// the refresh window of data that never reached disk.
-    #[cfg(unix)]
-    #[test]
-    fn async_known_ratchet_write_failure_is_retried_on_the_next_observation() {
-        use std::os::unix::fs::PermissionsExt;
-        if unsafe { libc::geteuid() } == 0 {
-            return; // root ignores directory mode bits
-        }
-        let (mut storage, path) = unique_temp_storage("kr_retry_async");
-        let hash = [0x2B; TRUNCATED_HASHBYTES];
-        let dir = path.path().join(RATCHETS_DIR);
-        CoreStorage::remember_known_ratchet(&mut storage, hash, [0xA1; 32], 1_000);
-        crate::write_behind::sync();
-
-        let release = crate::write_behind::pause_global();
-        CoreStorage::remember_known_ratchet(&mut storage, hash, [0xB2; 32], 10_000);
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
-        release.send(()).unwrap();
-        crate::write_behind::sync();
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let on_disk = Storage::new(path.path()).unwrap();
-        assert_eq!(
-            CoreStorage::get_known_ratchet(&on_disk, &hash),
-            Some([0xA1; 32]),
-            "the failed worker write left the old key on disk"
-        );
-
-        // Same key, well inside the refresh window of the (lost) save.
-        CoreStorage::remember_known_ratchet(&mut storage, hash, [0xB2; 32], 70_000);
-        crate::write_behind::sync();
-        let restored = Storage::new(path.path()).unwrap();
-        assert_eq!(
-            CoreStorage::get_known_ratchet(&restored, &hash),
-            Some([0xB2; 32])
-        );
-    }
+    mod ext;
 
     #[test]
     fn test_dest_ratchet_keys_persist_to_disk() {
