@@ -2949,43 +2949,16 @@ impl ReticulumNode {
         dest_hash: &DestinationHash,
         dest_signing_key: &[u8; 32],
     ) -> Result<LinkHandle, Error> {
-        self.connect_inner(dest_hash, dest_signing_key, None).await
-    }
-
-    /// [`Self::connect`] with an explicit cipher for this link only.
-    pub async fn connect_with_cipher(
-        &self,
-        dest_hash: &DestinationHash,
-        dest_signing_key: &[u8; 32],
-        cipher: leviculum_core::LinkCipher,
-    ) -> Result<LinkHandle, Error> {
-        self.connect_inner(dest_hash, dest_signing_key, Some(cipher)).await
-    }
-
-    async fn connect_inner(
-        &self,
-        dest_hash: &DestinationHash,
-        dest_signing_key: &[u8; 32],
-        cipher: Option<leviculum_core::LinkCipher>,
-    ) -> Result<LinkHandle, Error> {
         let first_hop_timeout_ms = self.shared_instance_first_hop_timeout_ms(dest_hash).await;
         // Request link from NodeCore. A refusal by the configured link cap
         // (`max_links`, #388) surfaces as `Error::Link(TableFull)`.
         let link_id = dispatch_committed(&self.action_dispatch_tx, || {
             let mut inner = self.inner.lock_recover();
-            let (link_id, _was_routed, output) = match cipher {
-                Some(cipher) => inner.connect_with_cipher(
-                    *dest_hash,
-                    dest_signing_key,
-                    first_hop_timeout_ms,
-                    cipher,
-                )?,
-                None => inner.connect_with_first_hop_timeout(
-                    *dest_hash,
-                    dest_signing_key,
-                    first_hop_timeout_ms,
-                )?,
-            };
+            let (link_id, _was_routed, output) = inner.connect_with_first_hop_timeout(
+                *dest_hash,
+                dest_signing_key,
+                first_hop_timeout_ms,
+            )?;
             Ok((link_id, output))
         })
         .await?;
@@ -3036,49 +3009,6 @@ impl ReticulumNode {
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
     {
         self.spawn_byte_channel_with(name, stream, crate::interfaces::ByteChannelOptions::default())
-    }
-
-    /// Like [`spawn_byte_channel`](Self::spawn_byte_channel) with explicit
-    /// [`ByteChannelOptions`] (fork addition: HW_MTU, channel capacity and read
-    /// buffer size are tunables instead of pipe-sized constants).
-    pub fn spawn_byte_channel_with<S>(
-        &self,
-        name: &str,
-        stream: S,
-        options: crate::interfaces::ByteChannelOptions,
-    ) -> Result<crate::interfaces::ByteChannelHandle, Error>
-    where
-        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
-    {
-        use std::sync::atomic::Ordering;
-
-        let runtime = self.runtime.as_ref().ok_or(Error::NotRunning)?;
-        let new_iface_tx = self.new_iface_tx.as_ref().ok_or(Error::NotRunning)?;
-        let next_id = self.iface_id_counter.as_ref().ok_or(Error::NotRunning)?;
-
-        let id = InterfaceId(next_id.fetch_add(1, Ordering::Relaxed));
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-
-        let handle = {
-            let _enter = runtime.enter();
-            crate::interfaces::byte_channel::spawn_byte_channel_interface(
-                crate::interfaces::byte_channel::ByteChannelConfig {
-                    id,
-                    name: name.to_string(),
-                    buffer_size: options.buffer_size,
-                    hw_mtu: options.hw_mtu,
-                    read_buf_size: options.read_buf_size,
-                    shutdown: Some(shutdown_rx),
-                },
-                stream,
-            )
-        };
-
-        new_iface_tx
-            .try_send(handle)
-            .map_err(|_| Error::NotRunning)?;
-
-        Ok(crate::interfaces::ByteChannelHandle::new(id, shutdown_tx))
     }
 
     /// Obtain a writable handle for an already-established inbound link.

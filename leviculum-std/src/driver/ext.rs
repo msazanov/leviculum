@@ -92,6 +92,74 @@ impl ReticulumNode {
             .map_err(|_| Error::NotRunning)?;
         Ok(())
     }
+
+    /// [`Self::connect`] with an explicit cipher for this link only.
+    pub async fn connect_with_cipher(
+        &self,
+        dest_hash: &leviculum_core::DestinationHash,
+        dest_signing_key: &[u8; 32],
+        cipher: leviculum_core::LinkCipher,
+    ) -> Result<LinkHandle, Error> {
+        let first_hop_timeout_ms = self.shared_instance_first_hop_timeout_ms(dest_hash).await;
+        let link_id = super::dispatch_committed(&self.action_dispatch_tx, || {
+            let mut inner = self.inner.lock_recover();
+            let (link_id, _was_routed, output) = inner.connect_with_cipher(
+                *dest_hash,
+                dest_signing_key,
+                first_hop_timeout_ms,
+                cipher,
+            )?;
+            Ok((link_id, output))
+        })
+        .await?;
+
+        Ok(LinkHandle::new(
+            link_id,
+            Arc::clone(&self.inner),
+            self.action_dispatch_tx.clone(),
+            Arc::clone(&self.completions),
+        ))
+    }
+
+    /// Like [`spawn_byte_channel`](Self::spawn_byte_channel) with explicit
+    /// [`ByteChannelOptions`] (fork addition: HW_MTU, channel capacity and read
+    /// buffer size are tunables instead of pipe-sized constants).
+    pub fn spawn_byte_channel_with<S>(
+        &self,
+        name: &str,
+        stream: S,
+        options: crate::interfaces::ByteChannelOptions,
+    ) -> Result<crate::interfaces::ByteChannelHandle, Error>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+    {
+        use std::sync::atomic::Ordering;
+
+        let runtime = self.runtime.as_ref().ok_or(Error::NotRunning)?;
+        let new_iface_tx = self.new_iface_tx.as_ref().ok_or(Error::NotRunning)?;
+        let next_id = self.iface_id_counter.as_ref().ok_or(Error::NotRunning)?;
+
+        let id = InterfaceId(next_id.fetch_add(1, Ordering::Relaxed));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let handle = {
+            let _enter = runtime.enter();
+            crate::interfaces::byte_channel::spawn_byte_channel_interface(
+                crate::interfaces::byte_channel::ByteChannelConfig {
+                    id,
+                    name: name.to_string(),
+                    buffer_size: options.buffer_size,
+                    hw_mtu: options.hw_mtu,
+                    read_buf_size: options.read_buf_size,
+                    shutdown: Some(shutdown_rx),
+                },
+                stream,
+            )
+        };
+        new_iface_tx
+            .try_send(handle)
+            .map_err(|_| Error::NotRunning)?;
+        Ok(crate::interfaces::ByteChannelHandle::new(id, shutdown_tx))
+    }
 }
 
 /// Link tunnel datagrams: nothing to precompute. In particular no payload hash,
