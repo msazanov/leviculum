@@ -18,6 +18,8 @@ use leviculum_core::SendError;
 use super::StdNodeCore;
 use crate::error::Error;
 
+mod ext;
+
 /// Async handle for a Link (send-only)
 ///
 /// `LinkHandle` provides async write operations for a link.
@@ -84,21 +86,6 @@ impl LinkHandle {
     /// Check if the handle is closed
     pub fn is_closed(&self) -> bool {
         self.closed
-    }
-
-    /// Send one unreliable datagram (an IP packet of the tunnel) on this link.
-    ///
-    /// Sealed by the link cipher and sent once: no window, no ordering, no retransmission, no
-    /// receipt. Returns when the packet has been handed to the driver; it never waits for the peer.
-    pub async fn send_datagram(&self, data: &[u8]) -> Result<(), Error> {
-        if self.closed {
-            return Err(Error::NotRunning);
-        }
-        dispatch_datagram(&self.action_dispatch_tx, || {
-            let mut core = self.inner.lock_recover();
-            Ok(core.send_link_tunnel(&self.link_id, data)?)
-        })
-        .await
     }
 
     /// Try to send data on this link (non-blocking)
@@ -179,17 +166,6 @@ impl LinkHandle {
         self.closed = true;
         result
     }
-}
-
-/// Reserve dispatch capacity before mutating the core. Tunnel datagrams remain
-/// unreliable and are committed exactly once; cancellation before reservation
-/// runs `commit` zero times, and cancellation after reservation cannot lose its
-/// output because `Permit::send` is synchronous.
-async fn dispatch_datagram(
-    action_dispatch_tx: &mpsc::Sender<TickOutput>,
-    commit: impl FnOnce() -> Result<TickOutput, Error>,
-) -> Result<(), Error> {
-    super::dispatch_committed(action_dispatch_tx, || commit().map(|output| ((), output))).await
 }
 
 impl Drop for LinkHandle {
@@ -364,51 +340,5 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// Cancellation while the dispatch queue is full happens before core
-    /// mutation (and therefore before GCM nonce reservation). After capacity is
-    /// made available, a new call commits once and its datagram output is
-    /// delivered; no application retransmission is performed by this helper.
-    #[tokio::test(flavor = "current_thread")]
-    async fn test_datagram_cancelled_under_backpressure_does_not_commit() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let (tx, mut rx) = mpsc::channel::<TickOutput>(1);
-        tx.try_send(TickOutput::empty())
-            .expect("fill dispatch queue");
-        let commits = Arc::new(AtomicUsize::new(0));
-        let task_tx = tx.clone();
-        let task_commits = Arc::clone(&commits);
-        let task = tokio::spawn(async move {
-            dispatch_datagram(&task_tx, || {
-                task_commits.fetch_add(1, Ordering::SeqCst);
-                Ok(TickOutput::empty())
-            })
-            .await
-        });
-
-        for _ in 0..10 {
-            tokio::task::yield_now().await;
-        }
-        assert!(!task.is_finished(), "full queue must apply backpressure");
-        assert_eq!(commits.load(Ordering::SeqCst), 0);
-        task.abort();
-        let _ = task.await;
-        assert_eq!(
-            commits.load(Ordering::SeqCst),
-            0,
-            "cancelled call did not commit"
-        );
-
-        let _ = rx.try_recv().expect("remove queue filler");
-        let committed = Arc::clone(&commits);
-        dispatch_datagram(&tx, || {
-            committed.fetch_add(1, Ordering::SeqCst);
-            Ok(TickOutput::empty())
-        })
-        .await
-        .expect("resumed datagram dispatch");
-        assert_eq!(commits.load(Ordering::SeqCst), 1);
-        assert!(rx.try_recv().is_ok(), "committed output is delivered");
-        assert!(rx.try_recv().is_err(), "exactly one output is delivered");
-    }
+    mod ext;
 }
