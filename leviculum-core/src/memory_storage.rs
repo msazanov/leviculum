@@ -39,6 +39,9 @@ use crate::storage_types::{
 };
 use crate::traits::Storage;
 
+mod ext;
+use ext::PathExpiryCache;
+
 /// Default identity capacity for desktop/Linux.
 /// 50k identities at ~144 bytes × 3x BTreeMap overhead = ~21 MB max.
 const DEFAULT_IDENTITY_CAP: usize = 50_000;
@@ -239,19 +242,7 @@ pub struct MemoryStorage {
     /// day expiry never fires on a node up for less than a week, so this
     /// ceiling is usually the only one acting.
     path_table: BoundedMap<[u8; TRUNCATED_HASHBYTES], PathEntry>,
-    /// Cached `min(expires_ms)` over `path_table`, for `earliest_path_expiry`.
-    ///
-    /// `Transport::next_deadline` runs after every inbound packet, and a scan
-    /// of a public-mesh-sized table (tens of thousands of paths) per packet
-    /// was the hottest function on relay nodes (profiled at 12-20% of
-    /// samples even when idle). `None` = unknown, recomputed lazily on the
-    /// next query; `Some(None)` = table empty. Inserts keep it exact in O(1);
-    /// it is dropped only when the entry holding the minimum leaves (refresh,
-    /// eviction, removal) or on bulk `retain`/`clear`.
-    path_expiry_min: core::cell::Cell<Option<Option<u64>>>,
-    /// Test-only: how many times the minimum was recomputed by a full scan.
-    #[cfg(test)]
-    path_expiry_scans: core::cell::Cell<u64>,
+    path_expiry_cache: PathExpiryCache,
     /// Per-path quality state.
     ///
     /// **Eviction: oldest first.** Bounded by `path_cap` because
@@ -461,9 +452,7 @@ impl MemoryStorage {
             packet_cache: BTreeSet::new(),
             packet_cache_prev: BTreeSet::new(),
             path_table: BoundedMap::new(caps.path_cap),
-            path_expiry_min: core::cell::Cell::new(Some(None)),
-            #[cfg(test)]
-            path_expiry_scans: core::cell::Cell::new(0),
+            path_expiry_cache: PathExpiryCache::new(),
             path_states: BoundedMap::new(caps.path_cap),
             reverse_table: BoundedMap::new(caps.reverse_cap),
             departed_reverse_ifaces: BTreeSet::new(),
@@ -560,7 +549,7 @@ impl MemoryStorage {
         self.packet_cache.clear();
         self.packet_cache_prev.clear();
         self.path_table.clear();
-        self.path_expiry_min.set(Some(None));
+        self.path_expiry_cache.reset();
         self.path_states.clear();
         self.reverse_table.clear();
         self.departed_reverse_ifaces.clear();
@@ -1019,24 +1008,13 @@ impl Storage for MemoryStorage {
         let new_exp = entry.expires_ms;
         let old_exp = self.path_table.get(&dest_hash).map(|e| e.expires_ms);
         let evicted = self.path_table.insert(dest_hash, entry);
-        if let Some(cur) = self.path_expiry_min.get() {
-            // the refreshed or evicted entry may have held the minimum
-            let lost_min = old_exp.is_some_and(|o| Some(o) == cur)
-                || evicted.as_ref().is_some_and(|(_, v)| Some(v.expires_ms) == cur);
-            self.path_expiry_min.set(if lost_min {
-                None
-            } else {
-                Some(Some(cur.map_or(new_exp, |c| c.min(new_exp))))
-            });
-        }
+        self.path_expiry_cache.on_insert(old_exp, new_exp, evicted.map(|(_, v)| v.expires_ms));
     }
 
     fn remove_path(&mut self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> Option<PathEntry> {
         let removed = self.path_table.remove(dest_hash);
-        if let (Some(e), Some(cur)) = (removed.as_ref(), self.path_expiry_min.get()) {
-            if Some(e.expires_ms) == cur {
-                self.path_expiry_min.set(None);
-            }
+        if let Some(e) = removed.as_ref() {
+            self.path_expiry_cache.on_remove(e.expires_ms);
         }
         removed
     }
@@ -1047,7 +1025,6 @@ impl Storage for MemoryStorage {
 
     fn expire_paths(&mut self, now_ms: u64) -> Vec<[u8; TRUNCATED_HASHBYTES]> {
         let mut expired = Vec::new();
-        // минимум считаем в том же проходе: сброс кэша здесь заставлял бы делать второй полный скан
         let mut min_exp: Option<u64> = None;
         self.path_table.retain(|hash, entry| {
             if entry.expires_ms < now_ms {
@@ -1058,19 +1035,13 @@ impl Storage for MemoryStorage {
                 true
             }
         });
-        self.path_expiry_min.set(Some(min_exp));
+        self.path_expiry_cache.set_min(min_exp);
         expired
     }
 
     fn earliest_path_expiry(&self) -> Option<u64> {
-        if let Some(v) = self.path_expiry_min.get() {
-            return v;
-        }
-        let v = self.path_table.values().map(|e| e.expires_ms).min();
-        self.path_expiry_min.set(Some(v));
-        #[cfg(test)]
-        self.path_expiry_scans.set(self.path_expiry_scans.get() + 1);
-        v
+        self.path_expiry_cache
+            .get_or_compute(|| self.path_table.values().map(|e| e.expires_ms).min())
     }
 
     fn path_entries(&self) -> Vec<([u8; TRUNCATED_HASHBYTES], PathEntry)> {
@@ -1527,7 +1498,7 @@ impl Storage for MemoryStorage {
                 true
             }
         });
-        self.path_expiry_min.set(Some(min_exp));
+        self.path_expiry_cache.set_min(min_exp);
         removed
     }
 
@@ -2021,82 +1992,7 @@ mod tests {
         assert_eq!(s.path_count(), 0);
     }
 
-    /// The cache must be reused: repeated queries must not rescan the table.
-    #[test]
-    fn cached_min_is_not_recomputed_on_every_query() {
-        let mut s = MemoryStorage::with_caps(TableCaps { path_cap: 16, ..TableCaps::default() });
-        assert_eq!(s.earliest_path_expiry(), None);
-        let scans = s.path_expiry_scans.get();
-        for _ in 0..100 {
-            assert_eq!(s.earliest_path_expiry(), None);
-        }
-        assert_eq!(s.path_expiry_scans.get(), scans, "кэш пересчитывался на каждом запросе");
-        s.set_path(
-            [1u8; TRUNCATED_HASHBYTES],
-            PathEntry { hops: 1, expires_ms: 500, interface_index: 0, random_blobs: Vec::new(), next_hop: None, via_peer: None },
-        );
-        assert_eq!(s.earliest_path_expiry(), Some(500));
-        let scans = s.path_expiry_scans.get();
-        for _ in 0..100 {
-            assert_eq!(s.earliest_path_expiry(), Some(500));
-        }
-        assert_eq!(s.path_expiry_scans.get(), scans, "кэш пересчитывался на каждом запросе");
-        // expire_paths считает минимум в своём проходе: следующий запрос не должен сканировать заново
-        s.expire_paths(600);
-        let scans = s.path_expiry_scans.get();
-        assert_eq!(s.earliest_path_expiry(), None);
-        assert_eq!(s.path_expiry_scans.get(), scans, "после expire_paths кэш пересчитывался лишний раз");
-    }
-
-    /// The cached minimum must equal a full scan after any mix of inserts,
-    /// refreshes (same key, new expiry), evictions at the cap, removals,
-    /// interface purges and expiry sweeps.
-    #[test]
-    fn earliest_path_expiry_cache_matches_full_scan() {
-        let mut s = MemoryStorage::with_caps(TableCaps {
-            path_cap: 16,
-            ..TableCaps::default()
-        });
-        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
-        let mut next = || {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            x
-        };
-        let scan = |s: &MemoryStorage| s.path_table.values().map(|e| e.expires_ms).min();
-        for step in 0..20_000u32 {
-            let r = next();
-            let key = [(r % 24) as u8; TRUNCATED_HASHBYTES];
-            match (r >> 8) % 10 {
-                0..=5 => s.set_path(
-                    key,
-                    PathEntry {
-                        hops: 1,
-                        expires_ms: 1_000 + (r >> 16) % 500,
-                        interface_index: ((r >> 32) % 3) as usize,
-                        random_blobs: Vec::new(),
-                        next_hop: None,
-                        via_peer: None,
-                    },
-                ),
-                6 | 7 => {
-                    s.remove_path(&key);
-                }
-                8 => {
-                    s.remove_paths_for_interface(((r >> 40) % 3) as usize);
-                }
-                _ => {
-                    s.expire_paths(1_000 + (r >> 20) % 500);
-                }
-            }
-            if step % 3 == 0 {
-                assert_eq!(s.earliest_path_expiry(), scan(&s), "step {step}");
-            }
-        }
-        s.clear_all();
-        assert_eq!(s.earliest_path_expiry(), None);
-    }
+    mod ext;
 
     #[test]
     fn test_path_expiry() {
