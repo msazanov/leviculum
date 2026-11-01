@@ -30,7 +30,7 @@ use leviculum_core::discovery::DiscoveredInterfaceRecord;
 use leviculum_core::discovery::InterfaceDescriptor;
 
 mod ext;
-use ext::{bump_generation, decode_record_bytes};
+use ext::{bump_generation, decode_record_bytes, expire_records};
 pub(crate) use ext::{note_record_job_settled, record_version};
 
 use crate::config::InterfaceConfig;
@@ -266,15 +266,15 @@ impl FileStamp {
 }
 
 /// One record file as last decoded.
-enum CachedEntry {
+pub(super) enum CachedEntry {
     Record(Arc<DiscoveredInterfaceRecord>),
     /// Undecodable, with the fingerprint of the bytes (Codeberg #157).
     Corrupt(u64),
 }
 
-struct CachedFile {
+pub(super) struct CachedFile {
     stamp: FileStamp,
-    entry: CachedEntry,
+    pub(super) entry: CachedEntry,
 }
 
 struct DirCache {
@@ -382,57 +382,9 @@ impl DirCache {
     /// the sorted list if anything was revalidated or removed. Otherwise only
     /// re-sort when the age-derived status moved a record out of order.
     fn assemble(&mut self, dir: &Path, now: f64, rebuild: bool) {
-        let expired: Vec<OsString> = self
-            .files
-            .iter()
-            .filter(|(_, file)| {
-                matches!(&file.entry, CachedEntry::Record(record) if record.should_remove(now))
-            })
-            .map(|(name, _)| name.clone())
-            .collect();
-        for name in &expired {
-            let Some(expected_version) = self.files.get(name).and_then(|file| match &file.entry {
-                CachedEntry::Record(record) => Some(record_version(record)),
-                CachedEntry::Corrupt(_) => None,
-            }) else {
-                continue;
-            };
-            // The worker compares the current on-disk record immediately
-            // before unlink. A queued write before this job is therefore
-            // observed even if it settled after this scan's cache snapshot.
-            match crate::write_behind::remove_discovery_if_version(
-                dir.join(name),
-                expected_version,
-                now,
-            ) {
-                Ok(false) => {
-                    // A newer announce is already queued for this filename.
-                    // Refresh the listing from its read-your-writes bytes so
-                    // the stale on-disk record is neither deleted nor served.
-                    let path = dir.join(name);
-                    if let Ok(bytes) = crate::write_behind::read_latest(&path) {
-                        if let Some(entry) = decode_record_bytes(&path, &bytes) {
-                            if let Some(file) = self.files.get_mut(name) {
-                                file.entry = entry;
-                            }
-                        }
-                    }
-                }
-                Ok(true) => {
-                    // Hide the expired scan result now. After the worker has
-                    // compared and settled this job it bumps the directory
-                    // generation, so the next listing re-reads disk even if
-                    // deletion was skipped for a newer version.
-                    self.files.remove(name);
-                }
-                Err(error) => {
-                    tracing::warn!("discovery record removal was not queued: {error}");
-                    self.files.remove(name);
-                }
-            }
-        }
+        let had_expired = expire_records(&mut self.files, dir, now);
 
-        if rebuild || !expired.is_empty() {
+        if rebuild || had_expired {
             let mut records: Vec<Arc<DiscoveredInterfaceRecord>> = self
                 .files
                 .values()
