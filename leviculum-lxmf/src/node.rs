@@ -381,6 +381,8 @@ pub struct LxmfNode {
     /// start an uncounted link (leviculum 1110).
     wanted_links: BTreeSet<DestinationHash>,
     pending_links: BTreeMap<DestinationHash, LinkId>,
+    /// Destinations whose outgoing direct Link must use standard CBC (links crossing stock Reticulum transports).
+    cbc_links_to: BTreeSet<DestinationHash>,
     link_destinations: BTreeMap<LinkId, DestinationHash>,
     direct_links: BTreeMap<DestinationHash, LinkId>,
     lxmf_links: BTreeSet<LinkId>,
@@ -555,6 +557,7 @@ impl LxmfNode {
             config,
             wanted_links: BTreeSet::new(),
             pending_links: BTreeMap::new(),
+            cbc_links_to: BTreeSet::new(),
             link_destinations: BTreeMap::new(),
             direct_links: BTreeMap::new(),
             lxmf_links: BTreeSet::new(),
@@ -658,6 +661,12 @@ impl LxmfNode {
         })
     }
 
+    /// Make later direct Links to `destination` use standard CBC. For peers reached through stock Reticulum transports,
+    /// which do not carry the non-standard cipher. The message itself stays end-to-end encrypted by LXMF. Bounded (64).
+    pub fn use_cbc_links_to(&mut self, destination: DestinationHash) {
+        if self.cbc_links_to.len() < 64 { self.cbc_links_to.insert(destination); }
+    }
+
     /// Ensure that a direct link exists, requesting a path first when needed.
     pub fn ensure_direct_link<R, C, S>(
         &mut self,
@@ -723,9 +732,12 @@ impl LxmfNode {
         // A link-cap refusal (`max_links`, #388) reads as "no direct link
         // right now": the caller's existing retry path re-attempts after a
         // link has closed, exactly like any other unavailable direct link.
-        let (link_id, _routed, core) = node
-            .connect(destination, &signing_key)
-            .map_err(|_| LxmfNodeError::DirectLinkUnavailable)?;
+        let connected = if self.cbc_links_to.contains(&destination) {
+            node.connect_with_cipher(destination, &signing_key, None, leviculum_core::LinkCipher::Cbc)
+        } else {
+            node.connect(destination, &signing_key)
+        };
+        let (link_id, _routed, core) = connected.map_err(|_| LxmfNodeError::DirectLinkUnavailable)?;
         self.wanted_links.remove(&destination);
         self.pending_links.insert(destination, link_id);
         self.link_destinations.insert(link_id, destination);
