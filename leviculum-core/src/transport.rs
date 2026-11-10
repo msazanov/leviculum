@@ -110,6 +110,10 @@ const PATH_ENTRIES_DUMP_INTERVAL_MS: u64 = 5 * 60 * 1000;
 /// The reasoning for the value is on `handle_announce`.
 const ANNOUNCE_SLOW_MS: u64 = 100;
 
+/// Minimum spacing of `poll()`'s whole-table path-metadata and announce-cache
+/// sweeps (`Transport::clean_path_states_paced`).
+pub(crate) const PATH_METADATA_SWEEP_INTERVAL_MS: u64 = 5_000;
+
 /// Draw ordinal of the announce-cap release delay
 /// (`Transport::cap_release_draw_ms`). The rebroadcast schedule uses
 /// `retries + 1` for its ordinals, a handful of small numbers; this one sits
@@ -3607,6 +3611,10 @@ pub struct Transport<C: Clock, S: Storage> {
     /// Reset to 0 on construction; not a persistent field.
     last_discovery_retry_ms: u64,
 
+    /// When `poll()` last ran the full path-metadata / announce-cache sweep
+    /// (see [`PATH_METADATA_SWEEP_INTERVAL_MS`]). Not persistent.
+    last_path_metadata_sweep_ms: Option<u64>,
+
     /// Interfaces for test use only (not used in production sans-I/O path)
     #[cfg(test)]
     interfaces: Vec<Option<Box<dyn crate::traits::Interface + Send>>>,
@@ -3685,6 +3693,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             own_tunnel_ids: BTreeMap::new(),
             pending_actions: Vec::new(),
             last_discovery_retry_ms: 0,
+            last_path_metadata_sweep_ms: None,
             #[cfg(test)]
             interfaces: Vec::new(),
         }
@@ -5162,7 +5171,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.check_announce_rebroadcasts(now);
         self.drain_announce_queues(now);
         self.clean_link_table(now);
-        self.clean_path_states();
+        self.clean_path_states_paced(now);
         self.expire_pending_local_path_requests(now);
 
         // Codeberg #87: drive the ingress-limit burst state machine on the poll
@@ -13937,13 +13946,50 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
     }
 
+    /// `poll()`'s form of [`Self::clean_path_states`]: the cheap timed expiries
+    /// run on every call, the two whole-table sweeps (path metadata and the
+    /// announce cache, each a full `retain` over tables sized by the public
+    /// network) at most once per [`PATH_METADATA_SWEEP_INTERVAL_MS`].
+    ///
+    /// The driver wakes `poll()` at the nearest deadline clamped to 1..1000 ms,
+    /// so on a busy transport node it runs hundreds of times a second; doing
+    /// both sweeps on each call took about a quarter of a 1-CPU node in a
+    /// profile (field, 2026-11-10). The reference runs them on its 300 s jobs
+    /// cadence (`Transport.py:1170-1176`); a few seconds of extra linger for
+    /// metadata of a destination whose path is already gone changes no answer.
+    fn clean_path_states_paced(&mut self, now: u64) {
+        let due = self
+            .last_path_metadata_sweep_ms
+            .is_none_or(|last| now.saturating_sub(last) >= PATH_METADATA_SWEEP_INTERVAL_MS);
+        if due {
+            self.last_path_metadata_sweep_ms = Some(now);
+            self.clean_path_states();
+        } else {
+            self.expire_path_state_timers(now);
+        }
+    }
+
     /// Remove path_states and announce_rate entries for destinations no longer in path_table.
     /// Matches Python Transport.py:666-670, 813-814.
     fn clean_path_states(&mut self) {
         self.storage.clean_stale_path_metadata();
-
-        // Expire local client dests not refreshed within expiry window.
         let now = self.clock.now_ms();
+        self.expire_path_state_timers(now);
+
+        // Preserve announce_cache entries for both daemon-owned destinations
+        // AND surviving local client destinations (Block C: reconnect
+        // needs cached bytes to respond to path requests during client downtime).
+        let mut preserved = self.local_destinations.clone();
+        for hash in self.storage.local_client_known_dest_hashes() {
+            preserved.insert(hash);
+        }
+        self.storage.clean_announce_cache(&preserved, now);
+    }
+
+    /// The timed expiries of [`Self::clean_path_states`]: each removes only
+    /// records whose own deadline passed.
+    fn expire_path_state_timers(&mut self, now: u64) {
+        // Expire local client dests not refreshed within expiry window.
         self.storage
             .expire_local_client_known_dests(now, LOCAL_CLIENT_DEST_EXPIRY_MS);
 
@@ -13962,15 +14008,6 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // map's only removal path.
         self.storage
             .expire_path_requests(now, PATH_REQUEST_MIN_INTERVAL_MS);
-
-        // Preserve announce_cache entries for both daemon-owned destinations
-        // AND surviving local client destinations (Block C: reconnect
-        // needs cached bytes to respond to path requests during client downtime).
-        let mut preserved = self.local_destinations.clone();
-        for hash in self.storage.local_client_known_dest_hashes() {
-            preserved.insert(hash);
-        }
-        self.storage.clean_announce_cache(&preserved, now);
     }
 
     /// Re-send path requests for pending discovery entries.
@@ -36379,6 +36416,32 @@ mod blackhole_enforcement_tests {
     /// destination_data retain pins a known destination so clean_announce_cache
     /// keeps it even with no path and not local; unretain lifts the pin so it is
     /// evicted normally.
+    #[test]
+    fn poll_paces_the_announce_cache_sweep() {
+        let mut t = make_transport();
+        let identity = Identity::generate(&mut OsRng);
+        let (raw, dest_hash) = make_announce_for(&identity, "paced_target", 0x01);
+        feed_announce(&mut t, &raw);
+        t.poll(); // first sweep runs at once and starts the interval
+        assert!(t.storage.get_announce_cache(&dest_hash).is_some());
+
+        // Path gone: the cached announce is now sweepable, but only on the
+        // next due sweep, not on every poll.
+        t.storage.remove_path(&dest_hash);
+        t.clock.advance(PATH_METADATA_SWEEP_INTERVAL_MS - 1);
+        t.poll();
+        assert!(
+            t.storage.get_announce_cache(&dest_hash).is_some(),
+            "within the interval poll() skips the whole-table sweep"
+        );
+        t.clock.advance(1);
+        t.poll();
+        assert!(
+            t.storage.get_announce_cache(&dest_hash).is_none(),
+            "a due sweep removes the pathless entry"
+        );
+    }
+
     #[test]
     fn retain_destination_survives_cache_cleaning() {
         let mut t = make_transport();

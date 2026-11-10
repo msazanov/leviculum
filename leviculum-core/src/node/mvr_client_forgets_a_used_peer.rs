@@ -264,7 +264,12 @@ fn a_used_peer_is_swept_once_the_linger_runs_out() {
         still_known(&mut client, &peer_hash),
         "at the linger boundary the entry is still kept"
     );
-    tick_at(&mut client, used_at + KNOWN_DEST_USED_LINGER_MS + 1);
+    // `poll()` paces the whole-table sweep (`PATH_METADATA_SWEEP_INTERVAL_MS`),
+    // so "past the linger" is observed at the next due sweep, not 1 ms later.
+    tick_at(
+        &mut client,
+        used_at + KNOWN_DEST_USED_LINGER_MS + crate::transport::PATH_METADATA_SWEEP_INTERVAL_MS,
+    );
     assert!(
         !still_known(&mut client, &peer_hash),
         "past the linger a used, pathless, unpinned entry is swept"
