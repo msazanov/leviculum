@@ -4378,9 +4378,9 @@ fn prepare_cheap(iface: InterfaceId, data: Vec<u8>) -> PreparedRx {
 /// packet exactly as it would have — the memo can only skip REDUNDANT work.
 fn precompute_announce(iface: InterfaceId, data: Vec<u8>) -> PreparedRx {
     let packet_hash = leviculum_core::packet::packet_hash(&data);
-    let announce_verified = leviculum_core::packet::Packet::unpack(&data)
-        .map(|p| leviculum_core::verify_announce_packet(&p))
-        .unwrap_or(false);
+    let announce_verified = ext::seen_verified_announce(&packet_hash)
+        || ext::remember_if_verified(packet_hash, leviculum_core::packet::Packet::unpack(&data)
+            .map(|p| leviculum_core::verify_announce_packet(&p)).unwrap_or(false));
     PreparedRx {
         iface,
         peer: None,

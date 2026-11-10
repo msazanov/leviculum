@@ -249,3 +249,84 @@ mod rx_class_tests {
         assert!(matches!(classify_rx(&single), RxClass::SingleDest(_)));
     }
 }
+
+/// Announce packet hashes whose Ed25519 signature already verified, bounded FIFO.
+///
+/// A transport node hears every announce once per neighbour that rebroadcasts it, and each copy was
+/// verified again off-lock (`precompute_announce`); on a 2-CPU VM without AVX2 that was a quarter of the
+/// daemon's samples (field profile, 2026-11-10). The packet hash covers everything the verifier reads
+/// (lower flag nibble, destination hash, context, the whole announce body including key and signature;
+/// only hops and the HEADER_2 transport id are excluded), so equal hashes mean equal verifier input and
+/// an equal verdict. Only successes are remembered: a failed copy is re-verified by the core as before.
+pub(super) struct VerifiedAnnounces {
+    seen: std::collections::HashSet<[u8; 32]>,
+    order: std::collections::VecDeque<[u8; 32]>,
+    capacity: usize,
+}
+
+/// Memo ceiling: 32 B per entry twice over, about 1 MiB at this size.
+pub(super) const VERIFIED_ANNOUNCES_CAPACITY: usize = 16 * 1024;
+
+impl VerifiedAnnounces {
+    pub(super) fn new(capacity: usize) -> Self {
+        Self { seen: Default::default(), order: Default::default(), capacity: capacity.max(1) }
+    }
+    pub(super) fn contains(&self, hash: &[u8; 32]) -> bool {
+        self.seen.contains(hash)
+    }
+    pub(super) fn insert(&mut self, hash: [u8; 32]) {
+        if !self.seen.insert(hash) {
+            return;
+        }
+        self.order.push_back(hash);
+        while self.order.len() > self.capacity {
+            if let Some(old) = self.order.pop_front() {
+                self.seen.remove(&old);
+            }
+        }
+    }
+}
+
+static VERIFIED_ANNOUNCES: std::sync::LazyLock<std::sync::Mutex<VerifiedAnnounces>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(VerifiedAnnounces::new(VERIFIED_ANNOUNCES_CAPACITY)));
+
+/// Whether an announce with this packet hash already verified in this process.
+pub(super) fn seen_verified_announce(hash: &[u8; 32]) -> bool {
+    VERIFIED_ANNOUNCES.lock().unwrap_or_else(|e| e.into_inner()).contains(hash)
+}
+
+/// Pass `verified` through, remembering the hash when it is true.
+pub(super) fn remember_if_verified(hash: [u8; 32], verified: bool) -> bool {
+    if verified {
+        VERIFIED_ANNOUNCES.lock().unwrap_or_else(|e| e.into_inner()).insert(hash);
+    }
+    verified
+}
+
+#[cfg(test)]
+mod verified_announce_tests {
+    use super::*;
+
+    #[test]
+    fn memo_is_bounded_fifo_and_keeps_only_what_was_inserted() {
+        let mut m = VerifiedAnnounces::new(2);
+        m.insert([1; 32]);
+        m.insert([2; 32]);
+        m.insert([1; 32]); // re-insert does not grow or reorder
+        assert!(m.contains(&[1; 32]) && m.contains(&[2; 32]));
+        m.insert([3; 32]);
+        assert!(!m.contains(&[1; 32]), "oldest dropped at the ceiling");
+        assert!(m.contains(&[2; 32]) && m.contains(&[3; 32]));
+        assert_eq!(m.order.len(), 2);
+    }
+
+    #[test]
+    fn only_successes_are_remembered() {
+        let ok = [0xA5; 32];
+        let bad = [0x5A; 32];
+        assert!(!remember_if_verified(bad, false));
+        assert!(!seen_verified_announce(&bad), "a failed verify must be re-checked next time");
+        assert!(remember_if_verified(ok, true));
+        assert!(seen_verified_announce(&ok));
+    }
+}
