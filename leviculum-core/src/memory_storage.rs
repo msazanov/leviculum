@@ -1024,7 +1024,7 @@ impl Storage for MemoryStorage {
     }
 
     fn expire_paths(&mut self, now_ms: u64) -> Vec<[u8; TRUNCATED_HASHBYTES]> {
-        let mut expired = Vec::new();
+        if self.earliest_path_expiry().is_some_and(|m| m >= now_ms) { return Vec::new(); } let mut expired = Vec::new(); // nothing due: skip the whole-table retain poll() ran every call
         let mut min_exp: Option<u64> = None;
         self.path_table.retain(|hash, entry| {
             if entry.expires_ms < now_ms {
