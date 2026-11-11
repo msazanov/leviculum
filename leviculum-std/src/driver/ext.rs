@@ -295,6 +295,17 @@ pub(super) fn seen_verified_announce(hash: &[u8; 32]) -> bool {
     VERIFIED_ANNOUNCES.lock().unwrap_or_else(|e| e.into_inner()).contains(hash)
 }
 
+/// Memo key for an announce: the packet hash bound to the header's context flag.
+///
+/// The packet hash masks the upper flag nibble, but the announce parser reads the context flag from it to decide
+/// whether a ratchet precedes the signature. Keyed by the packet hash alone, a relay could flip that bit on an
+/// already-verified announce and have the differently-parsed copy reported as verified without a signature check.
+/// Everything else the verifier reads (destination hash, context byte, payload, lower flag nibble) is in the hash.
+pub(super) fn announce_memo_key(raw: &[u8], packet_hash: &[u8; 32]) -> [u8; 32] {
+    let context_flag = raw.first().map_or(0, |f| f & 0x20);
+    leviculum_core::crypto::full_hash_parts(&[packet_hash, &[context_flag]])
+}
+
 /// Pass `verified` through, remembering the hash when it is true.
 pub(super) fn remember_if_verified(hash: [u8; 32], verified: bool) -> bool {
     if verified {
@@ -318,6 +329,22 @@ mod verified_announce_tests {
         assert!(!m.contains(&[1; 32]), "oldest dropped at the ceiling");
         assert!(m.contains(&[2; 32]) && m.contains(&[3; 32]));
         assert_eq!(m.order.len(), 2);
+    }
+
+    #[test]
+    fn memo_key_changes_with_the_context_flag_but_not_with_hops_or_header_type() {
+        let mut raw = vec![0x01u8, 0x00];
+        raw.extend_from_slice(&[7u8; 60]);
+        let h = leviculum_core::packet::packet_hash(&raw);
+        let base = announce_memo_key(&raw, &h);
+        let mut flipped = raw.clone();
+        flipped[0] ^= 0x20; // context flag: ratchet present / absent
+        let hf = leviculum_core::packet::packet_hash(&flipped);
+        assert_eq!(h, hf, "the packet hash alone does not see the context flag");
+        assert_ne!(base, announce_memo_key(&flipped, &hf), "the memo key must");
+        let mut hops = raw.clone();
+        hops[1] = 5;
+        assert_eq!(base, announce_memo_key(&hops, &leviculum_core::packet::packet_hash(&hops)), "hops do not matter");
     }
 
     #[test]
